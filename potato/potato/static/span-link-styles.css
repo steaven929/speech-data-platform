@@ -1,0 +1,683 @@
+/**
+ * Span Link Styles
+ *
+ * Styles for the span linking/relationship annotation feature.
+ */
+
+/* Container */
+.span-link-container {
+    background-color: var(--card-bg, #fff);
+    border: 1px solid var(--border-color, #e5e7eb);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.span-link-container.link-mode-active {
+    border-color: var(--primary-color, #6E56CF);
+    box-shadow: 0 0 0 2px rgba(110, 86, 207, 0.2);
+}
+
+/* Header */
+.span-link-header {
+    margin-bottom: 16px;
+}
+
+.span-link-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-color, #1f2937);
+}
+
+/* Section Labels */
+.span-link-section-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted, #6b7280);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Link Type Selector */
+.span-link-type-selector {
+    margin-bottom: 16px;
+}
+
+.span-link-types {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.span-link-type {
+    display: flex;
+    align-items: center;
+}
+
+.span-link-type-radio {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.span-link-type-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-color, #e5e7eb);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s ease;
+    background-color: var(--card-bg, #fff);
+}
+
+.span-link-type-label:hover {
+    border-color: var(--link-color, #dc2626);
+    background-color: color-mix(in srgb, var(--link-color, #dc2626) 5%, transparent);
+}
+
+.span-link-type-radio:checked + .span-link-type-label {
+    border-color: var(--link-color, #dc2626);
+    background-color: color-mix(in srgb, var(--link-color, #dc2626) 10%, transparent);
+    font-weight: 500;
+}
+
+.link-color-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.link-type-name {
+    color: var(--text-color, #1f2937);
+}
+
+.link-direction-icon {
+    color: var(--text-muted, #6b7280);
+    font-size: 12px;
+}
+
+/* Selected Spans Display */
+.span-link-selection {
+    margin-bottom: 16px;
+    padding: 12px;
+    background-color: var(--bg-secondary, #f9fafb);
+    border-radius: 6px;
+    min-height: 60px;
+}
+
+.span-link-selected-spans {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.no-selection-message,
+.no-links-message {
+    color: var(--text-muted, #6b7280);
+    font-size: 13px;
+    font-style: italic;
+    margin: 0;
+}
+
+.selected-span-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background-color: var(--card-bg, #fff);
+    border: 1px solid var(--border-color, #e5e7eb);
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.selected-span-label {
+    font-weight: 600;
+    color: var(--primary-color, #6E56CF);
+}
+
+.selected-span-text {
+    color: var(--text-color, #1f2937);
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.span-role {
+    color: var(--text-muted, #6b7280);
+    font-size: 11px;
+    font-style: italic;
+}
+
+.remove-span-btn {
+    background: none;
+    border: none;
+    padding: 0 4px;
+    color: var(--text-muted, #6b7280);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.remove-span-btn:hover {
+    color: var(--danger-color, #dc2626);
+}
+
+/* Constraint Error */
+.constraint-error {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background-color: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 4px;
+    color: #dc2626;
+    font-size: 12px;
+}
+
+/* Action Buttons */
+.span-link-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.span-link-create-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background-color: var(--primary-color, #6E56CF);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.span-link-create-btn:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--primary-color, #6E56CF) 85%, black);
+}
+
+/* Clearly-disabled until every required slot is filled (grey, not faded purple,
+ * so the enable transition reads as a real state change). */
+.span-link-create-btn:disabled {
+    background-color: var(--bg-secondary, #f3f4f6);
+    color: var(--text-muted, #9ca3af);
+    cursor: not-allowed;
+    box-shadow: inset 0 0 0 1px var(--border-color, #e5e7eb);
+}
+.span-link-create-btn:not(:disabled) {
+    box-shadow: 0 1px 2px rgba(110, 86, 207, 0.25);
+}
+
+.span-link-clear-btn {
+    padding: 8px 16px;
+    background-color: transparent;
+    color: var(--text-muted, #6b7280);
+    border: 1px solid var(--border-color, #e5e7eb);
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.span-link-clear-btn:hover {
+    border-color: var(--text-muted, #6b7280);
+    color: var(--text-color, #1f2937);
+}
+
+/* Existing Links List */
+.span-link-existing {
+    margin-bottom: 16px;
+}
+
+.span-link-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.link-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background-color: var(--card-bg, #fff);
+    border: 1px solid var(--border-color, #e5e7eb);
+    border-left: 3px solid var(--link-color, #dc2626);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.link-item:hover {
+    background-color: color-mix(in srgb, var(--link-color, #dc2626) 6%, #fff);
+}
+.link-item:focus-visible {
+    outline: 2px solid var(--link-color, #dc2626);
+    outline-offset: 1px;
+}
+
+/* Number badge — matches the numbered chip pinned to the span in the transcript. */
+.link-num-badge {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 1.5px #fff, 0 0 0 2.5px color-mix(in srgb, var(--link-color, #dc2626) 40%, transparent);
+}
+
+.link-info {
+    display: flex;
+    align-items: center;
+    gap: 6px 8px;
+    flex-wrap: wrap;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.link-type-badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    color: white;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.link-arrow-in-badge { opacity: 0.85; font-weight: 700; }
+
+.link-spans {
+    font-size: 13px;
+    color: var(--text-color, #1f2937);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+/* Each linked span rendered as a labelled chip with its snippet. */
+.link-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--muted, #f4f4f5);
+    border: 1px solid var(--border-color, #e5e7eb);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: capitalize;
+    max-width: 100%;
+}
+.link-chip.is-source { border-color: color-mix(in srgb, var(--link-color, #dc2626) 55%, var(--border-color, #e5e7eb)); }
+.link-chip.is-target { background: color-mix(in srgb, var(--link-color, #dc2626) 8%, #fff); }
+.link-chip-text {
+    font-weight: 400;
+    color: var(--text-muted, #6b7280);
+    font-style: italic;
+    text-transform: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
+}
+.link-arrow {
+    color: var(--text-muted, #6b7280);
+    font-weight: 700;
+    margin: 0 1px;
+}
+.link-direction {
+    color: var(--text-muted, #6b7280);
+    margin: 0 4px;
+}
+
+/* Pulse a linked span when its list entry is clicked. */
+@keyframes span-link-flash-kf {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    30%, 70% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--link-color, #f59e0b) 70%, transparent); }
+}
+.span-highlight-segment.span-link-flash {
+    animation: span-link-flash-kf 1.4s ease;
+    border-radius: 3px;
+}
+.span-link-simple-arcs.span-link-arcs-emphasis path { stroke-width: 3.5 !important; opacity: 1 !important; }
+.span-link-simple-arcs .span-link-badge { transition: transform 0.12s ease; }
+
+.delete-link-btn {
+    background: none;
+    border: none;
+    padding: 4px;
+    color: var(--text-muted, #6b7280);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+}
+
+.delete-link-btn:hover {
+    color: var(--danger-color, #dc2626);
+    background-color: #fef2f2;
+}
+
+/* Visual Toggle */
+.span-link-visual-toggle {
+    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color, #e5e7eb);
+}
+
+.span-link-visual-toggle label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-muted, #6b7280);
+    cursor: pointer;
+}
+
+.span-link-visual-toggle input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+/* Link Mode Instructions */
+.link-mode-instruction {
+    color: var(--primary-color, #6E56CF);
+    font-size: 13px;
+    font-weight: 500;
+    margin: 0;
+    padding: 8px;
+    background-color: rgba(110, 86, 207, 0.1);
+    border-radius: 4px;
+    border-left: 3px solid var(--primary-color, #6E56CF);
+}
+
+.link-mode-instruction strong {
+    color: var(--primary-color, #6E56CF);
+}
+
+.link-mode-instruction kbd {
+    display: inline-block;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-family: system-ui, -apple-system, monospace;
+    background-color: white;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    box-shadow: 0 1px 0 #bbb;
+}
+
+/* Disable text selection when in link mode to prevent span annotation conflicts */
+body.span-link-mode-active #instance-text {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+/* Span Overlay States for Link Selection */
+/* Support all span overlay class variations */
+.span-overlay-pure.link-selectable,
+.span-overlay.link-selectable,
+.span-overlay-ai.link-selectable,
+.span-highlight.link-selectable {
+    cursor: pointer !important;
+    pointer-events: auto !important;
+    transition: all 0.15s ease;
+}
+
+/* Make the highlight segments inside overlays also clickable */
+.span-overlay-pure.link-selectable .span-highlight-segment,
+.span-overlay.link-selectable .span-highlight-segment {
+    cursor: pointer !important;
+    pointer-events: auto !important;
+}
+
+/* Use the current link type color for hover outline */
+.span-overlay-pure.link-selectable:hover,
+.span-overlay.link-selectable:hover,
+.span-overlay-ai.link-selectable:hover,
+.span-highlight.link-selectable:hover,
+.span-overlay-pure.link-selectable:hover .span-highlight-segment,
+.span-overlay.link-selectable:hover .span-highlight-segment {
+    outline: 2px dashed var(--current-link-color, #6E56CF);
+    outline-offset: 2px;
+}
+
+/* Use the current link type color for selected outline */
+.span-overlay-pure.link-selected,
+.span-overlay.link-selected,
+.span-overlay-ai.link-selected,
+.span-highlight.link-selected,
+.span-overlay-pure.link-selected .span-highlight-segment,
+.span-overlay.link-selected .span-highlight-segment {
+    outline: 3px solid var(--current-link-color, #6E56CF) !important;
+    outline-offset: 2px;
+    box-shadow: 0 0 12px color-mix(in srgb, var(--current-link-color, #6E56CF) 40%, transparent);
+}
+
+/* Arc Visualization */
+.span-link-arcs-container {
+    pointer-events: none;
+}
+
+.span-link-arc {
+    transition: stroke-width 0.15s ease;
+}
+
+.span-link-arc:hover {
+    stroke-width: 3;
+}
+
+.span-link-node {
+    transition: r 0.15s ease;
+}
+
+/* Arc Labels */
+.span-link-label {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    text-shadow: 0 0 2px white, 0 0 2px white, 0 0 2px white;
+}
+
+.span-link-label-bg {
+    opacity: 0.9;
+}
+
+/* Dependency Tree Specific Styles */
+.span-link-container[data-arc-position="above"] .span-link-arcs-container {
+    z-index: 10;
+}
+
+/* Arc spacer - dedicated area above text for arc visualization */
+.span-link-arc-spacer {
+    position: relative;
+    width: 100%;
+    background: linear-gradient(to bottom, rgba(248, 250, 252, 0.5), transparent);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+    margin-bottom: 8px;
+}
+
+/* Text wrapper containing the annotatable content */
+.span-link-text-wrapper {
+    position: relative;
+}
+
+/* Single-line mode for dependency arcs (Option A) */
+.dependency-single-line-mode {
+    white-space: nowrap !important;
+    overflow-x: auto !important;
+    overflow-y: visible !important;  /* Allow arcs to extend above text */
+    scrollbar-width: thin;
+    scrollbar-color: #888 #f1f1f1;
+}
+
+.dependency-single-line-mode::-webkit-scrollbar {
+    height: 10px;
+}
+
+.dependency-single-line-mode::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 5px;
+}
+
+.dependency-single-line-mode::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 5px;
+}
+
+.dependency-single-line-mode::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Scroll indicator shadows */
+.dependency-single-line-mode {
+    background:
+        linear-gradient(to right, white 30%, transparent),
+        linear-gradient(to right, transparent, white 70%) 100% 0,
+        linear-gradient(to right, rgba(0,0,0,0.1), transparent 20px),
+        linear-gradient(to left, rgba(0,0,0,0.1), transparent 20px) 100% 0;
+    background-repeat: no-repeat;
+    background-size: 40px 100%, 40px 100%, 20px 100%, 20px 100%;
+    background-attachment: local, local, scroll, scroll;
+}
+
+/* Potato is a light-only UI. A prefers-color-scheme: dark block here used to
+ * flip ONLY this panel to a dark palette on dark-OS machines, so the link panel
+ * looked dark and unreadable while the rest of the interface stayed light. The
+ * panel now inherits the same light theme tokens as everything else. */
+
+/* The link panel is content-heavy (link types, selected spans, existing links,
+ * options). The annotation form area lays schemes out two-up (flex-wrap in
+ * .annotation_schema, or a grid), which crams the panel into a half-width strip
+ * — give it the full row in either layout so it reads comfortably. */
+.span-link-container.annotation-form {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+}
+.annotation-forms-layout .annotation-form[data-annotation-type="span_link"],
+.annotation-forms-grid .annotation-form[data-annotation-type="span_link"] {
+    grid-column: 1 / -1;
+}
+
+/* ---- Guided link builder (slots + step guidance) --------------------- */
+.span-link-guide {
+    font-size: 0.86em;
+    line-height: 1.5;
+    color: var(--text-color, #374151);
+    margin: 0;
+}
+.span-link-guide-sub {
+    margin-top: 8px;
+    font-size: 0.82em;
+    color: var(--text-muted, #6b7280);
+}
+.span-link-step {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin: 0 5px 0 0;
+    border-radius: 50%;
+    background: var(--primary-color, #6E56CF);
+    color: #fff;
+    font-size: 0.72em;
+    font-weight: 700;
+    vertical-align: 1px;
+}
+.span-link-guide .span-link-step:not(:first-child) { margin-left: 6px; }
+
+.span-link-slots {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.span-link-slot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color, #e5e7eb);
+    border-radius: 8px;
+    background: var(--card-bg, #fff);
+}
+.span-link-slot.is-empty {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--primary-color, #6E56CF) 40%, var(--border-color, #e5e7eb));
+    background: color-mix(in srgb, var(--primary-color, #6E56CF) 4%, transparent);
+}
+.span-link-slot.is-filled {
+    border-color: color-mix(in srgb, var(--primary-color, #6E56CF) 55%, var(--border-color, #e5e7eb));
+}
+.span-link-slot-head {
+    flex-shrink: 0;
+    min-width: 38px;
+    font-size: 0.7em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted, #6b7280);
+}
+.span-link-slot-hint { font-size: 0.85em; color: var(--text-muted, #6b7280); }
+.span-link-slot-opt { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-muted, #6b7280); }
+.span-link-slot-type {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary-color, #6E56CF) 12%, var(--card-bg, #fff));
+    color: var(--primary-color, #6E56CF);
+    font-weight: 600;
+    font-size: 0.94em;
+}
+.span-link-slot-fill { display: inline-flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.span-link-slot-fill .selected-span-text {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--text-color, #374151);
+}
+.span-link-slot .remove-span-btn { margin-left: auto; }
+
+/* Responsive */
+@media (max-width: 640px) {
+    .span-link-container {
+        padding: 12px;
+    }
+
+    .span-link-types {
+        flex-direction: column;
+    }
+
+    .span-link-type-label {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .span-link-actions {
+        flex-direction: column;
+    }
+
+    .span-link-create-btn,
+    .span-link-clear-btn {
+        width: 100%;
+        justify-content: center;
+    }
+}

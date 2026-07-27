@@ -1,0 +1,422 @@
+"""
+Tests for schema registry integration.
+
+These tests verify that:
+1. The config validator sources its list of valid annotation types from the
+   schema registry (single source of truth -- no drift between a hardcoded
+   list in config_module and the registry).
+2. The front_end module uses the schema registry (not a hardcoded dict).
+3. Each registered schema type can generate valid HTML.
+"""
+
+import pytest
+
+
+class TestSchemaRegistryCompleteness:
+    """Guard the single-source-of-truth invariant for annotation types."""
+
+    def test_valid_types_sourced_from_registry(self):
+        """``validate_single_annotation_scheme`` must pull ``valid_types`` from
+        the schema registry. If someone regresses back to a hardcoded list, the
+        registry and the validator can drift -- exactly the bug this test
+        prevents. Replaces two earlier AST-parsing tests that broke when
+        ``valid_types`` was (correctly) refactored from a literal list into
+        ``schema_registry.get_supported_types()``.
+        """
+        import inspect
+        from potato.server_utils import config_module
+
+        src = inspect.getsource(config_module.validate_single_annotation_scheme)
+        assert "schema_registry.get_supported_types()" in src, (
+            "validate_single_annotation_scheme no longer sources valid_types "
+            "from schema_registry.get_supported_types(); the registry and the "
+            "config validator may have drifted out of sync."
+        )
+
+
+class TestSchemaGeneration:
+    """Test that each schema type can generate HTML."""
+
+    def test_radio_generates_html(self):
+        """Radio annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "radio",
+            "name": "test_radio",
+            "description": "Test radio",
+            "labels": [
+                {"name": "Option A", "key_value": "1"},
+                {"name": "Option B", "key_value": "2"}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+        assert "test_radio" in html or "Option A" in html
+
+    def test_multiselect_generates_html(self):
+        """Multiselect annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "multiselect",
+            "name": "test_multiselect",
+            "description": "Test multiselect",
+            "labels": ["Option A", "Option B"]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_likert_generates_html(self):
+        """Likert annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "likert",
+            "name": "test_likert",
+            "description": "Test likert",
+            "size": 5,
+            "min_label": "Bad",
+            "max_label": "Good"
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_text_generates_html(self):
+        """Text annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "text",
+            "name": "test_text",
+            "description": "Test text input"
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_slider_generates_html(self):
+        """Slider annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "slider",
+            "name": "test_slider",
+            "description": "Test slider",
+            "min": 0,
+            "max": 100
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_span_generates_html(self):
+        """Span annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "span",
+            "name": "test_span",
+            "description": "Test span",
+            "labels": ["Person", "Location", "Organization"]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_audio_annotation_generates_html(self):
+        """Audio annotation type should generate valid HTML.
+
+        This was a bug: front_end.py had a hardcoded dict that didn't include
+        audio_annotation, so it would fail with 'unsupported annotation type'.
+        """
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "audio_annotation",
+            "name": "test_audio",
+            "description": "Test audio annotation",
+            "mode": "label",
+            "labels": [
+                {"name": "Speech", "color": "#4ECDC4"},
+                {"name": "Music", "color": "#FF6B6B"}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_image_annotation_generates_html(self):
+        """Image annotation type should generate valid HTML.
+
+        This was a bug: front_end.py had a hardcoded dict that didn't include
+        image_annotation, so it would fail with 'unsupported annotation type'.
+        """
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "image_annotation",
+            "name": "test_image",
+            "description": "Test image annotation",
+            "tools": ["bbox", "polygon"],
+            "labels": [
+                {"name": "Person", "color": "#FF6B6B"},
+                {"name": "Vehicle", "color": "#4ECDC4"}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_video_annotation_generates_html(self):
+        """Video annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "video_annotation",
+            "name": "test_video",
+            "description": "Test video annotation",
+            "mode": "segment",
+            "labels": [
+                {"name": "Intro", "color": "#4ECDC4"},
+                {"name": "Content", "color": "#FF6B6B"}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+
+        assert html is not None
+        assert len(html) > 0
+
+    def test_vas_generates_html(self):
+        """VAS annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "vas",
+            "name": "test_vas",
+            "description": "Test VAS",
+            "left_label": "Low",
+            "right_label": "High"
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+    def test_extractive_qa_generates_html(self):
+        """Extractive QA annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "extractive_qa",
+            "name": "test_eqa",
+            "description": "Test EQA",
+            "question_field": "question"
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+    def test_rubric_eval_generates_html(self):
+        """Rubric eval annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "rubric_eval",
+            "name": "test_rubric",
+            "description": "Test rubric",
+            "criteria": [
+                {"name": "quality", "description": "Overall quality"},
+                {"name": "accuracy", "description": "Factual accuracy"}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+    def test_text_edit_generates_html(self):
+        """Text edit annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "text_edit",
+            "name": "test_edit",
+            "description": "Test edit"
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+    def test_error_span_generates_html(self):
+        """Error span annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "error_span",
+            "name": "test_errors",
+            "description": "Test errors",
+            "error_types": [
+                {"name": "Accuracy", "subtypes": ["Omission"]},
+                {"name": "Fluency"}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+    def test_card_sort_generates_html(self):
+        """Card sort annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "card_sort",
+            "name": "test_sort",
+            "description": "Test sort",
+            "mode": "closed",
+            "groups": ["Group A", "Group B"]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+    def test_conjoint_generates_html(self):
+        """Conjoint annotation type should generate valid HTML."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "conjoint",
+            "name": "test_conjoint",
+            "description": "Test conjoint",
+            "attributes": [
+                {"name": "Speed", "levels": ["Fast", "Slow"]},
+                {"name": "Price", "levels": ["$10", "$50"]}
+            ]
+        }
+
+        html, keybindings = schema_registry.generate(scheme)
+        assert html is not None
+        assert len(html) > 0
+
+
+class TestSchemaRegistryErrors:
+    """Test error handling in schema registry."""
+
+    def test_unknown_type_raises_valueerror(self):
+        """Unknown annotation type should raise ValueError with helpful message."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "unknown_type",
+            "name": "test",
+            "description": "Test"
+        }
+
+        with pytest.raises(ValueError) as exc_info:
+            schema_registry.generate(scheme)
+
+        assert "unknown_type" in str(exc_info.value)
+        assert "Unsupported annotation type" in str(exc_info.value)
+
+    def test_missing_annotation_type_raises_valueerror(self):
+        """Missing annotation_type should raise ValueError."""
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "name": "test",
+            "description": "Test"
+        }
+
+        with pytest.raises(ValueError) as exc_info:
+            schema_registry.generate(scheme)
+
+        assert "annotation_type" in str(exc_info.value)
+
+
+class TestFrontEndIntegration:
+    """Test that front_end.py uses the schema registry."""
+
+    def test_generate_schematic_uses_registry(self):
+        """front_end.generate_schematic should use schema_registry.generate."""
+        from potato.server_utils.front_end import generate_schematic
+        from potato.server_utils.schemas.registry import schema_registry
+
+        scheme = {
+            "annotation_type": "radio",
+            "name": "test",
+            "description": "Test",
+            "labels": ["A", "B"]
+        }
+
+        # Both should produce the same result
+        front_end_result = generate_schematic(scheme)
+        registry_result = schema_registry.generate(scheme)
+
+        assert front_end_result[0] == registry_result[0], \
+            "front_end.generate_schematic should produce same HTML as schema_registry.generate"
+
+    def test_front_end_handles_audio_annotation(self):
+        """front_end.generate_schematic should handle audio_annotation type.
+
+        This was the bug: the hardcoded dict didn't include audio_annotation.
+        """
+        from potato.server_utils.front_end import generate_schematic
+
+        scheme = {
+            "annotation_type": "audio_annotation",
+            "name": "test",
+            "description": "Test",
+            "mode": "label",
+            "labels": [{"name": "Label1", "color": "#000"}]
+        }
+
+        # This should not raise an exception
+        html, keybindings = generate_schematic(scheme)
+        assert html is not None
+
+    def test_front_end_handles_image_annotation(self):
+        """front_end.generate_schematic should handle image_annotation type.
+
+        This was the bug: the hardcoded dict didn't include image_annotation.
+        """
+        from potato.server_utils.front_end import generate_schematic
+
+        scheme = {
+            "annotation_type": "image_annotation",
+            "name": "test",
+            "description": "Test",
+            "tools": ["bbox"],
+            "labels": [{"name": "Label1", "color": "#000"}]
+        }
+
+        # This should not raise an exception
+        html, keybindings = generate_schematic(scheme)
+        assert html is not None
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

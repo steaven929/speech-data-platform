@@ -1,0 +1,5 @@
+[console_scripts]
+potato = potato.flask_server:main
+
+[pytest11]
+potato_eval = potato.testing.pytest_plugin

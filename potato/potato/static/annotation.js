@@ -1,0 +1,5560 @@
+// annotation.js
+
+// Debug logging utility - respects the debug setting from server config
+function debugLog(...args) {
+    if (window.config && window.config.debug) {
+        console.log(...args);
+    }
+}
+
+/**
+ * Compatibility stub for registerAnnotation from base_template.html
+ * This function is called by onclick handlers in checkbox/radio schemas.
+ * In the v1 template, this sent annotations directly to the server.
+ * In the v2 template (annotation.js), we use change event listeners instead.
+ * This stub prevents JavaScript errors while the change event handler does the work.
+ */
+function registerAnnotation(element) {
+    debugLog('[COMPAT] registerAnnotation called for:', element?.id);
+    // The actual annotation saving is handled by the change event listener
+    // in setupInputEventListeners(). This stub just prevents the ReferenceError.
+}
+
+/**
+ * Compatibility stub for registerTextAnnotation from base_template.html
+ */
+function registerTextAnnotation(element) {
+    debugLog('[COMPAT] registerTextAnnotation called for:', element?.id);
+    // Actual saving is handled by the input event listener.
+}
+
+function debugWarn(...args) {
+    if (window.config && window.config.debug) {
+        console.warn(...args);
+    }
+}
+
+// Global state
+let currentInstance = null;
+let currentAnnotations = {};
+let userState = null;
+let isLoading = false;
+let textSaveTimer = null;
+let currentSpanAnnotations = [];
+let debugLastInstanceId = null;
+let debugOverlayCount = 0;
+
+// Validation state — errors only shown after first forward navigation attempt
+let hasAttemptedForwardValidation = false;
+
+// Stored event handler references for proper cleanup (prevents memory leaks)
+const boundEventHandlers = {
+    spanManagerMouseUp: null,
+    spanManagerKeyUp: null,
+    robustTextSelectionMouseUp: null,
+    robustTextSelectionKeyUp: null
+};
+
+let aiAssistantManger = new AIAssistantManager();
+
+/**
+ * Flush any pending debounced save synchronously using navigator.sendBeacon().
+ * Called from beforeunload and visibilitychange so annotations are not lost
+ * when the user refreshes or switches tabs before the 500ms debounce fires.
+ * sendBeacon is the W3C standard for fire-and-forget requests during page unload —
+ * regular fetch() is cancelled by browsers during unload.
+ */
+function flushPendingSave() {
+    if (!textSaveTimer || !currentInstance) return;
+    clearTimeout(textSaveTimer);
+    textSaveTimer = null;
+
+    syncAnnotationsFromDOM();
+
+    const labelAnnotations = {};
+    for (const [schema, labels] of Object.entries(currentAnnotations)) {
+        for (const [label, value] of Object.entries(labels)) {
+            labelAnnotations[`${schema}:${label}`] = value;
+        }
+    }
+
+    const payload = JSON.stringify({
+        instance_id: currentInstance.id,
+        annotations: labelAnnotations,
+        span_annotations: extractSpanAnnotationsFromDOM()
+    });
+
+    navigator.sendBeacon('/updateinstance',
+        new Blob([payload], {type: 'application/json'}));
+}
+
+window.addEventListener('beforeunload', flushPendingSave);
+document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') flushPendingSave();
+});
+
+// DEEP DEBUG: Enhanced tracking
+let deepDebugState = {
+    navigationCalls: 0,
+    instanceIdChanges: [],
+    overlayStates: [],
+    spanManagerCalls: [],
+    lastAction: null,
+    timestamp: new Date().toISOString()
+};
+
+/**
+ * FormLayoutManager - Manages annotation form grid layout
+ *
+ * Handles:
+ * - CSS grid configuration from layout config
+ * - Form grouping with collapsible sections
+ * - Explicit ordering of forms
+ * - Responsive breakpoint customization
+ */
+class FormLayoutManager {
+    constructor() {
+        this.config = null;
+        this.initialized = false;
+    }
+
+    /**
+     * Initialize the layout manager with configuration
+     * @param {Object} layoutConfig - Layout configuration from server
+     */
+    initialize(layoutConfig = {}) {
+        this.config = this.mergeDefaults(layoutConfig);
+        this.applyGridProperties();
+        this.wrapFormsInLayoutContainer();
+        this.setupGroups();
+        this.applyOrdering();
+        this.setupResponsiveBreakpoints();
+        this.initialized = true;
+        debugLog('[FormLayoutManager] Initialized with config:', this.config);
+    }
+
+    /**
+     * Merge user config with sensible defaults
+     */
+    mergeDefaults(config) {
+        return {
+            grid: {
+                columns: 2,
+                gap: '1rem',
+                row_gap: null,
+                align_items: 'start',
+                ...config?.grid
+            },
+            breakpoints: {
+                mobile: 480,
+                tablet: 768,
+                ...config?.breakpoints
+            },
+            styling: {
+                align_items: 'start',
+                content_align: 'left',
+                group_background_odd: '#fafafa',
+                group_background_even: '#f8f9fc',
+                group_padding: '0.5rem 0.75rem',
+                form_padding: '0.375rem 0.5rem',
+                ...config?.styling
+            },
+            groups: config?.groups || [],
+            order: config?.order || null
+        };
+    }
+
+    /**
+     * Apply grid and styling CSS custom properties to document root
+     */
+    applyGridProperties() {
+        const root = document.documentElement;
+
+        // Grid properties
+        root.style.setProperty('--layout-columns', this.config.grid.columns);
+        root.style.setProperty('--layout-gap', this.config.grid.gap);
+        root.style.setProperty('--layout-row-gap', this.config.grid.row_gap || this.config.grid.gap);
+
+        // Alignment (use styling.align_items if present, fallback to grid.align_items)
+        const alignItems = this.config.styling.align_items || this.config.grid.align_items || 'start';
+        root.style.setProperty('--layout-align', alignItems);
+
+        // Content alignment
+        root.style.setProperty('--layout-content-align', this.config.styling.content_align);
+
+        // Group background colors
+        root.style.setProperty('--group-bg-odd', this.config.styling.group_background_odd);
+        root.style.setProperty('--group-bg-even', this.config.styling.group_background_even);
+
+        // Padding
+        root.style.setProperty('--group-padding', this.config.styling.group_padding);
+        root.style.setProperty('--form-padding', this.config.styling.form_padding);
+    }
+
+    /**
+     * Wrap annotation forms in a layout container
+     */
+    wrapFormsInLayoutContainer() {
+        const container = document.getElementById('annotation-forms');
+        if (!container) return;
+
+        // Check if already wrapped
+        if (container.querySelector('.annotation-forms-layout')) {
+            debugLog('[FormLayoutManager] Layout container already exists');
+            return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'annotation-forms-layout';
+
+        // Get all annotation forms
+        const forms = container.querySelectorAll('.annotation-form');
+        if (forms.length === 0) {
+            debugLog('[FormLayoutManager] No annotation forms found');
+            return;
+        }
+
+        // Move forms into wrapper
+        forms.forEach(form => {
+            // Set default data-grid-columns if not present
+            if (!form.hasAttribute('data-grid-columns')) {
+                form.setAttribute('data-grid-columns', '1');
+            }
+            wrapper.appendChild(form);
+        });
+
+        // Insert wrapper at the beginning of the container (after any pairwise display)
+        const pairwiseDisplay = container.querySelector('.pairwise-items-display-container');
+        if (pairwiseDisplay) {
+            pairwiseDisplay.after(wrapper);
+        } else {
+            container.insertBefore(wrapper, container.firstChild);
+        }
+
+        debugLog('[FormLayoutManager] Wrapped', forms.length, 'forms in layout container');
+    }
+
+    /**
+     * Setup form groups with headers and collapsible behavior
+     */
+    setupGroups() {
+        if (!this.config.groups || this.config.groups.length === 0) return;
+
+        const container = document.querySelector('.annotation-forms-layout') ||
+                          document.querySelector('.annotation-forms-grid');
+        if (!container) return;
+
+        this.config.groups.forEach(groupConfig => {
+            const groupElement = this.createGroupElement(groupConfig, container);
+            if (groupElement) {
+                // Move specified schemas into the group
+                groupConfig.schemas.forEach(schemaName => {
+                    const form = container.querySelector(`[data-schema-name="${schemaName}"]`);
+                    if (form) {
+                        const content = groupElement.querySelector('.annotation-form-group-content');
+                        if (content) {
+                            content.appendChild(form);
+                        }
+                    }
+                });
+
+                // Insert the group into the container
+                container.appendChild(groupElement);
+            }
+        });
+
+        debugLog('[FormLayoutManager] Setup', this.config.groups.length, 'groups');
+    }
+
+    /**
+     * Create a group element with header and content container
+     */
+    createGroupElement(groupConfig, container) {
+        const group = document.createElement('div');
+        group.className = 'annotation-form-group';
+        group.id = `group-${groupConfig.id}`;
+
+        // Apply per-group custom background color if specified
+        if (groupConfig.background_color) {
+            group.style.setProperty('--group-bg', groupConfig.background_color);
+            group.style.backgroundColor = groupConfig.background_color;
+        }
+
+        if (groupConfig.collapsed_default) {
+            group.classList.add('collapsed');
+        }
+
+        let headerHtml = `
+            <div class="annotation-form-group-header">
+                <div>
+                    ${groupConfig.title ? `<h4 class="annotation-form-group-title">${this.escapeHtml(groupConfig.title)}</h4>` : ''}
+                    ${groupConfig.description ? `<p class="annotation-form-group-description">${this.escapeHtml(groupConfig.description)}</p>` : ''}
+                </div>
+        `;
+
+        if (groupConfig.collapsible) {
+            headerHtml += `
+                <button type="button" class="annotation-form-group-toggle" aria-label="Toggle group">
+                    <i class="fas fa-chevron-down"></i>
+                </button>
+            `;
+        }
+
+        headerHtml += '</div>';
+
+        group.innerHTML = headerHtml + '<div class="annotation-form-group-content"></div>';
+
+        // Setup toggle behavior
+        if (groupConfig.collapsible) {
+            const toggle = group.querySelector('.annotation-form-group-toggle');
+            toggle.addEventListener('click', () => {
+                group.classList.toggle('collapsed');
+            });
+        }
+
+        return group;
+    }
+
+    /**
+     * Apply explicit ordering to forms
+     */
+    applyOrdering() {
+        const container = document.querySelector('.annotation-forms-layout') ||
+                          document.querySelector('.annotation-forms-grid');
+        if (!container) return;
+
+        // Apply order from config.order array
+        if (this.config.order && Array.isArray(this.config.order)) {
+            this.config.order.forEach((schemaName, index) => {
+                const form = container.querySelector(`[data-schema-name="${schemaName}"]`);
+                if (form) {
+                    form.style.order = index;
+                }
+            });
+        }
+
+        // Also apply order from data-grid-order attributes
+        const formsWithOrder = container.querySelectorAll('[data-grid-order]');
+        formsWithOrder.forEach(form => {
+            const order = parseInt(form.getAttribute('data-grid-order'), 10);
+            if (!isNaN(order)) {
+                form.style.order = order;
+            }
+        });
+    }
+
+    /**
+     * Setup custom responsive breakpoints via media query injection
+     */
+    setupResponsiveBreakpoints() {
+        const mobile = this.config.breakpoints.mobile;
+        const tablet = this.config.breakpoints.tablet;
+
+        // Only inject custom breakpoints if they differ from defaults
+        if (mobile !== 480 || tablet !== 768) {
+            const styleId = 'layout-breakpoints-custom';
+            let styleEl = document.getElementById(styleId);
+            if (!styleEl) {
+                styleEl = document.createElement('style');
+                styleEl.id = styleId;
+                document.head.appendChild(styleEl);
+            }
+
+            styleEl.textContent = `
+                @media (max-width: ${mobile}px) {
+                    .annotation-forms-layout,
+                    .annotation-forms-grid {
+                        --layout-columns: 1 !important;
+                    }
+                    .annotation-forms-layout .annotation-form[data-grid-columns],
+                    .annotation-forms-grid .annotation-form[data-grid-columns] {
+                        grid-column: span 1 !important;
+                    }
+                }
+                @media (min-width: ${mobile + 1}px) and (max-width: ${tablet}px) {
+                    .annotation-forms-layout .annotation-form[data-grid-columns="3"],
+                    .annotation-forms-layout .annotation-form[data-grid-columns="4"],
+                    .annotation-forms-layout .annotation-form[data-grid-columns="5"],
+                    .annotation-forms-layout .annotation-form[data-grid-columns="6"],
+                    .annotation-forms-grid .annotation-form[data-grid-columns="3"],
+                    .annotation-forms-grid .annotation-form[data-grid-columns="4"],
+                    .annotation-forms-grid .annotation-form[data-grid-columns="5"],
+                    .annotation-forms-grid .annotation-form[data-grid-columns="6"] {
+                        grid-column: span 2;
+                    }
+                }
+            `;
+        }
+    }
+
+    /**
+     * Helper to escape HTML
+     */
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+}
+
+// Global FormLayoutManager instance
+window.formLayoutManager = new FormLayoutManager();
+
+/**
+ * Deep debug logging for navigation events - only logs when debug mode is enabled
+ */
+function logDeepDebug(action, extraData = {}) {
+    // Skip all debug logging when not in debug mode
+    if (!window.config || !window.config.debug) {
+        return;
+    }
+
+    const state = {
+        timestamp: new Date().toISOString(),
+        action: action,
+        currentInstanceId: currentInstance?.id,
+        debugLastInstanceId: debugLastInstanceId,
+        isLoading: isLoading,
+        overlayCount: getCurrentOverlayCount(),
+        spanManagerExists: !!window.spanManager,
+        spanManagerInitialized: window.spanManager?.isInitialized,
+        ...extraData
+    };
+
+    debugLog(`[DEEP DEBUG NAV] ${action}:`, state);
+    deepDebugState.lastAction = action;
+    deepDebugState.timestamp = new Date().toISOString();
+
+    // Track instance ID changes
+    if (extraData.newInstanceId || extraData.currentInstanceId) {
+        deepDebugState.instanceIdChanges.push({
+            timestamp: new Date().toISOString(),
+            from: debugLastInstanceId,
+            to: extraData.newInstanceId || extraData.currentInstanceId,
+            action: action
+        });
+    }
+
+    // Track overlay states
+    deepDebugState.overlayStates.push({
+        timestamp: new Date().toISOString(),
+        action: action,
+        overlayCount: getCurrentOverlayCount(),
+        instanceId: currentInstance?.id
+    });
+
+    // Keep only last 20 entries to avoid memory bloat
+    if (deepDebugState.instanceIdChanges.length > 20) {
+        deepDebugState.instanceIdChanges = deepDebugState.instanceIdChanges.slice(-20);
+    }
+    if (deepDebugState.overlayStates.length > 20) {
+        deepDebugState.overlayStates = deepDebugState.overlayStates.slice(-20);
+    }
+}
+
+/**
+ * Get current overlay count for debugging
+ */
+function getCurrentOverlayCount() {
+    const spanOverlays = document.getElementById('span-overlays');
+    return spanOverlays ? spanOverlays.children.length : 0;
+}
+
+// Initialize the application
+document.addEventListener('DOMContentLoaded', function () {
+    // Skip annotation initialization on non-annotation pages (consent, instructions, etc.)
+    // but still show the page content, enable navigation, and wire up input persistence
+    if (window.config && !window.config.is_annotation_page) {
+        // Create a synthetic instance so saveAnnotations() can send updates.
+        // The backend routes non-annotation saves to phase_to_page_to_label_to_value.
+        currentInstance = { id: '__phase_page__', text: '', displayed_text: '' };
+        window.currentInstance = currentInstance;
+        currentAnnotations = {};
+
+        setLoading(false);
+        setupInputEventListeners();
+        validateRequiredFields();
+        return;
+    }
+    loadCurrentInstance();
+    setupEventListeners();
+    // Initial validation check
+    validateRequiredFields();
+    // Initialize span manager integration
+    initializeSpanManagerIntegration();
+    // Initialize display logic for conditional schemas
+    if (typeof initDisplayLogic === 'function') {
+        initDisplayLogic();
+    }
+    // Initialize form layout manager (if layout config is available)
+    // Layout config is passed via ui_config from the server
+    const layoutConfig = window.config?.ui_config?.layout || window.config?.layout;
+    if (layoutConfig) {
+        window.formLayoutManager.initialize(layoutConfig);
+    }
+    // Initialize pairwise annotation
+    initPairwiseAnnotation();
+    // Initialize BWS annotation
+    initBwsAnnotation();
+});
+
+/**
+ * Global overlay tracking for debugging - only logs when debug mode is enabled
+ */
+function trackOverlayCreation(overlay, context = 'unknown') {
+    if (!window.config || !window.config.debug) return;
+
+    debugLog(`[DEBUG] OVERLAY CREATED in ${context}:`, {
+        className: overlay.className,
+        id: overlay.id,
+        parentId: overlay.parentElement?.id,
+        timestamp: new Date().toISOString()
+    });
+
+    // Track total overlays
+    const totalOverlays = document.querySelectorAll('.span-overlay').length;
+    debugLog(`[DEBUG] TOTAL OVERLAYS after creation: ${totalOverlays}`);
+}
+
+function trackOverlayRemoval(overlay, context = 'unknown') {
+    if (!window.config || !window.config.debug) return;
+
+    debugLog(`[DEBUG] OVERLAY REMOVED in ${context}:`, {
+        className: overlay.className,
+        id: overlay.id,
+        timestamp: new Date().toISOString()
+    });
+
+    // Track total overlays
+    const totalOverlays = document.querySelectorAll('.span-overlay').length;
+    debugLog(`[DEBUG] TOTAL OVERLAYS after removal: ${totalOverlays}`);
+}
+
+function debugTrackOverlays(action, instanceId = null) {
+    if (!window.config || !window.config.debug) return;
+
+    const spanOverlays = document.getElementById('span-overlays');
+    const overlayCount = spanOverlays ? spanOverlays.children.length : 0;
+    const instanceText = document.getElementById('instance-text');
+    const textContent = document.getElementById('text-content');
+
+    debugLog(`[DEBUG OVERLAY TRACKING] ${action}:`, {
+        instanceId: instanceId || currentInstance?.id,
+        lastInstanceId: debugLastInstanceId,
+        overlayCount: overlayCount,
+        spanOverlaysExists: !!spanOverlays,
+        instanceTextExists: !!instanceText,
+        textContentExists: !!textContent,
+        spanOverlaysHTML: spanOverlays ? spanOverlays.innerHTML.substring(0, 200) + '...' : 'null',
+        timestamp: new Date().toISOString()
+    });
+
+    debugOverlayCount = overlayCount;
+    if (instanceId) debugLastInstanceId = instanceId;
+}
+
+// DEBUG: Add overlay cleanup verification - only logs when debug mode is enabled
+function debugVerifyOverlayCleanup() {
+    if (!window.config || !window.config.debug) return;
+
+    const spanOverlays = document.getElementById('span-overlays');
+    if (!spanOverlays) {
+        debugWarn('[DEBUG] span-overlays container not found during cleanup verification');
+        return;
+    }
+
+    const overlayCount = spanOverlays.children.length;
+    debugLog(`[DEBUG] Overlay cleanup verification:`, {
+        overlayCount: overlayCount,
+        containerEmpty: overlayCount === 0,
+        containerInnerHTML: spanOverlays.innerHTML,
+        containerChildren: Array.from(spanOverlays.children).map(child => ({
+            tagName: child.tagName,
+            className: child.className,
+            dataset: child.dataset
+        }))
+    });
+
+    if (overlayCount > 0) {
+        debugWarn('[DEBUG] WARNING: Overlays still present after expected cleanup!');
+    }
+}
+
+function setupEventListeners() {
+    // Prevent default form submission on all annotation forms (defense in depth)
+    document.querySelectorAll('.annotation-form').forEach(function(form) {
+        form.addEventListener('submit', function(e) { e.preventDefault(); });
+    });
+
+    // Go to button (may not exist when jumping_to_id_disabled is true)
+    const goToBtn = document.getElementById('go-to-btn');
+    const goToInput = document.getElementById('go_to');
+    if (goToBtn && goToInput) {
+        goToBtn.addEventListener('click', function () {
+            const goToValue = goToInput.value;
+            if (goToValue && goToValue > 0) {
+                // User enters 1-based index (item 1, 2, 3...) but server uses 0-based
+                navigateToInstance(parseInt(goToValue) - 1);
+            }
+        });
+
+        // Enter key on go to input
+        goToInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                goToBtn.click();
+            }
+        });
+    }
+
+    // Keyboard navigation and shortcuts
+    document.addEventListener('keydown', function (e) {
+        // Only block navigation when in text input fields (not radio/checkbox)
+        const inputType = e.target.getAttribute('type');
+        const isTextInput = e.target.tagName === 'TEXTAREA' ||
+            (e.target.tagName === 'INPUT' && inputType !== 'radio' && inputType !== 'checkbox');
+
+        if (isTextInput) {
+            return; // Don't handle navigation when typing in text fields
+        }
+
+        switch (e.key) {
+            case 'ArrowLeft':
+                e.preventDefault();
+                navigateToPrevious();
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                navigateToNext();
+                break;
+        }
+    });
+
+    // Keyboard shortcuts for checkboxes and radio buttons (matches base_template.html behavior)
+    document.addEventListener('keyup', function (e) {
+        // Don't handle when in text input fields (but allow radio/checkbox)
+        const activeElement = document.activeElement;
+        const activeId = activeElement.id;
+        const activeType = activeElement.getAttribute('type');
+        const isTextInput = activeElement.tagName === 'TEXTAREA' ||
+            activeId === 'go_to' ||
+            (activeElement.tagName === 'INPUT' && activeType !== 'radio' && activeType !== 'checkbox');
+
+        if (isTextInput) {
+            return;
+        }
+
+        const key = e.key.toLowerCase();
+
+        // Check checkboxes (match on data-key attribute, not value)
+        const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+        for (const checkbox of checkboxes) {
+            const dataKey = checkbox.getAttribute('data-key');
+            if (dataKey && key === dataKey.toLowerCase()) {
+                checkbox.checked = !checkbox.checked;
+                // Trigger change event so annotation state gets updated
+                checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                if (checkbox.onclick) {
+                    checkbox.onclick.apply(checkbox);
+                }
+                return;
+            }
+        }
+
+        // Check radio buttons (match on data-key attribute)
+        const radios = document.querySelectorAll('input[type="radio"]');
+        for (const radio of radios) {
+            const dataKey = radio.getAttribute('data-key');
+            if (dataKey && key === dataKey.toLowerCase()) {
+                radio.checked = true;
+                // Trigger change event so annotation state gets updated
+                radio.dispatchEvent(new Event('change', { bubbles: true }));
+                if (radio.onclick) {
+                    radio.onclick.apply(radio);
+                }
+                return;
+            }
+        }
+
+        // Check pairwise tiles (binary mode)
+        const pairwiseTiles = document.querySelectorAll('.pairwise-tile');
+        for (const tile of pairwiseTiles) {
+            const dataKey = tile.getAttribute('data-key');
+            if (dataKey && key === dataKey) {
+                selectPairwiseTile(tile);
+                return;
+            }
+        }
+
+        // Check pairwise tie/neither buttons
+        const pairwiseButtons = document.querySelectorAll('.pairwise-tie-btn, .pairwise-neither-btn');
+        for (const btn of pairwiseButtons) {
+            const dataKey = btn.getAttribute('data-key');
+            if (dataKey && key === dataKey) {
+                selectPairwiseOption(btn);
+                return;
+            }
+        }
+
+        // Check BWS tiles (best: numbers, worst: letters)
+        const bwsTiles = document.querySelectorAll('.bws-tile');
+        for (const tile of bwsTiles) {
+            const dataKey = tile.getAttribute('data-key');
+            if (dataKey && key === dataKey) {
+                selectBwsTile(tile);
+                return;
+            }
+        }
+    });
+}
+
+/**
+ * Initialize integration with the frontend span manager
+ */
+function initializeSpanManagerIntegration() {
+    // Wait for span manager to be available
+    const checkSpanManager = () => {
+        if (window.spanManager && window.spanManager.isInitialized) {
+            debugLog('Annotation.js: Span manager integration initialized');
+            setupSpanLabelSelector();
+        } else {
+            setTimeout(checkSpanManager, 100);
+        }
+    };
+    checkSpanManager();
+}
+
+/**
+ * Setup span label selector interface
+ * This function sets up the span label selection checkboxes and their event handlers
+ */
+function setupSpanLabelSelector() {
+    debugLog('🔍 [DEBUG] setupSpanLabelSelector() - ENTRY POINT');
+
+    // Find all span label checkboxes
+    const spanLabelCheckboxes = document.querySelectorAll('input[name*="span_label"]');
+    debugLog('🔍 [DEBUG] setupSpanLabelSelector() - Found span label checkboxes:', spanLabelCheckboxes.length);
+
+    if (spanLabelCheckboxes.length === 0) {
+        debugLog('🔍 [DEBUG] setupSpanLabelSelector() - No span label checkboxes found');
+        debugLog('🔍 [DEBUG] setupSpanLabelSelector() - EXIT POINT (no checkboxes)');
+        return;
+    }
+
+    // Set up event listeners for each checkbox
+    spanLabelCheckboxes.forEach((checkbox, index) => {
+        debugLog(`🔍 [DEBUG] setupSpanLabelSelector() - Setting up checkbox ${index}:`, {
+            name: checkbox.name,
+            id: checkbox.id,
+            value: checkbox.value
+        });
+
+        // Add MutationObserver to track checkbox state changes
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                if (mutation.type === 'attributes' && mutation.attributeName === 'checked') {
+                    debugLog('🔍 [DEBUG] setupSpanLabelSelector() - Checkbox checked attribute changed:', {
+                        id: checkbox.id,
+                        oldValue: mutation.oldValue,
+                        newValue: checkbox.checked,
+                        stack: new Error().stack
+                    });
+                }
+            });
+        });
+
+        observer.observe(checkbox, {
+            attributes: true,
+            attributeOldValue: true,
+            attributeFilter: ['checked']
+        });
+
+        // Override the checked property to track when it's set programmatically
+        const originalChecked = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+        Object.defineProperty(checkbox, 'checked', {
+            get: function() {
+                return originalChecked.get.call(this);
+            },
+            set: function(value) {
+                debugLog('🔍 [DEBUG] setupSpanLabelSelector() - Checkbox checked property being set:', {
+                    id: this.id,
+                    oldValue: originalChecked.get.call(this),
+                    newValue: value,
+                    stack: new Error().stack
+                });
+                originalChecked.set.call(this, value);
+            }
+        });
+
+        // Add click event listener if not already present
+        if (!checkbox.hasAttribute('data-span-label-setup')) {
+            checkbox.addEventListener('change', function () {
+                debugLog('🔍 [DEBUG] setupSpanLabelSelector() - Checkbox changed:', {
+                    name: this.name,
+                    checked: this.checked,
+                    value: this.value
+                });
+
+                // Add stack trace to see what's calling this
+                debugLog('🔍 [DEBUG] setupSpanLabelSelector() - Change event stack trace:', new Error().stack);
+
+                // Check if this change event was triggered by programmatic setting
+                // If the checkbox was just set to checked by onlyOne, don't interfere
+                if (this.checked && this.hasAttribute('data-just-checked')) {
+                    debugLog('🔍 [DEBUG] setupSpanLabelSelector() - Ignoring change event for just-checked checkbox');
+                    this.removeAttribute('data-just-checked');
+                    return;
+                }
+
+                // Note: We don't manage checkbox state here anymore because the onclick
+                // handler (onlyOne function) already handles this correctly.
+                // This change event is just for logging and any additional functionality
+                // that might be needed in the future.
+            });
+
+            // Mark as set up
+            checkbox.setAttribute('data-span-label-setup', 'true');
+        }
+    });
+
+    debugLog('🔍 [DEBUG] setupSpanLabelSelector() - EXIT POINT (setup complete)');
+}
+
+
+
+/**
+ * Check if current instance has span annotations
+ */
+function checkForSpanAnnotations() {
+    if (!currentInstance || !currentInstance.annotation_scheme) {
+        return false;
+    }
+
+    // Check if any annotation type is 'span'
+    for (const schema of Object.values(currentInstance.annotation_scheme)) {
+        if (schema.type === 'span') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Get span labels from annotation scheme
+ */
+function getSpanLabelsFromScheme() {
+    const labels = [];
+
+    if (!currentInstance || !currentInstance.annotation_scheme) {
+        return labels;
+    }
+
+    for (const [schemaName, schema] of Object.entries(currentInstance.annotation_scheme)) {
+        if (schema.type === 'span' && schema.labels) {
+            labels.push(...schema.labels);
+        }
+    }
+
+    return labels;
+}
+
+/**
+ * Load span annotations for current instance
+ */
+async function loadSpanAnnotations() {
+    debugLog('🔍 [DEBUG] loadSpanAnnotations() - ENTRY POINT');
+    debugLog('🔍 [DEBUG] loadSpanAnnotations() - currentInstance:', currentInstance);
+    debugLog('🔍 [DEBUG] loadSpanAnnotations() - currentInstance.id:', currentInstance?.id);
+
+    if (!currentInstance || !currentInstance.id) {
+        debugLog('🔍 [DEBUG] loadSpanAnnotations() - EXIT POINT (no currentInstance or id)');
+        return;
+    }
+
+    try {
+        // Initialize span manager if not already done
+        if (!window.spanManager) {
+            debugLog('🔍 [DEBUG] loadSpanAnnotations() - Initializing span manager');
+            initializeSpanManagerIntegration();
+        }
+
+        // Wait for span manager to be ready
+        await new Promise(resolve => {
+            const checkSpanManager = () => {
+                if (window.spanManager) {
+                    debugLog('🔍 [DEBUG] loadSpanAnnotations() - Span manager ready');
+                    resolve();
+                } else {
+                    debugLog('🔍 [DEBUG] loadSpanAnnotations() - Span manager not ready, retrying...');
+                    setTimeout(checkSpanManager, 100);
+                }
+            };
+            checkSpanManager();
+        });
+
+        debugLog('🔍 [DEBUG] loadSpanAnnotations() - About to call spanManager.loadAnnotations()');
+        debugLog('🔍 [DEBUG] loadSpanAnnotations() - Instance ID for API call:', currentInstance.id);
+
+        // Load annotations for the current instance
+        await window.spanManager.loadAnnotations(currentInstance.id);
+
+        debugLog('🔍 [DEBUG] loadSpanAnnotations() - spanManager.loadAnnotations() completed');
+        debugLog('🔍 [DEBUG] loadSpanAnnotations() - EXIT POINT (success)');
+    } catch (error) {
+        console.error('🔍 [DEBUG] loadSpanAnnotations() - Error loading span annotations:', error);
+        debugLog('🔍 [DEBUG] loadSpanAnnotations() - EXIT POINT (error)');
+    }
+}
+
+async function loadCurrentInstance() {
+    // Reset validation state when loading a new instance
+    hasAttemptedForwardValidation = false;
+
+    try {
+        setLoading(true);
+        showError(false);
+
+        // DEBUG: Track overlays at start of instance loading
+        debugTrackOverlays('START_LOAD_CURRENT_INSTANCE');
+
+        // Get current instance from server-rendered HTML
+        const instanceTextElement = document.getElementById('instance-text');
+        const instanceIdElement = document.getElementById('instance_id');
+
+        if (!instanceTextElement) {
+            throw new Error('Instance text element not found');
+        }
+
+        // Get instance text from the rendered HTML (server-rendered)
+        const instanceText = instanceTextElement.innerHTML;
+
+        // Get instance ID from hidden input
+        const instanceId = instanceIdElement ? instanceIdElement.value : null;
+        debugLog(`🔍 [DEBUG] loadCurrentInstance: Read instance_id from DOM: '${instanceId}'`);
+
+        if (!instanceText || instanceText.trim() === '') {
+            showError(true, 'No instance text available');
+            return;
+        }
+
+        // Create current instance object from server-rendered data
+        currentInstance = {
+            id: instanceId,
+            text: instanceTextElement.textContent || instanceTextElement.innerText,
+            displayed_text: instanceText
+        };
+
+        // Set global variable for span manager
+        window.currentInstance = currentInstance;
+
+        // Notify interaction tracker of instance change
+        if (window.interactionTracker && instanceId) {
+            window.interactionTracker.setInstanceId(instanceId);
+        }
+
+        // Get progress from the progress counter element
+        const progressCounter = document.getElementById('progress-counter');
+        if (progressCounter) {
+            const progressText = progressCounter.textContent;
+            const match = progressText.match(/(\d+)\/(\d+)/);
+            if (match) {
+                const annotated = parseInt(match[1]);
+                const total = parseInt(match[2]);
+                userState = {
+                    assignments: {
+                        annotated: annotated,
+                        total: total
+                    },
+                    annotations: {
+                        by_instance: {}
+                    }
+                };
+            }
+        }
+
+        updateProgressDisplay();
+        updateInstanceDisplay();
+
+        // Clear browser-preserved form state before loading new annotations
+        // This prevents image/audio/video annotations from persisting across instances
+        clearAllFormInputs();
+
+        restoreSpanAnnotationsFromHTML();
+        loadAnnotations();
+        // Memos persist server-side and nav is a full reload, but if the
+        // instance changes without a reload, refresh the memo panel so it
+        // never shows another instance's notes.
+        if (window.MemoPanel && typeof window.MemoPanel.reload === 'function') {
+            window.MemoPanel.reload();
+        }
+        generateAnnotationForms();
+        aiAssistantManger.getAiAssistantName();
+
+        // Populate pairwise item boxes after forms are generated
+        populatePairwiseTileContent();
+
+        // Populate dynamic schema content (extractive_qa, text_edit, error_span, card_sort, conjoint)
+        await populateDynamicSchemaContent();
+
+        // Codebook: reconcile codebook-backed forms (append codes added
+        // mid-session) + restore runtime-code selections + the
+        // stale-revision banner. MUST run AFTER generateAnnotationForms()
+        // / populate* so the appended options aren't discarded by a
+        // form rebuild.
+        if (window.CodebookPanel && typeof window.CodebookPanel.onInstance === 'function') {
+            window.CodebookPanel.onInstance();
+        }
+
+        // Load span annotations
+        debugLog('🔍 [DEBUG] loadCurrentInstance() - About to call loadSpanAnnotations()');
+        debugLog('🔍 [DEBUG] loadCurrentInstance() - currentInstance.id:', currentInstance?.id);
+        await loadSpanAnnotations();
+        debugLog('🔍 [DEBUG] loadCurrentInstance() - loadSpanAnnotations() completed');
+
+        // Populate input values with existing annotations AFTER forms are generated
+        setTimeout(() => {
+            populateInputValues();
+        }, 0);
+
+    } catch (error) {
+        console.error('Error loading current instance:', error);
+        showError(true, error.message);
+    } finally {
+        setLoading(false);
+    }
+}
+
+function updateProgressDisplay() {
+    // Progress is already displayed in the HTML template
+    // No need to update it since it's server-rendered
+    debugLog('Progress display updated from server-rendered HTML');
+}
+
+function updateInstanceDisplay() {
+    // Instance text is already displayed in the HTML template
+    // Just ensure the instance_id is set correctly
+    const instanceIdInput = document.getElementById('instance_id');
+    if (instanceIdInput && currentInstance && currentInstance.id) {
+        const oldValue = instanceIdInput.value;
+        instanceIdInput.value = currentInstance.id;
+        debugLog(`🔍 [DEBUG] updateInstanceDisplay: Updated instance_id from '${oldValue}' to '${currentInstance.id}'`);
+
+        // FIREFOX FIX: Force the input element to be updated in Firefox
+        const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+        if (isFirefox) {
+            debugLog('🔍 [DEBUG] updateInstanceDisplay: Firefox detected - forcing input update');
+
+            // Method 1: Force a DOM update by temporarily changing and restoring the value
+            const tempValue = instanceIdInput.value;
+            instanceIdInput.value = '';
+            instanceIdInput.value = tempValue;
+
+            // Method 2: Trigger input events to ensure Firefox recognizes the change
+            instanceIdInput.dispatchEvent(new Event('input', { bubbles: true }));
+            instanceIdInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+            // Method 3: Force a reflow
+            instanceIdInput.offsetHeight;
+
+            debugLog(`🔍 [DEBUG] updateInstanceDisplay: Firefox input update completed`);
+        }
+    } else {
+        debugLog(`🔍 [DEBUG] updateInstanceDisplay: Could not update instance_id - input: ${!!instanceIdInput}, currentInstance: ${!!currentInstance}, currentInstance.id: ${currentInstance?.id}`);
+    }
+    debugLog('[DEBUG] updateInstanceDisplay: Instance display updated from server');
+}
+
+// Add this function to clear all form inputs
+function clearAllFormInputs() {
+    debugLog('🔍 Clearing all form inputs');
+
+    // Clear text inputs and textareas
+    const textInputs = document.querySelectorAll('input[type="text"], textarea.annotation-input');
+    textInputs.forEach(input => {
+        input.value = '';
+    });
+
+    // Clear radio buttons
+    const radioInputs = document.querySelectorAll('input[type="radio"]');
+    radioInputs.forEach(input => {
+        input.checked = false;
+    });
+
+    // Clear checkboxes
+    const checkboxInputs = document.querySelectorAll('input[type="checkbox"]');
+    checkboxInputs.forEach(input => {
+        input.checked = false;
+    });
+
+    // Clear sliders
+    const sliderInputs = document.querySelectorAll('input[type="range"]');
+    sliderInputs.forEach(input => {
+        input.value = input.getAttribute('min') || input.getAttribute('starting_value') || '0';
+        const valueDisplay = document.getElementById(`${input.name}-value`);
+        if (valueDisplay) {
+            valueDisplay.textContent = input.value;
+        }
+    });
+
+    // Clear select dropdowns
+    const selectInputs = document.querySelectorAll('select.annotation-input');
+    selectInputs.forEach(input => {
+        input.selectedIndex = 0;
+    });
+
+    // Clear number inputs
+    const numberInputs = document.querySelectorAll('input[type="number"].annotation-input');
+    numberInputs.forEach(input => {
+        input.value = '';
+    });
+
+    // Clear hidden annotation inputs (BWS, triage, and other schemas using hidden inputs)
+    // Remove data-modified flag and clear values unless server has set them
+    const hiddenAnnotationInputs = document.querySelectorAll('input[type="hidden"].annotation-input');
+    hiddenAnnotationInputs.forEach(input => {
+        if (input.getAttribute('data-server-set') !== 'true') {
+            input.value = '';
+            input.removeAttribute('data-modified');
+            debugLog('🔍 Cleared hidden annotation input (browser-cached):', input.getAttribute('name'));
+        } else {
+            debugLog('🔍 Preserving server-provided hidden annotation input:', input.getAttribute('name'));
+        }
+    });
+
+    // Clear BWS tile selections
+    document.querySelectorAll('.bws-tile.selected').forEach(
+        tile => tile.classList.remove('selected')
+    );
+
+    // Clear ranking visual state (reset order numbers)
+    document.querySelectorAll('.ranking-list .ranking-item').forEach((item, idx) => {
+        const rank = item.querySelector('.ranking-rank');
+        if (rank) rank.textContent = idx + 1;
+    });
+
+    // Clear hierarchical multiselect checkboxes
+    document.querySelectorAll('.hier-checkbox').forEach(cb => {
+        cb.checked = false;
+    });
+    document.querySelectorAll('.hier-selected-tags').forEach(tags => {
+        tags.innerHTML = '';
+    });
+
+    // Clear trajectory eval visual state
+    document.querySelectorAll('.traj-correctness-btn.selected').forEach(btn => {
+        btn.classList.remove('selected');
+    });
+    document.querySelectorAll('.traj-error-details').forEach(div => {
+        div.style.display = 'none';
+    });
+    document.querySelectorAll('.traj-step-status').forEach(el => {
+        el.textContent = '';
+        el.className = 'traj-step-status';
+    });
+    if (window._trajState) {
+        Object.keys(window._trajState).forEach(k => {
+            window._trajState[k] = { steps: [] };
+        });
+    }
+
+    // Clear trajectory edit (correction) visual state
+    if (window._trajEditState) {
+        Object.keys(window._trajEditState).forEach(k => {
+            window._trajEditState[k] = { entries: {}, final_answer: null };
+        });
+    }
+
+    // Clear hidden annotation data inputs (image/audio/video annotations)
+    // BUT only if they don't have server-provided data (data-server-set="true")
+    // This prevents browser form restoration from persisting annotations across instances
+    // while preserving server-provided annotations when returning to an already-annotated instance
+    const annotationDataInputs = document.querySelectorAll('input.annotation-data-input');
+    annotationDataInputs.forEach(input => {
+        // Only clear if NOT set by the server (prevents clearing restored annotations)
+        if (input.getAttribute('data-server-set') !== 'true') {
+            input.value = '';
+            debugLog('🔍 Cleared annotation data input (browser-cached):', input.id);
+        } else {
+            debugLog('🔍 Preserving server-provided annotation data:', input.id);
+        }
+    });
+
+    // Re-seed turn-level annotation proxy widgets from their hidden inputs
+    // (the global input resets above wiped their visual state; the hidden
+    // turn-anno inputs survive when server-set, so refresh() repaints them)
+    if (window.turnAnnotations && typeof window.turnAnnotations.refresh === 'function') {
+        window.turnAnnotations.refresh();
+    }
+
+    // Reset image annotation managers if they exist
+    // BUT only if there's no server-provided annotation data to load
+    const imageContainers = document.querySelectorAll('.image-annotation-container');
+    imageContainers.forEach(container => {
+        if (container.annotationManager && typeof container.annotationManager.clearAnnotations === 'function') {
+            // Find the associated hidden input
+            const schemaName = container.getAttribute('data-schema');
+            const hiddenInput = schemaName ? document.getElementById('input-' + schemaName) : null;
+
+            // Only clear if there's no server-provided data
+            if (!hiddenInput || hiddenInput.getAttribute('data-server-set') !== 'true') {
+                container.annotationManager.clearAnnotations();
+                debugLog('🔍 Cleared image annotation manager for container (no server data)');
+            } else {
+                debugLog('🔍 Preserving image annotation manager (has server data)');
+            }
+        }
+    });
+
+    debugLog('✅ All form inputs cleared');
+}
+
+async function loadAnnotations() {
+    try {
+        debugLog('🔍 Loading annotations for instance:', currentInstance.id);
+
+        // IMPORTANT: Read from server-rendered HTML attributes, NOT browser form state.
+        // Firefox (and some other browsers) preserve form state across page navigations,
+        // which can cause checkboxes from the previous instance to appear checked
+        // even though the server didn't render them that way.
+
+        currentAnnotations = {};
+
+        // Read checkbox state from HTML 'checked' ATTRIBUTE (not .checked property)
+        // The server sets the 'checked' attribute on checkboxes that should be checked
+        const checkboxInputs = document.querySelectorAll('input[type="checkbox"]');
+        checkboxInputs.forEach(input => {
+            const schema = input.getAttribute('schema');
+            const labelName = input.getAttribute('label_name');
+            // Use hasAttribute('checked') to read server-rendered state
+            const serverChecked = input.hasAttribute('checked');
+            // Sync the browser state to match server state (fixes Firefox form restoration)
+            input.checked = serverChecked;
+            if (schema && labelName && serverChecked) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = input.value;
+            }
+        });
+
+        // Read radio button state from HTML 'checked' ATTRIBUTE
+        const radioInputs = document.querySelectorAll('input[type="radio"]');
+        radioInputs.forEach(input => {
+            const schema = input.getAttribute('schema');
+            const labelName = input.getAttribute('label_name');
+            // Use hasAttribute('checked') to read server-rendered state
+            const serverChecked = input.hasAttribute('checked');
+            // Sync the browser state to match server state
+            input.checked = serverChecked;
+            if (schema && labelName && serverChecked) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = input.value;
+            }
+        });
+
+        // Read text input state from HTML
+        // For text inputs, the server sets the value attribute
+        // For textareas, the server sets the content between the tags (textContent)
+        const textInputs = document.querySelectorAll('input[type="text"], textarea.annotation-input');
+        textInputs.forEach(input => {
+            const schema = input.getAttribute('schema');
+            const labelName = input.getAttribute('label_name');
+            // Read the server-rendered value:
+            // - For <input type="text">: use getAttribute('value') which returns the HTML attribute
+            // - For <textarea>: use textContent which returns the content between tags
+            let serverValue;
+            if (input.tagName.toLowerCase() === 'textarea') {
+                serverValue = input.textContent || '';
+            } else {
+                serverValue = input.getAttribute('value') || '';
+            }
+            // Sync browser state to server state
+            input.value = serverValue;
+            if (schema && labelName && serverValue) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = serverValue;
+            }
+        });
+
+        // Read number input state from HTML 'value' ATTRIBUTE (constant_sum, etc.)
+        const numberInputs = document.querySelectorAll('input[type="number"].annotation-input');
+        numberInputs.forEach(input => {
+            const schema = input.getAttribute('schema');
+            const labelName = input.getAttribute('label_name');
+            const serverValue = input.getAttribute('value');
+            if (serverValue) {
+                input.value = serverValue;
+            }
+            if (schema && labelName && serverValue) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = serverValue;
+            }
+        });
+
+        // Read slider state from HTML 'value' ATTRIBUTE
+        const sliderInputs = document.querySelectorAll('input[type="range"]');
+        sliderInputs.forEach(input => {
+            const schema = input.getAttribute('schema');
+            const labelName = input.getAttribute('label_name');
+            // Read from HTML attribute - server sets this for saved slider values
+            const serverValue = input.getAttribute('value');
+            if (serverValue) {
+                input.value = serverValue;
+            }
+            if (schema && labelName) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = input.value;
+            }
+        });
+
+        // Read select dropdown state from server-rendered HTML
+        // The server sets the 'selected' attribute on the appropriate option
+        const selectInputs = document.querySelectorAll('select.annotation-input');
+        selectInputs.forEach(select => {
+            const schema = select.getAttribute('schema');
+            const labelName = select.getAttribute('label_name');
+            // Find the option with 'selected' attribute (server-rendered)
+            const selectedOption = select.querySelector('option[selected]');
+            if (selectedOption) {
+                // Sync browser state to server state
+                select.value = selectedOption.value;
+            }
+            if (schema && labelName && select.value) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = select.value;
+            }
+        });
+
+        // Read hidden input state from server-rendered HTML
+        // The server sets the 'value' attribute AND 'data-server-set' flag via BeautifulSoup
+        // for saved annotations. We MUST check for data-server-set to distinguish server-rendered
+        // values from browser-cached form state — browsers restore hidden input values across
+        // window.location.reload(), so getAttribute('value') alone is unreliable.
+        const hiddenInputs = document.querySelectorAll('input[type="hidden"].annotation-input');
+        hiddenInputs.forEach(input => {
+            const schema = input.getAttribute('schema');
+            const labelName = input.getAttribute('label_name');
+            const isServerSet = input.hasAttribute('data-server-set');
+            if (isServerSet) {
+                // Server explicitly set this value — trust it
+                const serverValue = input.getAttribute('value') || '';
+                input.value = serverValue;
+                if (schema && labelName && serverValue) {
+                    if (!currentAnnotations[schema]) {
+                        currentAnnotations[schema] = {};
+                    }
+                    currentAnnotations[schema][labelName] = serverValue;
+                }
+            } else {
+                // No server-set flag — clear any browser-cached value
+                input.value = '';
+            }
+        });
+
+        // Read annotation-data-input state (image/audio/video/tiered annotations)
+        // These use a separate hidden input class and store serialized JSON data
+        const annotationDataInputs = document.querySelectorAll('input.annotation-data-input');
+        annotationDataInputs.forEach(input => {
+            if (input.name && input.value && input.getAttribute('data-server-set') === 'true') {
+                const schema = input.name;
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema]['_data'] = input.value;
+            }
+        });
+
+        debugLog('🔍 Annotations loaded from DOM:', currentAnnotations);
+    } catch (error) {
+        console.error('❌ Error loading annotations:', error);
+        currentAnnotations = {};
+    }
+}
+
+function generateAnnotationForms() {
+    const formsContainer = document.getElementById('annotation-forms');
+
+    // The server generates the forms, so we just need to set up event listeners
+    // The forms are already in the HTML from server-side generation
+    setupInputEventListeners();
+    validateRequiredFields();
+}
+
+async function saveAnnotations() {
+    if (!currentInstance || !currentInstance.id) {
+        return;
+    }
+
+    // Track save event
+    if (window.interactionTracker) {
+        window.interactionTracker.trackSave(currentInstance.id);
+    }
+
+    try {
+        const headers = {
+            'Content-Type': 'application/json',
+        };
+
+        // Add API key if available
+        if (window.config && window.config.api_key) {
+            headers['X-API-Key'] = window.config.api_key;
+        }
+
+        // Sync currentAnnotations from DOM to ensure we have the latest state
+        // This handles cases where change events may not have fired (e.g., JS clicks)
+        syncAnnotationsFromDOM();
+        // Save both label and span annotations via /updateinstance
+        const spanAnnotations = extractSpanAnnotationsFromDOM();
+        debugLog('[DEBUG] saveAnnotations: spanAnnotations to send:', spanAnnotations);
+
+        // Transform currentAnnotations to the format expected by /updateinstance
+        const labelAnnotations = {};
+        for (const [schema, labels] of Object.entries(currentAnnotations)) {
+            for (const [label, value] of Object.entries(labels)) {
+                const key = `${schema}:${label}`;
+                labelAnnotations[key] = value;
+            }
+        }
+        // Also collect data from hidden annotation inputs (image/audio/video annotations)
+        const hiddenInputs = document.querySelectorAll('.annotation-data-input');
+        hiddenInputs.forEach(input => {
+            if (input.name && input.value) {
+                // Store the raw JSON value with schema name as key
+                // Use ::: separator to match the format used by other annotation types
+                const key = `${input.name}:::_data`;
+                labelAnnotations[key] = input.value;
+                debugLog('[DEBUG] saveAnnotations: collected hidden input:', input.name, '=', input.value.substring(0, 100) + '...');
+            }
+        });
+
+        const response = await fetch('/updateinstance', {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify({
+                instance_id: currentInstance.id,
+                annotations: labelAnnotations,
+                span_annotations: spanAnnotations
+            })
+        });
+
+        if (response.ok) {
+            // Get response text first to debug any JSON parsing issues
+            const responseText = await response.text();
+            try {
+                const result = JSON.parse(responseText);
+                debugLog('[DEBUG] saveAnnotations: annotations saved:', result);
+                handleQualityControlResponse(result);
+            } catch (jsonError) {
+                console.error('[DEBUG] saveAnnotations: JSON parse error:', jsonError);
+                console.error('[DEBUG] saveAnnotations: Response text (first 500 chars):', responseText.substring(0, 500));
+                // Don't throw - the save may have succeeded even if response parsing failed
+            }
+        } else {
+            console.warn('[DEBUG] saveAnnotations: failed to save annotations:', await response.text());
+            return false;
+        }
+
+        return true;
+
+    } catch (error) {
+        console.error('Error saving annotations:', error);
+        showError(true, 'Failed to save annotations: ' + error.message);
+        return false;
+    }
+}
+
+async function navigateToPrevious() {
+    debugLog('[DEEP DEBUG NAV] navigateToPrevious - ENTRY POINT');
+    deepDebugState.navigationCalls++;
+
+    // Reset validation state on backward navigation
+    hasAttemptedForwardValidation = false;
+
+    logDeepDebug('navigateToPrevious_start', {
+        currentInstanceId: currentInstance?.id,
+        overlayCount: getCurrentOverlayCount()
+    });
+
+    if (isLoading) {
+        debugLog('[DEEP DEBUG NAV] navigateToPrevious - Navigation blocked, still loading');
+        return;
+    }
+
+    setLoading(true);
+    debugLog('[DEEP DEBUG NAV] navigateToPrevious - Loading set to true');
+
+    // Track navigation event
+    if (window.interactionTracker) {
+        window.interactionTracker.trackNavigation('prev', currentInstance?.id, null);
+    }
+
+    try {
+        // Flush any pending debounced save before the explicit save
+        clearTimeout(textSaveTimer);
+        textSaveTimer = null;
+
+        // Save annotations before navigating away
+        debugLog('[DEEP DEBUG NAV] navigateToPrevious - Saving annotations before navigation');
+        const saveSucceeded = await saveAnnotations();
+        if (saveSucceeded === false) {
+            showNotification('Failed to save annotations. Please try again.', 'error');
+            setLoading(false);
+            return;
+        }
+
+        // FIREFOX FIX: Force overlay cleanup before navigation
+        const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+        debugLog('[DEEP DEBUG NAV] navigateToPrevious - Is Firefox:', isFirefox);
+
+        if (isFirefox) {
+            debugLog('[DEEP DEBUG NAV] Firefox detected - forcing overlay cleanup before navigation');
+            const spanOverlays = document.getElementById('span-overlays');
+            if (spanOverlays) {
+                const beforeCount = spanOverlays.children.length;
+                debugLog('[DEEP DEBUG NAV] navigateToPrevious - Before Firefox cleanup:', beforeCount, 'overlays');
+
+                // Remove all overlays individually
+                while (spanOverlays.firstChild) {
+                    const child = spanOverlays.firstChild;
+                    debugLog('[DEEP DEBUG NAV] navigateToPrevious - Removing overlay child:', child.className, child.id);
+
+                    // Track overlay removal for debugging
+                    if (typeof trackOverlayRemoval === 'function') {
+                        trackOverlayRemoval(child, 'navigateToPrevious Firefox cleanup');
+                    }
+
+                    spanOverlays.removeChild(child);
+                }
+
+                // Force reflow
+                spanOverlays.offsetHeight;
+                const afterCount = spanOverlays.children.length;
+                debugLog('[DEEP DEBUG NAV] navigateToPrevious - After Firefox cleanup:', afterCount, 'overlays');
+
+                // Double-check cleanup
+                const remainingOverlays = document.querySelectorAll('.span-overlay');
+                debugLog('[DEEP DEBUG NAV] navigateToPrevious - Remaining overlays via querySelectorAll:', remainingOverlays.length);
+
+                if (remainingOverlays.length > 0) {
+                    debugLog('[DEEP DEBUG NAV] navigateToPrevious - WARNING: Overlays still exist after cleanup!');
+                    remainingOverlays.forEach((overlay, index) => {
+                        debugLog(`[DEEP DEBUG NAV] navigateToPrevious - Remaining overlay ${index}:`, overlay.className, overlay.id);
+                    });
+                }
+            } else {
+                debugLog('[DEEP DEBUG NAV] navigateToPrevious - No span-overlays container found');
+            }
+        }
+
+        // Use the correct endpoint and payload for navigation
+        const response = await fetch('/annotate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                action: 'prev_instance',
+                instance_id: currentInstance?.id
+            })
+        });
+
+        if (response.ok) {
+            debugLog('[DEEP DEBUG NAV] navigateToPrevious - Navigation successful, reloading page');
+
+            if (window.spanManager && typeof window.spanManager.onInstanceChange === 'function') {
+                window.spanManager.onInstanceChange(currentInstance?.id);
+            }
+
+            logDeepDebug('navigateToPrevious_success', {
+                currentInstanceId: currentInstance?.id,
+                overlayCount: getCurrentOverlayCount()
+            });
+
+            // Add a small delay to ensure span manager operations complete before reload
+            setTimeout(() => {
+                window.location.reload();
+            }, 100);
+        } else {
+            console.error('[DEEP DEBUG NAV] navigateToPrevious - Navigation failed:', response.status);
+            setLoading(false);
+        }
+    } catch (error) {
+        console.error('[DEEP DEBUG NAV] navigateToPrevious - Navigation error:', error);
+        setLoading(false);
+    }
+}
+
+/**
+ * Handle non-OK navigation responses from the server.
+ * Shows a toast notification for validation errors (400).
+ */
+async function handleNavigationResponseError(response) {
+    console.error('[NAV] Navigation failed:', response.status);
+    if (response.status === 400) {
+        try {
+            const data = await response.json();
+            if (data.status === 'validation_error') {
+                const schemas = (data.unsatisfied_schemas || []).join(', ');
+                showNotification(data.message || `Required annotations not completed: ${schemas}`, 'error');
+                // Re-run validation to highlight unfilled fields
+                hasAttemptedForwardValidation = true;
+                validateRequiredFields({ showErrors: true });
+                return;
+            }
+        } catch (e) {
+            // Not JSON, fall through
+        }
+    }
+    showNotification('Navigation failed. Please try again.', 'error');
+}
+
+async function navigateToNext() {
+    debugLog('[DEEP DEBUG NAV] navigateToNext - ENTRY POINT');
+    deepDebugState.navigationCalls++;
+
+    logDeepDebug('navigateToNext_start', {
+        currentInstanceId: currentInstance?.id,
+        overlayCount: getCurrentOverlayCount()
+    });
+
+    if (isLoading) {
+        debugLog('[DEEP DEBUG NAV] navigateToNext - Navigation blocked, still loading');
+        return;
+    }
+
+    // Client-side required field validation
+    hasAttemptedForwardValidation = true;
+    if (!validateRequiredFields({ showErrors: true })) {
+        debugLog('[NAV] navigateToNext - blocked by client-side validation');
+        return;
+    }
+
+    setLoading(true);
+    debugLog('[DEEP DEBUG NAV] navigateToNext - Loading set to true');
+
+    // Track navigation event
+    if (window.interactionTracker) {
+        window.interactionTracker.trackNavigation('next', currentInstance?.id, null);
+    }
+
+    try {
+        // Flush any pending debounced save before the explicit save
+        clearTimeout(textSaveTimer);
+        textSaveTimer = null;
+
+        // Save annotations before navigating away
+        debugLog('[DEEP DEBUG NAV] navigateToNext - Saving annotations before navigation');
+        const saveSucceeded = await saveAnnotations();
+        if (saveSucceeded === false) {
+            showNotification('Failed to save annotations. Please try again.', 'error');
+            setLoading(false);
+            return;
+        }
+
+        // FIREFOX FIX: Force overlay cleanup before navigation
+        const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+        debugLog('[DEEP DEBUG NAV] navigateToNext - Is Firefox:', isFirefox);
+
+        if (isFirefox) {
+            debugLog('[DEEP DEBUG NAV] Firefox detected - forcing overlay cleanup before navigation');
+            const spanOverlays = document.getElementById('span-overlays');
+            if (spanOverlays) {
+                const beforeCount = spanOverlays.children.length;
+                debugLog('[DEEP DEBUG NAV] navigateToNext - Before Firefox cleanup:', beforeCount, 'overlays');
+
+                // Remove all overlays individually
+                while (spanOverlays.firstChild) {
+                    const child = spanOverlays.firstChild;
+                    debugLog('[DEEP DEBUG NAV] navigateToNext - Removing overlay child:', child.className, child.id);
+
+                    // Track overlay removal for debugging
+                    if (typeof trackOverlayRemoval === 'function') {
+                        trackOverlayRemoval(child, 'navigateToNext Firefox cleanup');
+                    }
+
+                    spanOverlays.removeChild(child);
+                }
+
+                // Force reflow
+                spanOverlays.offsetHeight;
+                const afterCount = spanOverlays.children.length;
+                debugLog('[DEEP DEBUG NAV] navigateToNext - After Firefox cleanup:', afterCount, 'overlays');
+
+                // Double-check cleanup
+                const remainingOverlays = document.querySelectorAll('.span-overlay');
+                debugLog('[DEEP DEBUG NAV] navigateToNext - Remaining overlays via querySelectorAll:', remainingOverlays.length);
+
+                if (remainingOverlays.length > 0) {
+                    debugLog('[DEEP DEBUG NAV] navigateToNext - WARNING: Overlays still exist after cleanup!');
+                    remainingOverlays.forEach((overlay, index) => {
+                        debugLog(`[DEEP DEBUG NAV] navigateToNext - Remaining overlay ${index}:`, overlay.className, overlay.id);
+                    });
+                }
+            } else {
+                debugLog('[DEEP DEBUG NAV] navigateToNext - No span-overlays container found');
+            }
+        }
+
+        // Use the correct endpoint and payload for navigation
+        const response = await fetch('/annotate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                action: 'next_instance',
+                instance_id: currentInstance?.id
+            })
+        });
+
+        if (response.ok) {
+            debugLog('[DEEP DEBUG NAV] navigateToNext - Navigation successful, reloading page');
+
+            if (window.spanManager && typeof window.spanManager.onInstanceChange === 'function') {
+                window.spanManager.onInstanceChange(currentInstance?.id);
+            }
+
+            logDeepDebug('navigateToNext_success', {
+                currentInstanceId: currentInstance?.id,
+                overlayCount: getCurrentOverlayCount()
+            });
+
+            // Add a small delay to ensure span manager operations complete before reload
+            setTimeout(() => {
+                window.location.reload();
+            }, 100);
+        } else {
+            handleNavigationResponseError(response);
+            setLoading(false);
+        }
+    } catch (error) {
+        console.error('[DEEP DEBUG NAV] navigateToNext - Navigation error:', error);
+        setLoading(false);
+    }
+}
+
+async function navigateToInstance(instanceIndex) {
+    if (isLoading) {
+        return;
+    }
+
+    // Client-side validation for forward navigation
+    const currentIdx = currentInstance ? currentInstance.index : 0;
+    if (instanceIndex > currentIdx) {
+        hasAttemptedForwardValidation = true;
+        if (!validateRequiredFields({ showErrors: true })) {
+            debugLog('[NAV] navigateToInstance - blocked by client-side validation');
+            return;
+        }
+    }
+
+    try {
+        setLoading(true);
+
+        // Flush any pending debounced save before the explicit save
+        clearTimeout(textSaveTimer);
+        textSaveTimer = null;
+
+        // Save annotations before navigating away (same as navigateToPrevious/Next)
+        debugLog('[DEEP DEBUG NAV] navigateToInstance - Saving annotations before navigation');
+        const saveSucceeded = await saveAnnotations();
+        if (saveSucceeded === false) {
+            showNotification('Failed to save annotations. Please try again.', 'error');
+            setLoading(false);
+            return;
+        }
+
+        // DEBUG: Track overlays before navigation
+        debugTrackOverlays('BEFORE_GO_TO_NAVIGATION', currentInstance?.id);
+
+        // FIREFOX FIX: Force overlay cleanup before navigation
+        const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+        debugLog('🔍 [DEBUG] navigateToInstance() - Is Firefox:', isFirefox);
+
+        if (isFirefox) {
+            debugLog('🔍 [DEBUG] Firefox detected - forcing overlay cleanup before navigation');
+            const spanOverlays = document.getElementById('span-overlays');
+            if (spanOverlays) {
+                debugLog('🔍 [DEBUG] navigateToInstance() - Before Firefox cleanup:', spanOverlays.children.length, 'overlays');
+
+                // Remove all overlays individually
+                while (spanOverlays.firstChild) {
+                    const child = spanOverlays.firstChild;
+                    debugLog('🔍 [DEBUG] navigateToInstance() - Removing overlay child:', child.className, child.id);
+
+                    // Track overlay removal for debugging
+                    if (typeof trackOverlayRemoval === 'function') {
+                        trackOverlayRemoval(child, 'navigateToInstance Firefox cleanup');
+                    }
+
+                    spanOverlays.removeChild(child);
+                }
+
+                // Force reflow
+                spanOverlays.offsetHeight;
+                debugLog('🔍 [DEBUG] navigateToInstance() - After Firefox cleanup:', spanOverlays.children.length, 'overlays');
+            } else {
+                debugLog('🔍 [DEBUG] navigateToInstance() - No span-overlays container found');
+            }
+        }
+
+        const headers = {
+            'Content-Type': 'application/json',
+        };
+        if (window.config.api_key) {
+            headers['X-API-Key'] = window.config.api_key;
+        }
+        const response = await fetch('/annotate', {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify({
+                action: 'go_to',
+                go_to: instanceIndex
+            })
+        });
+
+        if (response.ok) {
+            debugLog('🔍 [DEBUG] navigateToInstance() - Navigation successful, about to reload page');
+            // DEBUG: Clear overlays before reload
+            const spanOverlays = document.getElementById('span-overlays');
+            if (spanOverlays) {
+                debugLog('🔍 [DEBUG] navigateToInstance() - Before clearing overlays:', spanOverlays.children.length, 'overlays');
+                debugLog('🔍 [DEBUG] navigateToInstance() - Clearing span overlays before page reload');
+                spanOverlays.innerHTML = '';
+                debugLog('🔍 [DEBUG] navigateToInstance() - After clearing overlays:', spanOverlays.children.length, 'overlays');
+                debugVerifyOverlayCleanup();
+            } else {
+                debugLog('🔍 [DEBUG] navigateToInstance() - No span-overlays container found');
+            }
+            // Reload the page to get the new instance data from the server
+            window.location.reload();
+        } else {
+            await handleNavigationResponseError(response);
+        }
+    } catch (error) {
+        console.error('Error navigating to instance:', error);
+        showError(true, error.message);
+    } finally {
+        setLoading(false);
+    }
+}
+
+function validateRequiredFields(options) {
+    // If user has already attempted forward validation, always show errors
+    // so they get real-time feedback as they fill in fields
+    const showErrors = (options && options.showErrors) || hasAttemptedForwardValidation;
+
+    // Check all inputs with validation="required" or validation="required_label"
+    const requiredInputs = document.querySelectorAll(
+        'input[validation="required"], input[validation="required_label"], ' +
+        'select[validation="required"], textarea[validation="required"]'
+    );
+    let allRequiredFilled = true;
+    const unfilledSchemas = [];
+
+    // Group inputs by their parent form's schema name
+    const formGroups = {};
+    requiredInputs.forEach(input => {
+        const form = input.closest('.annotation-form');
+        const schemaName = form ? (form.getAttribute('data-schema-name') || form.id) : null;
+        if (!schemaName) return;
+        if (!formGroups[schemaName]) {
+            formGroups[schemaName] = { form: form, radios: {}, others: [] };
+        }
+        if (input.type === 'radio') {
+            const name = input.name;
+            if (!formGroups[schemaName].radios[name]) {
+                formGroups[schemaName].radios[name] = [];
+            }
+            formGroups[schemaName].radios[name].push(input);
+        } else {
+            formGroups[schemaName].others.push(input);
+        }
+    });
+
+    // Check each schema's required inputs
+    for (const [schemaName, group] of Object.entries(formGroups)) {
+        let schemaFilled = true;
+
+        // Check radio groups
+        for (const [name, inputs] of Object.entries(group.radios)) {
+            if (!inputs.some(input => input.checked)) {
+                schemaFilled = false;
+                break;
+            }
+        }
+
+        // Check other inputs (textbox, select, range, etc.)
+        for (const input of group.others) {
+            if (input.type === 'range') {
+                // Sliders: check if user has interacted (data-modified attribute)
+                if (input.getAttribute('data-modified') !== 'true') {
+                    schemaFilled = false;
+                    break;
+                }
+            } else if (!input.value || input.value.trim() === '') {
+                schemaFilled = false;
+                break;
+            }
+        }
+
+        if (!schemaFilled) {
+            allRequiredFilled = false;
+            const legend = group.form.querySelector('legend');
+            const label = legend ? legend.textContent.trim() : schemaName;
+            unfilledSchemas.push({ name: schemaName, label: label });
+        }
+
+        // Only show visual feedback if user has attempted forward navigation
+        if (showErrors && group.form) {
+            group.form.classList.toggle('required-unfilled', !schemaFilled);
+        }
+    }
+
+    // Only show error messages after first forward attempt
+    if (showErrors) {
+        updateRequiredFieldsError(unfilledSchemas);
+    }
+
+    return allRequiredFilled;
+}
+
+function updateRequiredFieldsError(unfilledSchemas) {
+    let errorDiv = document.getElementById('required-fields-error');
+
+    if (unfilledSchemas.length === 0) {
+        if (errorDiv) {
+            errorDiv.style.display = 'none';
+        }
+        return;
+    }
+
+    // Create error div if it doesn't exist
+    if (!errorDiv) {
+        errorDiv = document.createElement('div');
+        errorDiv.id = 'required-fields-error';
+        errorDiv.className = 'required-fields-error';
+        const navDiv = document.querySelector('.potato-nav');
+        if (navDiv) {
+            navDiv.parentNode.insertBefore(errorDiv, navDiv);
+        }
+    }
+
+    const labels = unfilledSchemas.map(s => `<strong>${s.label}</strong>`).join(', ');
+    const plural = unfilledSchemas.length > 1;
+    errorDiv.innerHTML = `<i class="fas fa-exclamation-circle"></i> Please answer the required question${plural ? 's' : ''}: ${labels}`;
+    errorDiv.style.display = 'block';
+}
+
+function setLoading(loading) {
+    isLoading = loading;
+    const loadingState = document.getElementById('loading-state');
+    const mainContent = document.getElementById('main-content');
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+
+    if (loading) {
+        loadingState.style.display = 'block';
+        mainContent.style.display = 'none';
+        if (prevBtn) prevBtn.disabled = true;
+        nextBtn.disabled = true;
+    } else {
+        loadingState.style.display = 'none';
+        mainContent.style.display = 'block';
+        if (prevBtn) prevBtn.disabled = false;
+        // Re-enable next button, then run validation which may re-disable it
+        // if required fields are unfilled
+        nextBtn.disabled = false;
+        validateRequiredFields();
+    }
+}
+
+function showError(show, message = '', options = {}) {
+    const errorState = document.getElementById('error-state');
+    const errorMessage = document.getElementById('error-message-text');
+    const mainContent = document.getElementById('main-content');
+    const retryBtn = document.getElementById('error-retry-btn');
+    const doneLink = document.getElementById('error-done-link');
+
+    if (show) {
+        errorState.style.display = 'block';
+        mainContent.style.display = 'none';
+        errorMessage.textContent = message;
+        // For permanent blocks (e.g., attention check failures), hide retry and show finish link
+        if (options.permanent) {
+            if (retryBtn) retryBtn.style.display = 'none';
+            if (doneLink) doneLink.style.display = 'inline-flex';
+        } else {
+            if (retryBtn) retryBtn.style.display = '';
+            if (doneLink) doneLink.style.display = 'none';
+        }
+    } else {
+        errorState.style.display = 'none';
+        mainContent.style.display = 'block';
+    }
+}
+
+// Utility functions for annotation handling
+function updateAnnotation(schema, label, value) {
+    if (!currentAnnotations[schema]) {
+        currentAnnotations[schema] = {};
+    }
+    currentAnnotations[schema][label] = value;
+}
+
+/**
+ * Sync currentAnnotations from DOM to ensure we capture all current input states.
+ * This is needed before saving because change events may not fire for JS-triggered clicks.
+ */
+function syncAnnotationsFromDOM() {
+    // Sync checkboxes
+    const checkboxes = document.querySelectorAll('input[type="checkbox"].annotation-input');
+    checkboxes.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName) {
+            if (input.checked) {
+                if (!currentAnnotations[schema]) {
+                    currentAnnotations[schema] = {};
+                }
+                currentAnnotations[schema][labelName] = input.value;
+            } else {
+                // Remove unchecked checkboxes
+                if (currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+                    delete currentAnnotations[schema][labelName];
+                    if (Object.keys(currentAnnotations[schema]).length === 0) {
+                        delete currentAnnotations[schema];
+                    }
+                }
+            }
+        }
+    });
+
+    // Sync radio buttons — clear schemas first (radios are mutually exclusive)
+    const radios = document.querySelectorAll('input[type="radio"].annotation-input');
+    const radioSchemas = new Set();
+    radios.forEach(input => {
+        const schema = input.getAttribute('schema');
+        if (schema) radioSchemas.add(schema);
+    });
+    radioSchemas.forEach(schema => { delete currentAnnotations[schema]; });
+    radios.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName && input.checked) {
+            if (!currentAnnotations[schema]) {
+                currentAnnotations[schema] = {};
+            }
+            currentAnnotations[schema][labelName] = input.value;
+        }
+    });
+
+    // Sync text inputs
+    const textInputs = document.querySelectorAll('input[type="text"].annotation-input, textarea.annotation-input');
+    textInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName && input.value) {
+            if (!currentAnnotations[schema]) {
+                currentAnnotations[schema] = {};
+            }
+            currentAnnotations[schema][labelName] = input.value;
+        }
+    });
+
+    // Sync sliders
+    const sliders = document.querySelectorAll('input[type="range"].annotation-input');
+    sliders.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName) {
+            if (!currentAnnotations[schema]) {
+                currentAnnotations[schema] = {};
+            }
+            currentAnnotations[schema][labelName] = input.value;
+        }
+    });
+
+    // Sync select dropdowns
+    const selects = document.querySelectorAll('select.annotation-input');
+    selects.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName && input.value) {
+            if (!currentAnnotations[schema]) {
+                currentAnnotations[schema] = {};
+            }
+            currentAnnotations[schema][labelName] = input.value;
+        }
+    });
+
+    // Sync number inputs
+    const numberInputs = document.querySelectorAll('input[type="number"].annotation-input');
+    numberInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName && input.value) {
+            if (!currentAnnotations[schema]) {
+                currentAnnotations[schema] = {};
+            }
+            currentAnnotations[schema][labelName] = input.value;
+        }
+    });
+
+    // Sync hidden inputs (used by BWS, triage, and other custom schemas)
+    // IMPORTANT: Only include hidden inputs explicitly set by user interaction (data-modified)
+    // or server-side annotation restore (data-server-set). Browsers restore hidden input .value
+    // across page reloads (form state caching), which would otherwise leak annotations between instances.
+    const hiddenInputs = document.querySelectorAll('input[type="hidden"].annotation-input');
+    hiddenInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        const isModified = input.hasAttribute('data-modified') || input.hasAttribute('data-server-set');
+        if (schema && labelName && input.value && isModified) {
+            if (!currentAnnotations[schema]) {
+                currentAnnotations[schema] = {};
+            }
+            currentAnnotations[schema][labelName] = input.value;
+        }
+    });
+
+    debugLog('[DEBUG] syncAnnotationsFromDOM: synced annotations:', currentAnnotations);
+}
+
+// Function to handle "None" option in multiselect annotations
+function whetherNone(checkbox) {
+    // This function is used to uncheck all the other labels when "None" is checked
+    // and vice versa
+    var x = document.getElementsByClassName(checkbox.className);
+    var i;
+    for (i = 0; i < x.length; i++) {
+        if (checkbox.value == "None" && x[i].value != "None") x[i].checked = false;
+        if (checkbox.value != "None" && x[i].value == "None") x[i].checked = false;
+    }
+    // Also trigger the input change handler for the current checkbox
+    handleInputChange(checkbox);
+}
+
+// Input event handling functions
+function setupInputEventListeners() {
+    // Set up event listeners for all annotation inputs
+    const inputs = document.querySelectorAll('.annotation-input');
+
+    inputs.forEach(input => {
+        const inputType = input.type;
+        const tagName = input.tagName.toLowerCase();
+
+        if (inputType === 'text' || tagName === 'textarea') {
+            // Text inputs and textareas - debounced saving
+            let timer;
+            input.addEventListener('input', function (event) {
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    handleInputChange(event.target);
+                }, 1000);
+            });
+            debugLog(`Set up event listener for ${tagName} element:`, input.id);
+        } else if (inputType === 'radio' || inputType === 'checkbox') {
+            // Radio/checkbox inputs - immediate saving
+            input.addEventListener('change', function (event) {
+                handleInputChange(event.target);
+            });
+        } else if (inputType === 'range') {
+            // Slider inputs - immediate saving with value display
+            input.addEventListener('input', function (event) {
+                const valueDisplay = document.getElementById(`${input.name}-value`);
+                if (valueDisplay) {
+                    valueDisplay.textContent = event.target.value;
+                }
+                handleInputChange(event.target);
+            });
+        } else if (tagName === 'select') {
+            // Select inputs - immediate saving
+            input.addEventListener('change', function (event) {
+                handleInputChange(event.target);
+            });
+        } else if (inputType === 'number') {
+            // Number inputs - debounced saving
+            let timer;
+            input.addEventListener('input', function (event) {
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    handleInputChange(event.target);
+                }, 1000);
+            });
+        } else if (inputType === 'hidden') {
+            // Hidden inputs (used by triage and other custom schemas) - listen for change events
+            input.addEventListener('change', function (event) {
+                handleInputChange(event.target);
+            });
+            debugLog(`Set up event listener for hidden input:`, input.id);
+        }
+    });
+}
+
+function handleInputChange(element) {
+    const schema = element.getAttribute('schema');
+    const labelName = element.getAttribute('label_name');
+    const inputType = element.type;
+    const tagName = element.tagName.toLowerCase();
+
+    debugLog(`handleInputChange called for ${tagName} element:`, element.id, 'schema:', schema, 'label:', labelName);
+
+    if (!schema || !labelName) {
+        console.warn('Missing schema or label_name for input:', element);
+        return;
+    }
+
+    // Validate required fields after input change
+    validateRequiredFields();
+
+    let value;
+
+    if (inputType === 'radio') {
+        // For radio buttons, only save if checked
+        if (element.checked) {
+            const oldValue = currentAnnotations[schema] ? currentAnnotations[schema][labelName] : null;
+            // Radio buttons are mutually exclusive — clear old entries for this schema
+            currentAnnotations[schema] = {};
+            value = element.value;
+            // Track radio button selection
+            if (window.interactionTracker) {
+                window.interactionTracker.trackAnnotationChange(schema, labelName, 'select', oldValue, value, 'user');
+            }
+        } else {
+            return; // Don't save unchecked radio buttons
+        }
+    } else if (inputType === 'checkbox') {
+        // For checkboxes, save the checked state
+        if (element.checked) {
+            value = element.value;
+            // Track annotation selection
+            if (window.interactionTracker) {
+                window.interactionTracker.trackAnnotationChange(schema, labelName, 'select', null, value, 'user');
+            }
+        } else {
+            // For unchecked checkboxes, remove the annotation or set to false
+            const oldValue = currentAnnotations[schema] ? currentAnnotations[schema][labelName] : null;
+            if (currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+                delete currentAnnotations[schema][labelName];
+                // If the schema is empty, remove it too
+                if (Object.keys(currentAnnotations[schema]).length === 0) {
+                    delete currentAnnotations[schema];
+                }
+            }
+            debugLog(`Removed annotation: ${schema}.${labelName}`);
+
+            // Track annotation deselection
+            if (window.interactionTracker) {
+                window.interactionTracker.trackAnnotationChange(schema, labelName, 'deselect', oldValue, null, 'user');
+            }
+
+            // Auto-save the removal
+            clearTimeout(textSaveTimer);
+            textSaveTimer = setTimeout(() => {
+                saveAnnotations();
+            }, 500);
+            return;
+        }
+    } else {
+        // For text inputs, save the value
+        const oldValue = currentAnnotations[schema] ? currentAnnotations[schema][labelName] : null;
+        value = element.value;
+        // Track text input change
+        if (window.interactionTracker) {
+            window.interactionTracker.trackAnnotationChange(schema, labelName, 'update', oldValue, value, 'user');
+        }
+    }
+
+    // Update the current annotations
+    updateAnnotation(schema, labelName, value);
+    debugLog(`Updated annotation: ${schema}.${labelName} = ${value}`);
+
+    // Evaluate display logic for conditional schemas
+    if (displayLogicManager) {
+        displayLogicManager.evaluateForSchema(schema);
+    }
+
+    // Auto-save
+    clearTimeout(textSaveTimer);
+    textSaveTimer = setTimeout(() => {
+        saveAnnotations();
+    }, 500);
+
+    // Hotkey review mode: auto-advance once the instance is complete
+    maybeAutoAdvance();
+}
+
+/**
+ * Review mode (config: review_mode: {enabled, auto_advance, advance_on, delay_ms}).
+ *
+ * After each annotation change, if auto-advance is on and the instance is
+ * "complete", navigate to the next instance automatically — this turns
+ * keyboard-labeled schemas into a hotkey-driven review queue (press key,
+ * page advances).
+ *
+ * advance_on:
+ *   "complete" (default) — every annotation schema on the page has a value
+ *   "required"           — all required-validated schemas are filled
+ */
+let autoAdvanceTimer = null;
+function maybeAutoAdvance() {
+    const rm = (window.config && window.config.review_mode) || {};
+    if (!rm.enabled || rm.auto_advance === false) return;
+    if (isLoading) return;
+
+    const advanceOn = rm.advance_on || 'complete';
+    let ready;
+    if (advanceOn === 'required') {
+        ready = validateRequiredFields();
+    } else {
+        // Every schema form on the page must have at least one annotation.
+        const forms = document.querySelectorAll('.annotation-form[data-schema-name]');
+        ready = forms.length > 0;
+        forms.forEach(form => {
+            const name = form.getAttribute('data-schema-name');
+            if (!name) return;
+            const inState = currentAnnotations[name] &&
+                Object.keys(currentAnnotations[name]).length > 0;
+            // Hidden data-input schemas (turn-level, tool_call_review, ...)
+            // hold state in their input value instead of currentAnnotations.
+            const dataInput = form.querySelector('.annotation-data-input');
+            const inInput = dataInput && dataInput.value;
+            if (!inState && !inInput) ready = false;
+        });
+    }
+    if (!ready) return;
+
+    const delay = typeof rm.delay_ms === 'number' ? rm.delay_ms : 350;
+    clearTimeout(autoAdvanceTimer);
+    autoAdvanceTimer = setTimeout(() => {
+        debugLog('[review-mode] instance complete — auto-advancing');
+        navigateToNext();
+    }, delay);
+}
+
+function populateInputValues() {
+    if (!currentAnnotations) return;
+
+    debugLog('🔍 Populating input values with annotations:', currentAnnotations);
+
+    // Populate text inputs and textareas
+    const textInputs = document.querySelectorAll('input[type="text"], textarea.annotation-input');
+    debugLog('🔍 Found text inputs and textareas:', textInputs.length);
+
+    textInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        debugLog('🔍 Checking input:', input.id, 'schema:', schema, 'label:', labelName);
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            input.value = currentAnnotations[schema][labelName];
+            debugLog(`✅ Populated ${input.tagName} ${input.id} with value:`, currentAnnotations[schema][labelName]);
+        } else {
+            debugLog(`❌ Could not populate ${input.tagName} ${input.id}:`, {
+                hasSchema: !!schema,
+                hasLabelName: !!labelName,
+                hasSchemaInAnnotations: !!(currentAnnotations[schema]),
+                hasLabelInSchema: !!(currentAnnotations[schema] && currentAnnotations[schema][labelName])
+            });
+        }
+    });
+
+    // Populate radio buttons
+    const radioInputs = document.querySelectorAll('input[type="radio"]');
+    radioInputs.forEach(input => {
+        // Codebook restore (restoreRuntimeSelections) authoritatively
+        // sets runtime-code inputs and marks them data-server-set. Don't
+        // override those here — our async fetch and theirs race, and an
+        // unconditional reset would clobber a just-restored runtime code.
+        if (input.getAttribute('data-server-set') === 'true') return;
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            input.checked = (currentAnnotations[schema][labelName] === input.value);
+            debugLog(`Populated radio ${input.id}: ${input.checked ? 'checked' : 'unchecked'}`);
+        }
+    });
+
+    // Populate checkboxes
+    const checkboxInputs = document.querySelectorAll('input[type="checkbox"]');
+    checkboxInputs.forEach(input => {
+        // See the radio note above: a checkbox the codebook restore
+        // already owns (data-server-set) must not be unconditionally
+        // reset here — the `input.checked = hasAnnotation` below would
+        // force-uncheck a restored runtime code whose key isn't in
+        // currentAnnotations, which is the nav-back persistence race.
+        if (input.getAttribute('data-server-set') === 'true') return;
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema]) {
+            // For checkboxes, check if the value exists in the annotations
+            const hasAnnotation = currentAnnotations[schema][labelName] === input.value;
+            input.checked = hasAnnotation;
+            debugLog(`Populated checkbox ${input.id}: ${hasAnnotation ? 'checked' : 'unchecked'}`);
+        }
+    });
+
+    // Populate sliders
+    const sliderInputs = document.querySelectorAll('input[type="range"]');
+    sliderInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            input.value = currentAnnotations[schema][labelName];
+            const valueDisplay = document.getElementById(`${input.name}-value`);
+            if (valueDisplay) {
+                valueDisplay.textContent = currentAnnotations[schema][labelName];
+            }
+            // Dispatch input event to trigger display updates (constant_sum, VAS, etc.)
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            debugLog(`Populated slider ${input.id} with value:`, currentAnnotations[schema][labelName]);
+        }
+    });
+
+    // Populate select dropdowns
+    const selectInputs = document.querySelectorAll('select.annotation-input');
+    selectInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            input.value = currentAnnotations[schema][labelName];
+            debugLog(`Populated select ${input.id} with value:`, currentAnnotations[schema][labelName]);
+        }
+    });
+
+    // Populate number inputs
+    const numberInputs = document.querySelectorAll('input[type="number"].annotation-input');
+    numberInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            input.value = currentAnnotations[schema][labelName];
+            // Dispatch input event to trigger constant_sum display updates
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            debugLog(`Populated number ${input.id} with value:`, currentAnnotations[schema][labelName]);
+        }
+    });
+
+    // Populate pairwise annotations
+    restorePairwiseAnnotations();
+
+    // Populate BWS annotations
+    restoreBwsAnnotations();
+
+    // Populate ranking annotations
+    restoreRankingAnnotations();
+
+    // Populate hierarchical multiselect annotations
+    restoreHierarchicalAnnotations();
+
+    // Populate soft label slider displays
+    restoreSoftLabelDisplays();
+
+    // Populate range slider displays
+    restoreRangeSliderDisplays();
+
+    // Populate semantic differential radios
+    restoreSemanticDifferentialAnnotations();
+
+    // Restore text edit schemas (populate editor textarea from saved data)
+    restoreTextEditAnnotations();
+
+    // Restore extractive QA annotations
+    restoreExtractiveQaAnnotations();
+
+    // Restore error span annotations
+    restoreErrorSpanAnnotations();
+
+    // Restore card sort annotations
+    restoreCardSortAnnotations();
+
+    // Restore trajectory eval annotations
+    restoreTrajectoryEvalAnnotations();
+
+    // Restore trajectory edit (correction) annotations
+    restoreTrajectoryEditAnnotations();
+
+    // Update character counters for text schemas with min_chars/show_char_count
+    updateAllCharCounters();
+
+    validateRequiredFields();
+}
+
+/**
+ * Restore ranking annotations by reordering items to match saved order.
+ */
+function restoreRankingAnnotations() {
+    const hiddenInputs = document.querySelectorAll('.ranking-order-input');
+    hiddenInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            const savedOrder = currentAnnotations[schema][labelName];
+            input.value = savedOrder;
+            input.setAttribute('data-modified', 'true');
+            input.setAttribute('data-server-set', 'true');
+            // Reorder DOM items
+            const list = input.closest('fieldset').querySelector('.ranking-list');
+            if (list) {
+                const order = savedOrder.split(',');
+                const items = Array.from(list.querySelectorAll('.ranking-item'));
+                order.forEach((val, idx) => {
+                    const item = items.find(it => it.getAttribute('data-value') === val);
+                    if (item) {
+                        list.appendChild(item);
+                        item.querySelector('.ranking-rank').textContent = idx + 1;
+                    }
+                });
+            }
+            debugLog('Restored ranking annotation for', schema);
+        }
+    });
+}
+
+/**
+ * Restore hierarchical multiselect annotations by checking saved labels.
+ */
+function restoreHierarchicalAnnotations() {
+    const hiddenInputs = document.querySelectorAll('.hier-selected-input');
+    hiddenInputs.forEach(input => {
+        const schema = input.getAttribute('schema');
+        const labelName = input.getAttribute('label_name');
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            const savedLabels = currentAnnotations[schema][labelName];
+            input.value = savedLabels;
+            input.setAttribute('data-modified', 'true');
+            input.setAttribute('data-server-set', 'true');
+            // Check matching checkboxes
+            const selected = savedLabels.split(',').map(s => s.trim()).filter(Boolean);
+            const tree = input.closest('fieldset').querySelector('.hier-tree');
+            if (tree) {
+                tree.querySelectorAll('.hier-checkbox').forEach(cb => {
+                    cb.checked = selected.includes(cb.value);
+                });
+                // Update tags display
+                const tagsContainer = tree.parentElement.querySelector('.hier-selected-tags');
+                if (tagsContainer) {
+                    tagsContainer.innerHTML = selected.map(s =>
+                        '<span class="hier-tag">' + s + '</span>'
+                    ).join('');
+                }
+            }
+            debugLog('Restored hierarchical annotation for', schema);
+        }
+    });
+}
+
+/**
+ * Restore soft label slider display values and chart bars after populating range inputs.
+ */
+function restoreSoftLabelDisplays() {
+    document.querySelectorAll('.shadcn-soft-label-container').forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        const total = parseInt(form.getAttribute('data-soft-label-total')) || 100;
+        const sliders = form.querySelectorAll('.soft-label-slider');
+        sliders.forEach((s, idx) => {
+            const valEl = document.getElementById('soft-label-val-' + s.id);
+            if (valEl) valEl.textContent = s.value;
+            const bar = document.getElementById('soft-label-bar-' + schema + '-' + idx);
+            if (bar) bar.style.width = (parseInt(s.value) / total * 100) + '%';
+        });
+        // Update allocated/remaining indicators
+        const sum = Array.from(sliders).reduce((acc, s) => acc + parseInt(s.value), 0);
+        const allocEl = document.getElementById('soft-label-allocated-' + schema);
+        if (allocEl) {
+            allocEl.innerHTML = 'Allocated: <strong>' + sum + '</strong> / ' + total;
+        }
+        const remEl = document.getElementById('soft-label-remaining-' + schema);
+        if (remEl) {
+            remEl.innerHTML = 'Remaining: <strong>' + (total - sum) + '</strong>';
+        }
+    });
+}
+
+/**
+ * Restore range slider fill and value displays.
+ */
+function restoreRangeSliderDisplays() {
+    document.querySelectorAll('.shadcn-range-slider-container').forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema) return;
+
+        // Get saved values or read defaults from hidden inputs
+        const lowInput = form.querySelector('[data-range-slider-role="low"]');
+        const highInput = form.querySelector('[data-range-slider-role="high"]');
+        if (!lowInput || !highInput) return;
+
+        let lowVal, highVal;
+        if (currentAnnotations[schema]) {
+            lowVal = currentAnnotations[schema]['range_low'];
+            highVal = currentAnnotations[schema]['range_high'];
+        }
+
+        // If we have saved values, restore them
+        if (lowVal != null && highVal != null) {
+            const renderFn = window['rangeSliderRender_' + schema];
+            if (renderFn) {
+                renderFn(parseInt(lowVal), parseInt(highVal));
+            }
+        }
+
+        // Always mark hidden inputs as modified so they get synced
+        lowInput.setAttribute('data-modified', 'true');
+        highInput.setAttribute('data-modified', 'true');
+    });
+}
+
+/**
+ * Restore semantic differential radio buttons using name-based matching.
+ */
+function restoreSemanticDifferentialAnnotations() {
+    const forms = document.querySelectorAll('.shadcn-semantic-differential-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+        const radios = form.querySelectorAll('.semantic-differential-radio');
+        radios.forEach(radio => {
+            const labelName = radio.getAttribute('label_name');
+            if (labelName && currentAnnotations[schema][labelName]) {
+                if (radio.value === currentAnnotations[schema][labelName]) {
+                    radio.checked = true;
+                }
+            }
+        });
+    });
+}
+
+/**
+ * Restore text edit annotations (populate editor textarea and trigger diff).
+ */
+function restoreTextEditAnnotations() {
+    const forms = document.querySelectorAll('.shadcn-text-edit-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        const hiddenInput = form.querySelector('.text-edit-data-input');
+        if (!hiddenInput) return;
+
+        const labelName = hiddenInput.getAttribute('label_name');
+        if (!labelName || !currentAnnotations[schema][labelName]) return;
+
+        try {
+            const data = JSON.parse(currentAnnotations[schema][labelName]);
+            if (data && data.edited_text !== undefined) {
+                const editor = form.querySelector('.text-edit-textarea');
+                if (editor) {
+                    editor.value = data.edited_text;
+                    // Trigger diff update
+                    if (typeof window.textEditOnInput === 'function') {
+                        window.textEditOnInput(schema);
+                    }
+                }
+            }
+            hiddenInput.value = currentAnnotations[schema][labelName];
+            hiddenInput.setAttribute('data-server-set', 'true');
+            hiddenInput.setAttribute('data-modified', 'true');
+        } catch (e) {
+            debugLog('Error restoring text edit annotation:', e);
+        }
+    });
+}
+
+/**
+ * Restore extractive QA annotations (highlight answer span).
+ */
+function restoreExtractiveQaAnnotations() {
+    const forms = document.querySelectorAll('.shadcn-extractive-qa-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        const hiddenInput = form.querySelector('.eqa-data-input');
+        if (!hiddenInput) return;
+
+        const labelName = hiddenInput.getAttribute('label_name');
+        if (!labelName || !currentAnnotations[schema][labelName]) return;
+
+        try {
+            const data = JSON.parse(currentAnnotations[schema][labelName]);
+            hiddenInput.value = currentAnnotations[schema][labelName];
+            hiddenInput.setAttribute('data-server-set', 'true');
+            hiddenInput.setAttribute('data-modified', 'true');
+
+            if (data.unanswerable) {
+                document.getElementById(schema + '-answer-text').textContent = 'Unanswerable';
+                var unansBtn = document.getElementById(schema + '-unanswerable');
+                if (unansBtn) unansBtn.classList.add('eqa-unanswerable-active');
+            } else if (data.answer_text) {
+                document.getElementById(schema + '-answer-text').textContent = data.answer_text;
+                // Re-highlight the span in the passage
+                var container = document.getElementById(schema + '-passage');
+                if (container && data.start >= 0 && data.end > data.start) {
+                    var text = container.textContent;
+                    var color = container.dataset.highlightColor || '#FFEB3B';
+                    container.innerHTML = text.substring(0, data.start) +
+                        '<span class="eqa-highlight" style="background-color:' + color + '">' +
+                        text.substring(data.start, data.end) + '</span>' +
+                        text.substring(data.end);
+                }
+            }
+        } catch (e) {
+            debugLog('Error restoring extractive QA annotation:', e);
+        }
+    });
+}
+
+/**
+ * Restore error span annotations.
+ */
+function restoreErrorSpanAnnotations() {
+    const forms = document.querySelectorAll('.shadcn-error-span-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        const hiddenInput = form.querySelector('.error-span-data-input');
+        if (!hiddenInput) return;
+
+        const labelName = hiddenInput.getAttribute('label_name');
+        if (!labelName || !currentAnnotations[schema][labelName]) return;
+
+        try {
+            const data = JSON.parse(currentAnnotations[schema][labelName]);
+            hiddenInput.value = currentAnnotations[schema][labelName];
+            hiddenInput.setAttribute('data-server-set', 'true');
+            hiddenInput.setAttribute('data-modified', 'true');
+
+            if (data.errors && typeof window._errorSpanGetState === 'function') {
+                var state = window._errorSpanGetState(schema);
+                state.errors = data.errors;
+                window._errorSpanUpdateDisplay(schema);
+            }
+        } catch (e) {
+            debugLog('Error restoring error span annotation:', e);
+        }
+    });
+}
+
+/**
+ * Restore card sort annotations by placing cards into groups.
+ */
+function restoreCardSortAnnotations() {
+    const forms = document.querySelectorAll('.shadcn-card-sort-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        const hiddenInput = form.querySelector('.card-sort-data-input');
+        if (!hiddenInput) return;
+
+        const labelName = hiddenInput.getAttribute('label_name');
+        if (!labelName || !currentAnnotations[schema][labelName]) return;
+
+        try {
+            const data = JSON.parse(currentAnnotations[schema][labelName]);
+            hiddenInput.value = currentAnnotations[schema][labelName];
+            hiddenInput.setAttribute('data-server-set', 'true');
+            hiddenInput.setAttribute('data-modified', 'true');
+
+            // Move cards into their saved groups
+            if (data && typeof data === 'object') {
+                Object.keys(data).forEach(function(groupName) {
+                    var items = data[groupName];
+                    var groups = form.querySelectorAll('.card-sort-group');
+                    groups.forEach(function(g) {
+                        if (g.dataset.group === groupName) {
+                            var container = g.querySelector('.card-sort-group-items');
+                            items.forEach(function(text) {
+                                // Find card in source and move it
+                                var source = form.querySelector('.card-sort-source-items');
+                                var cards = source ? source.querySelectorAll('.card-sort-card') : [];
+                                cards.forEach(function(c) {
+                                    if (c.textContent.trim() === text) {
+                                        container.appendChild(c);
+                                    }
+                                });
+                            });
+                        }
+                    });
+                });
+                if (typeof window._cardSortUpdateCounts === 'function') {
+                    window._cardSortUpdateCounts(schema);
+                }
+            }
+        } catch (e) {
+            debugLog('Error restoring card sort annotation:', e);
+        }
+    });
+}
+
+/**
+ * Restore trajectory eval annotations from currentAnnotations.
+ * Mirrors the error_span restore pattern: parse JSON, push into IIFE state,
+ * then call the IIFE's visual-restore function.
+ */
+function restoreTrajectoryEvalAnnotations() {
+    const forms = document.querySelectorAll('.trajectory-eval-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        const hiddenInput = form.querySelector('.trajectory-eval-data-input');
+        if (!hiddenInput) return;
+
+        const labelName = hiddenInput.getAttribute('label_name');
+        if (!labelName || !currentAnnotations[schema][labelName]) return;
+
+        try {
+            const data = JSON.parse(currentAnnotations[schema][labelName]);
+            hiddenInput.value = currentAnnotations[schema][labelName];
+            hiddenInput.setAttribute('data-server-set', 'true');
+            hiddenInput.setAttribute('data-modified', 'true');
+
+            if (data.steps && typeof window._trajGetState === 'function') {
+                var state = window._trajGetState();
+                state.steps = data.steps;
+                if (typeof window._trajBuildStepCards === 'function') {
+                    window._trajBuildStepCards();
+                }
+                if (typeof window._trajRestoreVisualState === 'function') {
+                    window._trajRestoreVisualState();
+                }
+            }
+        } catch (e) {
+            debugLog('Error restoring trajectory eval annotation:', e);
+        }
+    });
+}
+
+/**
+ * Restore trajectory edit (correction) annotations from currentAnnotations.
+ * Populates the IIFE's per-schema state from the saved JSON, then rebuilds the
+ * editors (prefilling textareas with edited_text) and re-runs the visual pass.
+ */
+function restoreTrajectoryEditAnnotations() {
+    const forms = document.querySelectorAll('.trajectory-edit-container');
+    forms.forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        const hiddenInput = form.querySelector('.trajectory-edit-data-input');
+        if (!hiddenInput) return;
+
+        const labelName = hiddenInput.getAttribute('label_name');
+        if (!labelName || !currentAnnotations[schema][labelName]) return;
+
+        try {
+            const raw = currentAnnotations[schema][labelName];
+            const data = JSON.parse(raw);
+            hiddenInput.value = raw;
+            hiddenInput.setAttribute('data-server-set', 'true');
+            hiddenInput.setAttribute('data-modified', 'true');
+
+            if (window._trajEditState) {
+                const st = window._trajEditState[schema] || { entries: {}, final_answer: null };
+                st.entries = {};
+                (data.steps || []).forEach(e => {
+                    st.entries[e.step_index + '::' + e.field] = e;
+                });
+                st.final_answer = data.final_answer || null;
+                window._trajEditState[schema] = st;
+            }
+            if (typeof window._trajEditBuild === 'function') window._trajEditBuild();
+            if (typeof window._trajEditRestore === 'function') window._trajEditRestore();
+        } catch (e) {
+            debugLog('Error restoring trajectory edit annotation:', e);
+        }
+    });
+}
+
+/**
+ * Update all character counters for text schemas with min_chars/show_char_count.
+ */
+function updateAllCharCounters() {
+    const counters = document.querySelectorAll('.shadcn-textbox-char-counter');
+    counters.forEach(counter => {
+        const inputId = counter.dataset.inputId;
+        const minChars = parseInt(counter.dataset.minChars || '0', 10);
+        const input = document.getElementById(inputId);
+        if (!input) return;
+
+        const len = (input.value || input.textContent || '').length;
+        const countSpan = counter.querySelector('.shadcn-textbox-char-count');
+        if (countSpan) countSpan.textContent = len;
+
+        if (minChars > 0) {
+            counter.classList.toggle('char-count-met', len >= minChars);
+            counter.classList.toggle('char-count-unmet', len < minChars);
+        }
+
+        // Set up live updating if not already done
+        if (!input.dataset.charCounterBound) {
+            input.dataset.charCounterBound = 'true';
+            input.addEventListener('input', function() {
+                const l = (input.value || input.textContent || '').length;
+                if (countSpan) countSpan.textContent = l;
+                if (minChars > 0) {
+                    counter.classList.toggle('char-count-met', l >= minChars);
+                    counter.classList.toggle('char-count-unmet', l < minChars);
+                }
+            });
+        }
+    });
+}
+
+// Span annotation functions
+function onlyOne(checkbox) {
+    debugLog('🔍 [DEBUG] onlyOne() called with checkbox:', {
+        id: checkbox.id,
+        name: checkbox.name,
+        value: checkbox.value,
+        checked: checkbox.checked,
+        className: checkbox.className
+    });
+
+    var x = document.getElementsByClassName(checkbox.className);
+    debugLog('🔍 [DEBUG] onlyOne() - Found elements with same class:', x.length);
+
+    var i;
+    for (i = 0; i < x.length; i++) {
+        debugLog('🔍 [DEBUG] onlyOne() - Processing element:', {
+            id: x[i].id,
+            value: x[i].value,
+            checked: x[i].checked,
+            willUncheck: x[i].value != checkbox.value
+        });
+
+        if (x[i].value != checkbox.value) {
+            debugLog('🔍 [DEBUG] onlyOne() - Unchecking element:', x[i].id);
+            x[i].checked = false;
+        }
+    }
+    // Ensure the clicked checkbox is checked
+    debugLog('🔍 [DEBUG] onlyOne() - Setting clicked checkbox to checked:', checkbox.id);
+    checkbox.setAttribute('data-just-checked', 'true'); // Flag to prevent change event interference
+    checkbox.checked = true;
+
+    // Remove the flag after a short delay in case the change event doesn't fire
+    setTimeout(() => {
+        if (checkbox.hasAttribute('data-just-checked')) {
+            debugLog('🔍 [DEBUG] onlyOne() - Removing data-just-checked flag after timeout');
+            checkbox.removeAttribute('data-just-checked');
+        }
+    }, 100);
+}
+
+function extractSpanAnnotationsFromDOM() {
+    /*
+     * Extract span annotations from the DOM using the overlay system.
+     *
+     * Returns:
+     *     Array of span annotation objects with schema, name, start, end, title, value
+     */
+    debugLog('[DEBUG] extractSpanAnnotationsFromDOM called');
+
+    const overlays = document.querySelectorAll('.span-overlay');
+    const spanAnnotations = [];
+
+    for (const overlay of overlays) {
+        const schema = overlay.getAttribute('data-schema');
+        const label = overlay.getAttribute('data-label');
+        const start = parseInt(overlay.getAttribute('data-start'));
+        const end = parseInt(overlay.getAttribute('data-end'));
+        const title = overlay.querySelector('.span-label')?.textContent?.trim() || label;
+
+        // Get the text value by finding the covered segments
+        const segments = document.querySelectorAll('.text-segment');
+        let coveredText = '';
+        for (const segment of segments) {
+            const segStart = parseInt(segment.getAttribute('data-start'));
+            const segEnd = parseInt(segment.getAttribute('data-end'));
+            const spanIds = segment.getAttribute('data-span-ids')?.split(',') || [];
+
+            // Check if this segment is covered by this overlay
+            if (overlay.getAttribute('data-annotation-id') &&
+                spanIds.includes(overlay.getAttribute('data-annotation-id'))) {
+                coveredText += segment.textContent;
+            }
+        }
+
+        const targetField = overlay.getAttribute('data-target-field') || '';
+
+        // Extract span ID to preserve identity across saves
+        const spanId = overlay.getAttribute('data-annotation-id') ||
+                       overlay.getAttribute('data-span-id');
+
+        spanAnnotations.push({
+            schema: schema,
+            name: label,
+            start: start,
+            end: end,
+            title: title,
+            value: coveredText,
+            target_field: targetField,
+            id: spanId
+        });
+    }
+
+    debugLog('[DEBUG] extractSpanAnnotationsFromDOM: found', spanAnnotations.length, 'spans:', spanAnnotations);
+    return spanAnnotations;
+}
+
+function alignSpanOverlays() {
+    /*
+     * Align each .span-overlay to the union of its covered .text-segment spans.
+     * This function positions overlays to match the actual text segments in the DOM.
+     */
+    debugLog('[DEBUG] alignSpanOverlays called');
+
+    const overlays = document.querySelectorAll('.span-overlay');
+    const segments = Array.from(document.querySelectorAll('.text-segment'));
+    const container = document.querySelector('.span-annotation-container');
+
+    if (!container) {
+        console.warn('[DEBUG] alignSpanOverlays: No .span-annotation-container found');
+        return;
+    }
+
+    for (const overlay of overlays) {
+        const annotationId = overlay.getAttribute('data-annotation-id');
+        if (!annotationId) {
+            console.warn('[DEBUG] alignSpanOverlays: Overlay missing data-annotation-id');
+            continue;
+        }
+
+        // Find all segments covered by this overlay
+        const coveredSegments = segments.filter(segment => {
+            const spanIds = segment.getAttribute('data-span-ids')?.split(',') || [];
+            return spanIds.includes(annotationId);
+        });
+
+        if (coveredSegments.length === 0) {
+            console.warn('[DEBUG] alignSpanOverlays: No segments found for overlay', annotationId);
+            continue;
+        }
+
+        // Calculate the bounding rectangle of all covered segments
+        let minLeft = Infinity;
+        let maxRight = -Infinity;
+        let minTop = Infinity;
+        let maxBottom = -Infinity;
+
+        for (const segment of coveredSegments) {
+            const rect = segment.getBoundingClientRect();
+            const containerRect = container.getBoundingClientRect();
+
+            const relativeLeft = rect.left - containerRect.left;
+            const relativeRight = rect.right - containerRect.left;
+            const relativeTop = rect.top - containerRect.top;
+            const relativeBottom = rect.bottom - containerRect.top;
+
+            minLeft = Math.min(minLeft, relativeLeft);
+            maxRight = Math.max(maxRight, relativeRight);
+            minTop = Math.min(minTop, relativeTop);
+            maxBottom = Math.max(maxBottom, relativeBottom);
+        }
+
+        // Position the overlay to cover all segments
+        overlay.style.left = minLeft + 'px';
+        overlay.style.top = minTop + 'px';
+        overlay.style.width = (maxRight - minLeft) + 'px';
+        overlay.style.height = (maxBottom - minTop) + 'px';
+        overlay.style.backgroundColor = 'rgba(255, 230, 230, 0.3)';
+        overlay.style.border = '1px solid rgba(255, 230, 230, 0.8)';
+
+        debugLog('[DEBUG] alignSpanOverlays: Positioned overlay', annotationId, 'at',
+            minLeft, minTop, maxRight - minLeft, maxBottom - minTop);
+    }
+}
+
+// Robust selection mapping for overlay system
+function getSelectionIndicesOverlay() {
+    /*
+     * Get the start and end indices of the current text selection using the overlay approach.
+     *
+     * This function uses the unified text positioning approach to ensure
+     * consistent offsets between frontend and backend.
+     *
+     * Returns:
+     *     Object with start and end indices in the original text
+     */
+    debugLog('[DEBUG] getSelectionIndicesOverlay called');
+
+    var selection = window.getSelection();
+    if (!selection.rangeCount) {
+        debugLog('[DEBUG] getSelectionIndicesOverlay: No selection range');
+        return { start: 0, end: 0 };
+    }
+
+    var range = selection.getRangeAt(0);
+    var container = document.getElementById('text-content');
+
+    if (!container) {
+        debugLog('[DEBUG] getSelectionIndicesOverlay: No text-content container found');
+        return { start: 0, end: 0 };
+    }
+
+    // Use the unified text positioning approach
+    if (typeof calculateTextOffsetsFromSelection === 'function') {
+        const offsets = calculateTextOffsetsFromSelection(container, range);
+        debugLog('[DEBUG] getSelectionIndicesOverlay: Using unified approach, offsets:', offsets);
+        return offsets;
+    }
+
+    // Fallback to the original approach if unified function is not available
+    debugLog('[DEBUG] getSelectionIndicesOverlay: Using fallback approach');
+    return getOriginalTextOffsetsOverlay(container, range);
+}
+
+// Use overlay system for all span operations
+function changeSpanLabel(checkbox, schema, spanLabel, spanTitle, spanColor, targetField) {
+    /*
+     * Set up span annotation mode using the new span manager.
+     *
+     * Args:
+     *     checkbox: The checkbox element that was clicked
+     *     schema: The annotation schema
+     *     spanLabel: The span label
+     *     spanTitle: The span title
+     *     spanColor: The span color
+     *     targetField: The target field key for multi-span mode (optional)
+     */
+    debugLog('[DEBUG] changeSpanLabel called:', { schema, spanLabel, spanTitle, spanColor, targetField, checked: checkbox.checked });
+
+    // Use the new span manager if available
+    if (window.spanManager && window.spanManager.isInitialized) {
+        debugLog('[DEBUG] changeSpanLabel: Using new span manager');
+
+        // Select the label, schema, and target field in the span manager
+        window.spanManager.selectLabel(spanLabel, schema, targetField);
+
+        // Set up text selection handler
+        const textContainer = document.getElementById('instance-text');
+        if (textContainer) {
+            // Create bound handlers once and store them for proper cleanup
+            if (!boundEventHandlers.spanManagerMouseUp) {
+                boundEventHandlers.spanManagerMouseUp = window.spanManager.handleTextSelection.bind(window.spanManager);
+                boundEventHandlers.spanManagerKeyUp = window.spanManager.handleTextSelection.bind(window.spanManager);
+            }
+
+            // Remove existing handlers using stored references
+            textContainer.removeEventListener('mouseup', boundEventHandlers.spanManagerMouseUp);
+            textContainer.removeEventListener('keyup', boundEventHandlers.spanManagerKeyUp);
+
+            // Add new handlers only when checkbox is checked
+            if (checkbox.checked) {
+                textContainer.addEventListener('mouseup', boundEventHandlers.spanManagerMouseUp);
+                textContainer.addEventListener('keyup', boundEventHandlers.spanManagerKeyUp);
+                debugLog('[DEBUG] changeSpanLabel: Text selection handlers added for span manager');
+            }
+        }
+    } else {
+        // Defer to new manager once ready; avoid legacy overlay system to prevent conflicts
+        debugLog('[DEBUG] changeSpanLabel: Span manager not ready; deferring selection to manager');
+        const waitAndSelect = () => {
+            if (window.spanManager && window.spanManager.isInitialized) {
+                window.spanManager.selectLabel(spanLabel, schema, targetField);
+                return true;
+            }
+            return false;
+        };
+        if (!waitAndSelect()) {
+            let retries = 0;
+            const timer = setInterval(() => {
+                if (waitAndSelect() || ++retries > 20) clearInterval(timer);
+            }, 100);
+        }
+    }
+
+    // Add debugging to track checkbox state after function execution
+    setTimeout(() => {
+        debugLog('[DEBUG] changeSpanLabel: Checkbox state after execution:', {
+            id: checkbox.id,
+            checked: checkbox.checked,
+            name: checkbox.name,
+            value: checkbox.value
+        });
+    }, 0);
+}
+
+function surroundSelection(schema, labelName, title, selectionColor) {
+    // Only use overlay system
+    surroundSelectionOverlay(schema, labelName, title, selectionColor);
+}
+
+function restoreSpanAnnotationsFromHTML() {
+    // Only use overlay system
+    restoreSpanAnnotationsFromHTMLOverlay();
+}
+
+// LEGACY OVERLAY FUNCTIONS - DEPRECATED
+// These functions are kept for backward compatibility but are no longer used
+// The new boundary-based rendering system handles everything server-side
+
+// function getSelectionIndicesOverlay() {
+//     /*
+//      * Get selection indices for the overlay-based approach.
+//      *
+//      * This function works with the original text element and maps
+//      * DOM selection to original text offsets.
+//      *
+//      * Returns:
+//      *     Object with start and end indices in the original text
+//      */
+//     debugLog('[DEBUG] getSelectionIndicesOverlay called');
+
+//     // Get the user selection
+//     var selection = window.getSelection();
+
+//     if (selection.rangeCount === 0) {
+//         debugLog('[DEBUG] getSelectionIndicesOverlay: No selection');
+//         return { start: -1, end: -1 }; // No selection
+//     }
+
+//     // Get the range object representing the selected portion
+//     var range = selection.getRangeAt(0);
+
+//     debugLog('[DEBUG] getSelectionIndicesOverlay: Selection details:', {
+//         selectionText: selection.toString(),
+//         selectionLength: selection.toString().length,
+//         rangeStartContainer: range.startContainer,
+//         rangeStartOffset: range.startOffset,
+//         rangeEndContainer: range.endContainer,
+//         rangeEndOffset: range.endOffset,
+//         commonAncestor: range.commonAncestorContainer
+//     });
+
+//     // Find the original text element within the span annotation container
+//     var originalTextElement = $(range.commonAncestorContainer).closest('.original-text')[0];
+
+//     if (!originalTextElement) {
+//         debugLog('[DEBUG] getSelectionIndicesOverlay: Not within .original-text');
+//         return { start: -2, end: -2 }; // Not within the original text
+//     }
+
+//     // Get the original text from the data attribute for comparison
+//     var originalTextFromData = originalTextElement.getAttribute('data-original-text');
+//     debugLog('[DEBUG] getSelectionIndicesOverlay: Original text from data attribute:', originalTextFromData);
+//     debugLog('[DEBUG] getSelectionIndicesOverlay: Original text length from data:', originalTextFromData ? originalTextFromData.length : 0);
+
+//     // For the overlay approach, we can use a simpler offset calculation
+//     // since the original text is unchanged and we can directly map DOM positions
+//     var result = getOriginalTextOffsetsOverlay(originalTextElement, range);
+
+//     debugLog('[DEBUG] getSelectionIndicesOverlay: Final result:', result);
+
+//     return result;
+// }
+
+function getOriginalTextOffsetsOverlay(container, range) {
+    /*
+     * Get original text offsets for the overlay approach.
+     *
+     * This function uses the unified text positioning approach to ensure
+     * consistent offsets between frontend and backend.
+     *
+     * Args:
+     *     container: The original text container element
+     *     range: The DOM range object
+     *
+     * Returns:
+     *     Object with start and end offsets in the original text
+     */
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay called');
+
+    // Use the unified text positioning approach
+    if (typeof calculateTextOffsetsFromSelection === 'function') {
+        const offsets = calculateTextOffsetsFromSelection(container, range);
+        debugLog('[DEBUG] getOriginalTextOffsetsOverlay: Using unified approach, offsets:', offsets);
+        return offsets;
+    }
+
+    // Fallback to the original approach if unified function is not available
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay: Using fallback approach');
+
+    // Get the original text from the data attribute (this is the clean text without HTML markup)
+    var originalText = container.getAttribute('data-original-text');
+    if (!originalText) {
+        debugLog('[DEBUG] getOriginalTextOffsetsOverlay: WARNING - no data-original-text attribute found, falling back to DOM text');
+        originalText = container.textContent || container.innerText;
+    }
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay: originalText from data attribute:', originalText);
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay: originalText length:', originalText.length);
+
+    // Get the selected text
+    var selectedText = window.getSelection().toString();
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay: selectedText:', selectedText);
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay: selectedText length:', selectedText.length);
+
+    // Find the selection in the original text
+    var startIndex = originalText.indexOf(selectedText);
+    var endIndex = startIndex + selectedText.length;
+
+    debugLog('[DEBUG] getOriginalTextOffsetsOverlay: mapped indices:', { startIndex, endIndex });
+
+    // Verify the indices by extracting text
+    if (startIndex !== -1) {
+        var extractedText = originalText.substring(startIndex, endIndex);
+        debugLog('[DEBUG] getOriginalTextOffsetsOverlay: extracted text using indices:', extractedText);
+        debugLog('[DEBUG] getOriginalTextOffsetsOverlay: extracted text matches selected text:', extractedText === selectedText);
+    } else {
+        debugLog('[DEBUG] getOriginalTextOffsetsOverlay: WARNING - selected text not found in original text!');
+    }
+
+    return { start: startIndex, end: endIndex };
+}
+
+// Update the existing surroundSelection function to work with overlays
+function surroundSelectionOverlay(schema, labelName, title, selectionColor) {
+    /*
+     * Create a span annotation using the overlay approach.
+     *
+     * Args:
+     *     schema: The annotation schema
+     *     labelName: The label name
+     *     title: The annotation title
+     *     selectionColor: The color for the annotation
+     */
+    debugLog('[DEBUG] surroundSelectionOverlay called:', { schema, labelName, title, selectionColor });
+
+    // Check that this wasn't a spurious click or the click for the delete button which
+    // also seems to trigger this selection event
+    if (window.getSelection().rangeCount == 0) {
+        debugLog('[DEBUG] surroundSelectionOverlay: No selection range found');
+        return;
+    }
+    var range = window.getSelection().getRangeAt(0);
+
+    if (range.startOffset == range.endOffset) {
+        debugLog('[DEBUG] surroundSelectionOverlay: Selection start and end offsets are the same');
+        return;
+    }
+
+    // Get the instance id
+    var instance_id = document.getElementById("instance_id").value;
+    debugLog('[DEBUG] surroundSelectionOverlay: Instance ID:', instance_id);
+
+    if (window.getSelection) {
+        var sel = window.getSelection();
+
+        // Check that we're labeling something in the original text that
+        // we want to annotate
+        if (!sel.anchorNode.parentElement) {
+            debugLog('[DEBUG] surroundSelectionOverlay: No anchor node parent element');
+            return;
+        }
+
+        // Otherwise, we're going to be adding a new span annotation, if
+        // the user has selected some non-empty part of the text
+        if (sel.rangeCount && sel.toString().trim().length > 0) {
+            debugLog('[DEBUG] surroundSelectionOverlay: Valid selection found, creating span');
+
+            // Get the selection text as a string
+            var selText = window.getSelection().toString().trim();
+            debugLog('[DEBUG] surroundSelectionOverlay: Selected text:', selText);
+
+            // Get the offsets for the server using the overlay approach
+            var startEnd = getSelectionIndicesOverlay();
+            debugLog('[DEBUG] surroundSelectionOverlay: Selection indices:', startEnd);
+
+            // Package this all up in a post request to the server's updateinstance endpoint
+            var post_req = {
+                type: "span",
+                schema: schema,
+                state: [
+                    {
+                        name: labelName,
+                        start: startEnd["start"],
+                        end: startEnd["end"],
+                        title: title,
+                        value: selText
+                    }
+                ],
+                instance_id: instance_id
+            };
+
+            debugLog('[DEBUG] surroundSelectionOverlay: Sending span annotation request:', post_req);
+
+            // Send the request
+            fetch('/updateinstance', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(post_req)
+            })
+            .then(response => {
+                if (response.ok) {
+                    debugLog('[DEBUG] surroundSelectionOverlay: Span annotation created successfully');
+                    // Reload the page to show the new annotation
+                    location.reload();
+                } else {
+                    console.error('[DEBUG] surroundSelectionOverlay: Failed to create span annotation:', response.status);
+                    return response.json().then(error => {
+                        console.error('[DEBUG] surroundSelectionOverlay: Error details:', error);
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('[DEBUG] surroundSelectionOverlay: Network error:', error);
+            });
+
+            // Clear the current selection
+            sel.empty();
+            debugLog('[DEBUG] surroundSelectionOverlay: Span creation request sent, page will reload');
+        } else {
+            debugLog('[DEBUG] surroundSelectionOverlay: No valid selection found');
+        }
+    }
+}
+
+// Update the existing changeSpanLabel function to use the overlay approach
+function changeSpanLabelOverlay(checkbox, schema, spanLabel, spanTitle, spanColor) {
+    /*
+     * Set up span annotation mode using the overlay approach.
+     *
+     * Args:
+     *     checkbox: The checkbox element that was clicked
+     *     schema: The annotation schema
+     *     spanLabel: The span label
+     *     spanTitle: The span title
+     *     spanColor: The span color
+     */
+    debugLog('[DEBUG] changeSpanLabelOverlay called:', { schema, spanLabel, spanTitle, spanColor, checked: checkbox.checked });
+
+    // Listen for when the user has highlighted some text (only when the label is checked)
+    document.onmouseup = function (e) {
+        var senderElement = e.target;
+        // Avoid the case where the user clicks the delete button
+        if (senderElement.getAttribute("class") == "span-close") {
+            e.stopPropagation();
+            return true;
+        }
+        if (checkbox.checked) {
+            debugLog('[DEBUG] changeSpanLabelOverlay: Mouse up event - checkbox is checked, calling surroundSelectionOverlay');
+            surroundSelectionOverlay(schema, spanLabel, spanTitle, spanColor);
+        } else {
+            debugLog('[DEBUG] changeSpanLabelOverlay: Mouse up event - checkbox is not checked');
+        }
+    };
+}
+
+// Update the restoreSpanAnnotationsFromHTML function to work with overlays
+function restoreSpanAnnotationsFromHTMLOverlay() {
+    /*
+     * Extract span annotations from the overlay-based HTML structure.
+     *
+     * This function parses the overlay elements to reconstruct the span annotations.
+     */
+    const container = document.querySelector('.span-annotation-container');
+    if (!container) return;
+
+    const overlayElements = container.querySelectorAll('.span-overlay');
+    const found = [];
+
+    overlayElements.forEach(overlay => {
+        const schema = overlay.getAttribute('data-schema');
+        const name = overlay.getAttribute('data-label');
+        const start = parseInt(overlay.getAttribute('data-start'));
+        const end = parseInt(overlay.getAttribute('data-end'));
+        const annotationId = overlay.getAttribute('data-annotation-id');
+
+        found.push({
+            schema,
+            name,
+            title: name, // Use name as title for now
+            start,
+            end,
+            id: annotationId,
+            value: '' // Value is not stored in overlay, would need to extract from original text
+        });
+    });
+
+    currentSpanAnnotations = found;
+    debugLog('[DEBUG] restoreSpanAnnotationsFromHTMLOverlay: found', found.length, 'spans:', found);
+}
+
+// ============================================================================
+// ROBUST SPAN ANNOTATION FUNCTIONS (Based on potato-span-fix approach)
+// ============================================================================
+
+// Global variables for robust span annotation
+let spanColors = {};
+let originalText = '';
+let spanAnnotations = [];
+
+/**
+ * Initialize robust span annotation system
+ */
+function initializeRobustSpanAnnotation() {
+    debugLog('[ROBUST SPAN] Initializing robust span annotation system');
+
+    // Load span colors from config
+    loadSpanColors();
+
+    // Set up text selection handlers
+    setupRobustSpanSelection();
+
+    // Render existing spans
+    renderSpansRobust();
+}
+
+/**
+ * Load span colors from the UI configuration
+ */
+async function loadSpanColors() {
+    try {
+        // Get colors from the current user state or config
+        if (userState && userState.config && userState.config.ui && userState.config.ui.spans) {
+            const configColors = userState.config.ui.spans.span_colors;
+            // Flatten the color structure
+            spanColors = {};
+            for (const schema in configColors) {
+                for (const label in configColors[schema]) {
+                    spanColors[label] = configColors[schema][label];
+                }
+            }
+        } else {
+            // Fallback colors
+            spanColors = {
+                'happy': '(255, 230, 230)',
+                'sad': '(230, 243, 255)',
+                'angry': '(255, 230, 204)',
+                'surprised': '(230, 255, 230)',
+                'neutral': '(240, 240, 240)'
+            };
+        }
+        debugLog('[ROBUST SPAN] Loaded colors:', spanColors);
+    } catch (error) {
+        console.error('[ROBUST SPAN] Error loading colors:', error);
+    }
+}
+
+/**
+ * Set up text selection handlers for robust span annotation
+ */
+function setupRobustSpanSelection() {
+    const textContainer = document.getElementById('instance-text');
+    if (!textContainer) {
+        console.warn('[ROBUST SPAN] No text container found');
+        return;
+    }
+
+    // Remove existing handlers to avoid conflicts
+    textContainer.removeEventListener('mouseup', handleRobustTextSelection);
+    textContainer.removeEventListener('keyup', handleRobustTextSelection);
+
+    // Add new handlers
+    textContainer.addEventListener('mouseup', handleRobustTextSelection);
+    textContainer.addEventListener('keyup', handleRobustTextSelection);
+
+    debugLog('[ROBUST SPAN] Text selection handlers set up');
+}
+
+/**
+ * Handle text selection for robust span annotation
+ */
+function handleRobustTextSelection() {
+    const selection = window.getSelection();
+    if (!selection.rangeCount || selection.isCollapsed) return;
+
+    // Check if any span label is selected (returns object with label, schema, targetField)
+    const activeSpanLabel = getActiveSpanLabel();
+    if (!activeSpanLabel) {
+        debugLog('[ROBUST SPAN] No active span label selected');
+        return;
+    }
+
+    const range = selection.getRangeAt(0);
+    const selectedText = selection.toString().trim();
+    if (!selectedText) return;
+
+    // Detect target field from selection container if not set on the label
+    if (!activeSpanLabel.targetField) {
+        const container = range.startContainer.parentElement;
+        const spanTargetEl = container ? container.closest('[id^="text-content-"]') : null;
+        if (spanTargetEl) {
+            const fieldKey = spanTargetEl.id.replace('text-content-', '');
+            if (fieldKey) activeSpanLabel.targetField = fieldKey;
+        }
+    }
+
+    // Calculate positions using original text
+    const start = getRobustTextPosition(selectedText, range);
+    const end = start + selectedText.length;
+
+    debugLog('[ROBUST SPAN] Creating span:', {
+        text: selectedText,
+        start: start,
+        end: end,
+        label: activeSpanLabel.label,
+        schema: activeSpanLabel.schema,
+        targetField: activeSpanLabel.targetField
+    });
+
+    // Create the span annotation
+    createRobustSpanAnnotation(selectedText, start, end, activeSpanLabel);
+
+    // Clear selection
+    selection.removeAllRanges();
+}
+
+/**
+ * Get the currently active span label from checkboxes
+ */
+function getActiveSpanLabel() {
+    const spanCheckboxes = document.querySelectorAll('input[type="checkbox"][name*="span_label"]:checked');
+    if (spanCheckboxes.length === 0) return null;
+
+    // Get the label from the first checked span checkbox
+    const checkbox = spanCheckboxes[0];
+    // Name format is "span_label:::schemaName", extract schema
+    const nameMatch = checkbox.name.match(/span_label:::(.+)/);
+    if (!nameMatch) return null;
+
+    const schema = nameMatch[1];
+    // Extract label from the checkbox ID (format: "schemaName_labelName")
+    const idParts = checkbox.id.split('_');
+    const label = idParts.length >= 2 ? idParts.slice(1).join('_') : checkbox.value;
+    const targetField = checkbox.getAttribute('data-target-field') || '';
+
+    return { label, schema, targetField };
+}
+
+/**
+ * Calculate text position robustly using original text
+ */
+function getRobustTextPosition(selectedText, range) {
+    // Get the original text from the instance
+    if (!currentInstance || !currentInstance.text) {
+        console.warn('[ROBUST SPAN] No original text available');
+        return 0;
+    }
+
+    const originalText = currentInstance.text;
+
+    // Find all occurrences of the selected text in the original text
+    let indices = [];
+    let idx = originalText.indexOf(selectedText);
+    while (idx !== -1) {
+        indices.push(idx);
+        idx = originalText.indexOf(selectedText, idx + 1);
+    }
+
+    if (indices.length === 0) {
+        console.warn('[ROBUST SPAN] Selected text not found in original text');
+        return 0;
+    }
+
+    if (indices.length === 1) {
+        return indices[0];
+    }
+
+    // If multiple occurrences, use the first one for now
+    // In a more sophisticated implementation, we could use DOM position to disambiguate
+    debugLog('[ROBUST SPAN] Multiple occurrences found, using first:', indices[0]);
+    return indices[0];
+}
+
+/**
+ * Create a new span annotation using the robust approach
+ */
+async function createRobustSpanAnnotation(spanText, start, end, label) {
+    try {
+        // label can be a string (legacy) or object { label, schema, targetField }
+        const labelName = typeof label === 'object' ? label.label : label;
+        const schema = typeof label === 'object' ? label.schema : 'emotion';
+        const targetField = typeof label === 'object' ? (label.targetField || '') : '';
+
+        debugLog('[ROBUST SPAN] Creating annotation:', { spanText, start, end, label: labelName, schema, targetField });
+
+        // Use the existing /updateinstance endpoint
+        const postData = {
+            type: "span",
+            schema: schema,
+            state: [
+                {
+                    name: labelName,
+                    start: start,
+                    end: end,
+                    title: labelName,
+                    value: spanText,
+                    target_field: targetField
+                }
+            ],
+            instance_id: currentInstance.id
+        };
+
+        const response = await fetch('/updateinstance', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(postData)
+        });
+
+        if (response.ok) {
+            debugLog('[ROBUST SPAN] Span annotation created successfully');
+            // Reload the instance to show the new annotation
+            await loadCurrentInstance();
+        } else {
+            console.error('[ROBUST SPAN] Failed to create span annotation:', await response.text());
+        }
+    } catch (error) {
+        console.error('[ROBUST SPAN] Error creating span annotation:', error);
+    }
+}
+
+/**
+ * Render spans using the robust boundary-based algorithm
+ */
+function renderSpansRobust() {
+    const textContainer = document.getElementById('instance-text');
+    if (!textContainer || !currentInstance) {
+        console.warn('[ROBUST SPAN] Cannot render spans - missing container or instance');
+        return;
+    }
+
+    // Get the original text
+    originalText = currentInstance.text || '';
+    if (!originalText) {
+        console.warn('[ROBUST SPAN] No original text available');
+        return;
+    }
+
+    // Get span annotations from user state
+    spanAnnotations = [];
+    if (userState && userState.annotations && userState.annotations.by_instance) {
+        const instanceAnnotations = userState.annotations.by_instance[currentInstance.id];
+        if (instanceAnnotations) {
+            // Extract span annotations from the server format
+            for (const [key, value] of Object.entries(instanceAnnotations)) {
+                // Look for span annotations (this is a simplified approach)
+                // In practice, we'd need to parse the actual span data structure
+                if (typeof value === 'object' && value.start !== undefined && value.end !== undefined) {
+                    spanAnnotations.push({
+                        id: key,
+                        span: value.value || '',
+                        label: value.name || key,
+                        start: value.start,
+                        end: value.end
+                    });
+                }
+            }
+        }
+    }
+
+    debugLog('[ROBUST SPAN] Rendering spans:', spanAnnotations);
+
+    if (spanAnnotations.length === 0) {
+        // No spans - just show the original text
+        textContainer.innerHTML = escapeHtml(originalText);
+        return;
+    }
+
+    // Use the boundary-based algorithm from potato-span-fix
+    const html = renderTextWithSpans(originalText, spanAnnotations);
+    textContainer.innerHTML = html;
+}
+
+/**
+ * Render text with spans using boundary-based algorithm
+ */
+function renderTextWithSpans(text, annotations) {
+    // Create a list of all annotation boundaries (start and end points)
+    const boundaries = [];
+    annotations.forEach(annotation => {
+        boundaries.push({ position: annotation.start, type: 'start', annotation });
+        boundaries.push({ position: annotation.end, type: 'end', annotation });
+    });
+
+    // Sort boundaries by position
+    boundaries.sort((a, b) => a.position - b.position);
+
+    // Build HTML by walking through the text and opening/closing spans
+    let html = '';
+    let currentPos = 0;
+    let openSpans = [];
+
+    boundaries.forEach(boundary => {
+        // Add text before this boundary
+        if (boundary.position > currentPos) {
+            html += escapeHtml(text.substring(currentPos, boundary.position));
+        }
+
+        if (boundary.type === 'start') {
+            // Open a new span
+            const backgroundColor = getSpanColor(boundary.annotation.label);
+            const span = `<span class="span-highlight" data-annotation-id="${boundary.annotation.id}" data-label="${boundary.annotation.label}" style="background-color: ${backgroundColor}"><span class="span-delete" onclick="deleteRobustSpan('${boundary.annotation.id}')">×</span><span class="span-label">${boundary.annotation.label}</span>`;
+            html += span;
+            openSpans.push(boundary.annotation);
+        } else {
+            // Close a span
+            html += '</span>';
+            // Remove the closed span from openSpans
+            const index = openSpans.findIndex(span => span.id === boundary.annotation.id);
+            if (index !== -1) {
+                openSpans.splice(index, 1);
+            }
+        }
+
+        currentPos = boundary.position;
+    });
+
+    // Add remaining text
+    if (currentPos < text.length) {
+        html += escapeHtml(text.substring(currentPos));
+    }
+
+    // Close any remaining open spans
+    openSpans.forEach(() => {
+        html += '</span>';
+    });
+
+    return html;
+}
+
+/**
+ * Get span color for a label
+ */
+function getSpanColor(label) {
+    const color = spanColors[label];
+    if (!color) return '#f0f0f0'; // Default gray
+
+    // Convert RGB format to hex
+    const rgb = color.match(/\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (rgb) {
+        const r = parseInt(rgb[1]);
+        const g = parseInt(rgb[2]);
+        const b = parseInt(rgb[3]);
+        return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+    }
+
+    return '#f0f0f0';
+}
+
+/**
+ * Delete a span annotation
+ */
+async function deleteRobustSpan(annotationId) {
+    try {
+        debugLog('[ROBUST SPAN] Deleting span:', annotationId);
+
+        // Find the annotation to delete
+        const annotation = spanAnnotations.find(a => a.id === annotationId);
+        if (!annotation) {
+            console.warn('[ROBUST SPAN] Annotation not found:', annotationId);
+            return;
+        }
+
+        // Use the existing /updateinstance endpoint with value: null to delete
+        const postData = {
+            type: "span",
+            schema: "emotion", // This should come from the config
+            state: [
+                {
+                    name: annotation.label,
+                    start: annotation.start,
+                    end: annotation.end,
+                    title: annotation.label,
+                    value: null // This signals deletion
+                }
+            ],
+            instance_id: currentInstance.id
+        };
+
+        const response = await fetch('/updateinstance', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(postData)
+        });
+
+        if (response.ok) {
+            debugLog('[ROBUST SPAN] Span annotation deleted successfully');
+            // Reload the instance to show the updated state
+            await loadCurrentInstance();
+        } else {
+            console.error('[ROBUST SPAN] Failed to delete span annotation:', await response.text());
+        }
+    } catch (error) {
+        console.error('[ROBUST SPAN] Error deleting span annotation:', error);
+    }
+}
+
+/**
+ * Escape HTML content
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Initialize robust span annotation when the page loads
+document.addEventListener('DOMContentLoaded', function () {
+    // Wait for the initial load to complete, then initialize robust spans
+    // DISABLED: Legacy robust span system conflicts with new interval-based system
+    // setTimeout(() => {
+    //     initializeRobustSpanAnnotation();
+    // }, 500);
+});
+
+/**
+ * Delete a span annotation - called from the HTML onclick
+ */
+async function deleteSpanAnnotation(annotationId, label, start, end) {
+    try {
+        debugLog('[SPAN DELETE] Deleting span:', { annotationId, label, start, end });
+
+        // Use the existing /updateinstance endpoint with value: null to delete
+        const postData = {
+            type: "span",
+            schema: "emotion", // This should come from the config
+            state: [
+                {
+                    name: label,
+                    start: start,
+                    end: end,
+                    title: label,
+                    value: null // This signals deletion
+                }
+            ],
+            instance_id: currentInstance.id
+        };
+
+        const response = await fetch('/updateinstance', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(postData)
+        });
+
+        if (response.ok) {
+            debugLog('[SPAN DELETE] Span annotation deleted successfully');
+            // Reload the instance to show the updated state
+            await loadCurrentInstance();
+        } else {
+            console.error('[SPAN DELETE] Failed to delete span annotation:', await response.text());
+        }
+    } catch (error) {
+        console.error('[SPAN DELETE] Error deleting span annotation:', error);
+    }
+}
+
+// Add this function to help debug and clear erroneous span annotations
+async function debugAndClearSpans() {
+    debugLog('🔍 [DEBUG] debugAndClearSpans() - ENTRY POINT');
+
+    if (!currentInstance || !currentInstance.id) {
+        debugLog('🔍 [DEBUG] debugAndClearSpans() - No current instance');
+        return;
+    }
+
+    debugLog(`🔍 [DEBUG] debugAndClearSpans() - Current instance ID: ${currentInstance.id}`);
+
+    try {
+        // First, check what spans exist for this instance
+        const response = await fetch(`/api/spans/${currentInstance.id}`);
+        if (response.ok) {
+            const data = await response.json();
+            debugLog(`🔍 [DEBUG] debugAndClearSpans() - Current spans for instance ${currentInstance.id}:`, data.spans);
+
+            if (data.spans && data.spans.length > 0) {
+                debugLog(`🔍 [DEBUG] debugAndClearSpans() - Found ${data.spans.length} spans, clearing them...`);
+
+                // Clear the spans
+                const clearResponse = await fetch(`/api/spans/${currentInstance.id}/clear`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+
+                if (clearResponse.ok) {
+                    const clearData = await clearResponse.json();
+                    debugLog(`🔍 [DEBUG] debugAndClearSpans() - Cleared ${clearData.spans_cleared} spans`);
+
+                    // Reload the page to see the effect
+                    debugLog('🔍 [DEBUG] debugAndClearSpans() - Reloading page...');
+                    window.location.reload();
+                } else {
+                    console.error('🔍 [DEBUG] debugAndClearSpans() - Failed to clear spans:', await clearResponse.text());
+                }
+            } else {
+                debugLog(`🔍 [DEBUG] debugAndClearSpans() - No spans found for instance ${currentInstance.id}`);
+            }
+        } else {
+            console.error('🔍 [DEBUG] debugAndClearSpans() - Failed to get spans:', await response.text());
+        }
+    } catch (error) {
+        console.error('🔍 [DEBUG] debugAndClearSpans() - Error:', error);
+    }
+}
+
+// Make the function available globally for debugging
+window.debugAndClearSpans = debugAndClearSpans;
+
+// Add this function to help debug instance_id values
+function debugInstanceId() {
+    debugLog('🔍 [DEBUG] debugInstanceId() - ENTRY POINT');
+
+    // Check DOM instance_id
+    const domInstanceId = document.getElementById('instance_id');
+    const domValue = domInstanceId ? domInstanceId.value : 'not found';
+    debugLog(`🔍 [DEBUG] debugInstanceId() - DOM instance_id value: '${domValue}'`);
+
+    // Check currentInstance
+    const currentInstanceId = currentInstance ? currentInstance.id : 'not set';
+    debugLog(`🔍 [DEBUG] debugInstanceId() - currentInstance.id: '${currentInstanceId}'`);
+
+    // Check if they match
+    if (domValue === currentInstanceId) {
+        debugLog('🔍 [DEBUG] debugInstanceId() - ✅ DOM and currentInstance match');
+    } else {
+        debugLog('🔍 [DEBUG] debugInstanceId() - ❌ DOM and currentInstance do NOT match');
+    }
+
+    // Check what the API would return
+    if (currentInstance && currentInstance.id) {
+        debugLog(`🔍 [DEBUG] debugInstanceId() - API would be called with: /api/spans/${currentInstance.id}`);
+    }
+}
+
+// Make the function available globally for debugging
+window.debugInstanceId = debugInstanceId;
+
+// Add this function to help debug and fix the instance_id issue in production
+function debugAndFixInstanceId() {
+    debugLog('🔍 [DEBUG] debugAndFixInstanceId() - ENTRY POINT');
+
+    // Check current state
+    const domInstanceId = document.getElementById('instance_id');
+    const domValue = domInstanceId ? domInstanceId.value : 'not found';
+    debugLog(`🔍 [DEBUG] debugAndFixInstanceId() - Current DOM instance_id: '${domValue}'`);
+
+    // Check if we can force a hard refresh
+    debugLog('🔍 [DEBUG] debugAndFixInstanceId() - Attempting to force hard refresh...');
+
+    // Clear any cached data
+    if (window.caches) {
+        caches.keys().then(names => {
+            names.forEach(name => {
+                debugLog(`🔍 [DEBUG] debugAndFixInstanceId() - Clearing cache: ${name}`);
+                caches.delete(name);
+            });
+        });
+    }
+
+    // Force a hard refresh by adding a timestamp
+    const currentUrl = window.location.href;
+    const separator = currentUrl.includes('?') ? '&' : '?';
+    const newUrl = currentUrl + separator + '_t=' + Date.now();
+    debugLog(`🔍 [DEBUG] debugAndFixInstanceId() - Redirecting to: ${newUrl}`);
+
+    // Redirect to force a fresh page load
+    window.location.href = newUrl;
+}
+
+// Add this function to check if the page is cached
+function checkPageCache() {
+    debugLog('🔍 [DEBUG] checkPageCache() - ENTRY POINT');
+
+    // Check if the page was loaded from cache
+    if (window.performance && window.performance.navigation) {
+        const navigationType = window.performance.navigation.type;
+        debugLog(`🔍 [DEBUG] checkPageCache() - Navigation type: ${navigationType}`);
+
+        if (navigationType === 1) {
+            debugLog('🔍 [DEBUG] checkPageCache() - Page was reloaded');
+        } else if (navigationType === 2) {
+            debugLog('🔍 [DEBUG] checkPageCache() - Page was loaded from back/forward cache');
+        } else {
+            debugLog('🔍 [DEBUG] checkPageCache() - Page was loaded normally');
+        }
+    }
+
+    // Check if the page was loaded from cache using the newer API
+    if (window.performance && window.performance.getEntriesByType) {
+        const navigationEntries = window.performance.getEntriesByType('navigation');
+        if (navigationEntries.length > 0) {
+            const entry = navigationEntries[0];
+            debugLog(`🔍 [DEBUG] checkPageCache() - Transfer size: ${entry.transferSize}`);
+            debugLog(`🔍 [DEBUG] checkPageCache() - Encoded body size: ${entry.encodedBodySize}`);
+
+            if (entry.transferSize === 0 && entry.encodedBodySize > 0) {
+                debugLog('🔍 [DEBUG] checkPageCache() - Page was loaded from cache!');
+            } else {
+                debugLog('🔍 [DEBUG] checkPageCache() - Page was loaded from network');
+            }
+        }
+    }
+}
+
+// Make the function available globally for debugging
+window.debugAndFixInstanceId = debugAndFixInstanceId;
+window.checkPageCache = checkPageCache;
+
+// Add this function to help clear erroneous span annotations and fix overlay persistence
+async function clearErroneousSpans() {
+    debugLog('🔍 [DEBUG] clearErroneousSpans() - ENTRY POINT');
+
+    if (!currentInstance || !currentInstance.id) {
+        debugLog('🔍 [DEBUG] clearErroneousSpans() - No current instance');
+        return;
+    }
+
+    debugLog(`🔍 [DEBUG] clearErroneousSpans() - Current instance ID: ${currentInstance.id}`);
+
+    try {
+        // Clear spans for the current instance
+        const response = await fetch(`/api/spans/${currentInstance.id}/clear`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            debugLog(`🔍 [DEBUG] clearErroneousSpans() - Clear result:`, result);
+
+            // Force reload the page to get fresh data
+            debugLog('🔍 [DEBUG] clearErroneousSpans() - Reloading page to get fresh data');
+            window.location.reload();
+        } else {
+            console.error(`🔍 [DEBUG] clearErroneousSpans() - Clear failed:`, response.status);
+        }
+    } catch (error) {
+        console.error(`🔍 [DEBUG] clearErroneousSpans() - Error:`, error);
+    }
+}
+
+// Make the function available globally for debugging
+window.clearErroneousSpans = clearErroneousSpans;
+
+// Add Firefox-specific instance_id fix that runs after page load
+function firefoxInstanceIdFix() {
+    const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+    if (!isFirefox) {
+        return; // Only apply to Firefox
+    }
+
+    debugLog('🔍 [DEBUG] firefoxInstanceIdFix: Starting Firefox-specific instance_id fix');
+
+    // Wait a bit for the page to fully load
+    setTimeout(() => {
+        const instanceIdInput = document.getElementById('instance_id');
+        if (!instanceIdInput) {
+            debugLog('🔍 [DEBUG] firefoxInstanceIdFix: No instance_id input found');
+            return;
+        }
+
+        // Get the current instance from the server-rendered data
+        const currentInstanceId = currentInstance?.id;
+        const domInstanceId = instanceIdInput.value;
+
+        debugLog(`🔍 [DEBUG] firefoxInstanceIdFix: DOM instance_id: '${domInstanceId}', currentInstance.id: '${currentInstanceId}'`);
+
+        if (currentInstanceId && domInstanceId !== currentInstanceId) {
+            debugLog('🔍 [DEBUG] firefoxInstanceIdFix: Mismatch detected - fixing instance_id');
+
+            // Force update the input value
+            instanceIdInput.value = currentInstanceId;
+
+            // Force DOM update
+            instanceIdInput.dispatchEvent(new Event('input', { bubbles: true }));
+            instanceIdInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+            // Force reflow
+            instanceIdInput.offsetHeight;
+
+            debugLog(`🔍 [DEBUG] firefoxInstanceIdFix: Fixed instance_id to '${currentInstanceId}'`);
+        } else {
+            debugLog('🔍 [DEBUG] firefoxInstanceIdFix: No mismatch detected');
+        }
+    }, 100); // Small delay to ensure page is loaded
+}
+
+// Call the Firefox fix after page load
+document.addEventListener('DOMContentLoaded', firefoxInstanceIdFix);
+window.addEventListener('load', firefoxInstanceIdFix);
+
+// Add function to test the Firefox instance_id fix
+function testFirefoxInstanceIdFix() {
+    debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: Testing Firefox instance_id fix');
+
+    const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+    debugLog(`🔍 [DEBUG] testFirefoxInstanceIdFix: Is Firefox: ${isFirefox}`);
+
+    const instanceIdInput = document.getElementById('instance_id');
+    if (!instanceIdInput) {
+        debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: No instance_id input found');
+        return;
+    }
+
+    const domInstanceId = instanceIdInput.value;
+    const currentInstanceId = currentInstance?.id;
+
+    debugLog(`🔍 [DEBUG] testFirefoxInstanceIdFix: DOM instance_id: '${domInstanceId}'`);
+    debugLog(`🔍 [DEBUG] testFirefoxInstanceIdFix: currentInstance.id: '${currentInstanceId}'`);
+
+    if (domInstanceId === currentInstanceId) {
+        debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: ✅ Instance IDs match');
+    } else {
+        debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: ❌ Instance IDs do not match');
+
+        // Try to fix it
+        debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: Attempting to fix...');
+        firefoxInstanceIdFix();
+
+        // Check again after a short delay
+        setTimeout(() => {
+            const newDomInstanceId = instanceIdInput.value;
+            debugLog(`🔍 [DEBUG] testFirefoxInstanceIdFix: After fix - DOM instance_id: '${newDomInstanceId}'`);
+
+            if (newDomInstanceId === currentInstanceId) {
+                debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: ✅ Fix successful');
+            } else {
+                debugLog('🔍 [DEBUG] testFirefoxInstanceIdFix: ❌ Fix failed');
+            }
+        }, 200);
+    }
+}
+
+// Make the function available globally for debugging
+window.testFirefoxInstanceIdFix = testFirefoxInstanceIdFix;
+
+// Add aggressive Firefox-specific instance_id fix
+function aggressiveFirefoxInstanceIdFix() {
+    const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+    if (!isFirefox) {
+        return; // Only apply to Firefox
+    }
+
+    debugLog('🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: Starting aggressive Firefox fix');
+
+    // Wait for the page to fully load
+    setTimeout(() => {
+        // Method 1: Force reload the instance_id input element
+        const instanceIdInput = document.getElementById('instance_id');
+        if (!instanceIdInput) {
+            debugLog('🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: No instance_id input found');
+            return;
+        }
+
+        // Get the current value from the DOM
+        const currentDomValue = instanceIdInput.value;
+        debugLog(`🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: Current DOM value: '${currentDomValue}'`);
+
+        // Method 2: Try to get the correct value from the server-rendered data
+        // Look for any script tags or data attributes that might contain the correct instance_id
+        let correctInstanceId = null;
+
+        // Check if there's a script tag with instance data
+        const scriptTags = document.querySelectorAll('script');
+        for (const script of scriptTags) {
+            const content = script.textContent || script.innerHTML;
+            if (content.includes('instance_id') || content.includes('currentInstance')) {
+                debugLog('🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: Found script with instance data');
+                // Try to extract instance_id from script content
+                const match = content.match(/instance_id['"]?\s*[:=]\s*['"]([^'"]+)['"]/);
+                if (match) {
+                    correctInstanceId = match[1];
+                    debugLog(`🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: Found instance_id in script: '${correctInstanceId}'`);
+                    break;
+                }
+            }
+        }
+
+        // Method 3: If we can't find it in scripts, try to infer from the URL or other page elements
+        if (!correctInstanceId) {
+            // Check if the URL contains an instance_id parameter
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlInstanceId = urlParams.get('instance_id');
+            if (urlInstanceId) {
+                correctInstanceId = urlInstanceId;
+                debugLog(`🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: Found instance_id in URL: '${correctInstanceId}'`);
+            }
+        }
+
+        // Method 4: If we still don't have it, try to get it from the server via API
+        if (!correctInstanceId) {
+            debugLog('🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: No instance_id found, trying API call');
+
+            // Make an API call to get the current instance info
+            fetch('/api/current_instance', {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data && data.instance_id) {
+                        correctInstanceId = data.instance_id;
+                        debugLog(`🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: Got instance_id from API: '${correctInstanceId}'`);
+                        applyInstanceIdFix(instanceIdInput, correctInstanceId);
+                    }
+                })
+                .catch(error => {
+                    debugLog('🔍 [DEBUG] aggressiveFirefoxInstanceIdFix: API call failed:', error);
+                });
+        } else {
+            // Apply the fix immediately if we found the correct instance_id
+            applyInstanceIdFix(instanceIdInput, correctInstanceId);
+        }
+    }, 200); // Longer delay to ensure page is fully loaded
+}
+
+// Helper function to apply the instance_id fix
+function applyInstanceIdFix(instanceIdInput, correctInstanceId) {
+    const currentValue = instanceIdInput.value;
+
+    if (currentValue !== correctInstanceId) {
+        debugLog(`🔍 [DEBUG] applyInstanceIdFix: Fixing instance_id from '${currentValue}' to '${correctInstanceId}'`);
+
+        // Force update the input value
+        instanceIdInput.value = correctInstanceId;
+
+        // Force DOM update with multiple methods
+        instanceIdInput.dispatchEvent(new Event('input', { bubbles: true }));
+        instanceIdInput.dispatchEvent(new Event('change', { bubbles: true }));
+        instanceIdInput.dispatchEvent(new Event('blur', { bubbles: true }));
+
+        // Force reflow
+        instanceIdInput.offsetHeight;
+
+        // Update currentInstance if it exists
+        if (window.currentInstance) {
+            window.currentInstance.id = correctInstanceId;
+            debugLog(`🔍 [DEBUG] applyInstanceIdFix: Updated window.currentInstance.id to '${correctInstanceId}'`);
+        }
+
+        // Update currentInstance global variable if it exists
+        if (typeof currentInstance !== 'undefined' && currentInstance) {
+            currentInstance.id = correctInstanceId;
+            debugLog(`🔍 [DEBUG] applyInstanceIdFix: Updated currentInstance.id to '${correctInstanceId}'`);
+        }
+
+        debugLog(`🔍 [DEBUG] applyInstanceIdFix: Fix applied successfully`);
+    } else {
+        debugLog(`🔍 [DEBUG] applyInstanceIdFix: No fix needed, instance_id is already correct: '${currentValue}'`);
+    }
+}
+
+// Call the aggressive fix after page load
+document.addEventListener('DOMContentLoaded', aggressiveFirefoxInstanceIdFix);
+window.addEventListener('load', aggressiveFirefoxInstanceIdFix);
+
+// Also call it when the page becomes visible (in case of tab switching)
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+        setTimeout(aggressiveFirefoxInstanceIdFix, 100);
+    }
+});
+
+// Add function to test the aggressive Firefox fix
+function testAggressiveFirefoxFix() {
+    debugLog('🔍 [DEBUG] testAggressiveFirefoxFix: Testing aggressive Firefox fix');
+
+    const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+    debugLog(`🔍 [DEBUG] testAggressiveFirefoxFix: Is Firefox: ${isFirefox}`);
+
+    if (!isFirefox) {
+        debugLog('🔍 [DEBUG] testAggressiveFirefoxFix: Not Firefox, skipping test');
+        return;
+    }
+
+    // Call the aggressive fix
+    debugLog('🔍 [DEBUG] testAggressiveFirefoxFix: Calling aggressiveFirefoxInstanceIdFix');
+    aggressiveFirefoxInstanceIdFix();
+
+    // Check the result after a delay
+    setTimeout(() => {
+        const instanceIdInput = document.getElementById('instance_id');
+        if (!instanceIdInput) {
+            debugLog('🔍 [DEBUG] testAggressiveFirefoxFix: No instance_id input found');
+            return;
+        }
+
+        const finalInstanceId = instanceIdInput.value;
+        const currentInstanceId = currentInstance?.id;
+
+        debugLog(`🔍 [DEBUG] testAggressiveFirefoxFix: Final DOM instance_id: '${finalInstanceId}'`);
+        debugLog(`🔍 [DEBUG] testAggressiveFirefoxFix: currentInstance.id: '${currentInstanceId}'`);
+
+        if (finalInstanceId === currentInstanceId) {
+            debugLog('🔍 [DEBUG] testAggressiveFirefoxFix: ✅ Fix successful - instance IDs match');
+        } else {
+            debugLog('🔍 [DEBUG] testAggressiveFirefoxFix: ❌ Fix failed - instance IDs do not match');
+        }
+    }, 500);
+}
+
+
+
+
+/**
+ * Jump to the previous unannotated instance.
+ * Saves current annotations and navigates to the first unannotated item before the current position.
+ * If all items are annotated, shows a notification.
+ */
+async function jumpToUnannotatedPrev() {
+    debugLog('[NAV] jumpToUnannotatedPrev - ENTRY POINT');
+
+    if (isLoading) {
+        debugLog('[NAV] jumpToUnannotatedPrev - Navigation blocked, still loading');
+        return;
+    }
+
+    setLoading(true);
+    debugLog('[NAV] jumpToUnannotatedPrev - Loading set to true');
+
+    // Track navigation event
+    if (window.interactionTracker) {
+        window.interactionTracker.trackNavigation('jump_to_unannotated_prev', currentInstance?.id, null);
+    }
+
+    try {
+        // Save annotations before navigating away
+        debugLog('[NAV] jumpToUnannotatedPrev - Saving annotations before navigation');
+        await saveAnnotations();
+
+        // Use the correct endpoint and payload for navigation
+        const response = await fetch('/annotate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                action: 'jump_to_unannotated_prev',
+                instance_id: currentInstance?.id
+            })
+        });
+
+        if (response.ok) {
+            // Check if the response indicates no unannotated items
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                const result = await response.json();
+                if (result.status === 'no_unannotated') {
+                    debugLog('[NAV] jumpToUnannotatedPrev - All items annotated');
+                    showNotification('All items have been annotated!', 'info');
+                    setLoading(false);
+                    return;
+                }
+            }
+
+            debugLog('[NAV] jumpToUnannotatedPrev - Navigation successful, reloading page');
+            window.location.reload();
+        } else {
+            console.error('[NAV] jumpToUnannotatedPrev - Navigation failed:', response.status);
+            setLoading(false);
+        }
+    } catch (error) {
+        console.error('[NAV] jumpToUnannotatedPrev - Navigation error:', error);
+        setLoading(false);
+    }
+}
+
+/**
+ * Jump to the next unannotated instance.
+ * Saves current annotations and navigates to the first unannotated item after the current position.
+ * If all items are annotated, shows a notification.
+ */
+async function jumpToUnannotated() {
+    debugLog('[NAV] jumpToUnannotated - ENTRY POINT');
+
+    if (isLoading) {
+        debugLog('[NAV] jumpToUnannotated - Navigation blocked, still loading');
+        return;
+    }
+
+    // Client-side required field validation
+    hasAttemptedForwardValidation = true;
+    if (!validateRequiredFields({ showErrors: true })) {
+        debugLog('[NAV] jumpToUnannotated - blocked by client-side validation');
+        return;
+    }
+
+    setLoading(true);
+    debugLog('[NAV] jumpToUnannotated - Loading set to true');
+
+    // Track navigation event
+    if (window.interactionTracker) {
+        window.interactionTracker.trackNavigation('jump_to_unannotated', currentInstance?.id, null);
+    }
+
+    try {
+        // Save annotations before navigating away
+        debugLog('[NAV] jumpToUnannotated - Saving annotations before navigation');
+        await saveAnnotations();
+
+        // Use the correct endpoint and payload for navigation
+        const response = await fetch('/annotate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                action: 'jump_to_unannotated',
+                instance_id: currentInstance?.id
+            })
+        });
+
+        if (response.ok) {
+            // Check if the response indicates no unannotated items
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                const result = await response.json();
+                if (result.status === 'no_unannotated') {
+                    debugLog('[NAV] jumpToUnannotated - All items annotated');
+                    showNotification('All items have been annotated!', 'info');
+                    setLoading(false);
+                    return;
+                }
+            }
+
+            debugLog('[NAV] jumpToUnannotated - Navigation successful, reloading page');
+            window.location.reload();
+        } else {
+            await handleNavigationResponseError(response);
+            setLoading(false);
+        }
+    } catch (error) {
+        console.error('[NAV] jumpToUnannotated - Navigation error:', error);
+        setLoading(false);
+    }
+}
+
+function handleQualityControlResponse(result) {
+    if (!result || typeof result !== 'object') {
+        return;
+    }
+
+    const qcResult = result.qc_result && typeof result.qc_result === 'object'
+        ? result.qc_result
+        : null;
+    const message = result.warning_message || result.message || (qcResult && qcResult.message);
+
+    const isBlocked = result.status === 'blocked' || (qcResult && qcResult.blocked);
+    if (isBlocked) {
+        showNotification(message || 'You have been blocked.', 'error');
+        showError(true, message || 'You have been blocked due to quality control checks. Your session has ended.', { permanent: true });
+        return;
+    }
+
+    const isWarning = (result.warning || (qcResult && qcResult.warning)) &&
+        !(qcResult && qcResult.passed === true);
+    if (isWarning) {
+        showNotification(message || 'Please read items carefully before answering.', 'warning');
+    }
+}
+
+/**
+ * Show a notification message to the user.
+ * @param {string} message - The message to display
+ * @param {string} type - The type of notification ('info', 'success', 'warning', 'error')
+ */
+function showNotification(message, type = 'info') {
+    // Check if a notification container exists, create if not
+    let container = document.getElementById('notification-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'notification-container';
+        container.style.cssText = 'position: fixed; top: 80px; right: 20px; z-index: 9999;';
+        document.body.appendChild(container);
+    }
+
+    // Create the notification element
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.style.cssText = `
+        padding: 12px 20px;
+        margin-bottom: 10px;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 500;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        animation: slideIn 0.3s ease;
+        background-color: ${type === 'info' ? '#e0f2fe' : type === 'success' ? '#dcfce7' : type === 'warning' ? '#fef3c7' : '#fee2e2'};
+        color: ${type === 'info' ? '#0369a1' : type === 'success' ? '#166534' : type === 'warning' ? '#92400e' : '#dc2626'};
+        border: 1px solid ${type === 'info' ? '#7dd3fc' : type === 'success' ? '#86efac' : type === 'warning' ? '#fcd34d' : '#fca5a5'};
+    `;
+    notification.textContent = message;
+
+    container.appendChild(notification);
+
+    // Auto-remove after 4 seconds
+    setTimeout(() => {
+        notification.style.animation = 'slideOut 0.3s ease';
+        setTimeout(() => notification.remove(), 300);
+    }, 4000);
+}
+
+// Make the function available globally for debugging
+window.testAggressiveFirefoxFix = testAggressiveFirefoxFix;
+window.navigateToNext = navigateToNext;
+window.navigateToPrevious = navigateToPrevious;
+window.jumpToUnannotated = jumpToUnannotated;
+window.jumpToUnannotatedPrev = jumpToUnannotatedPrev;
+window.showNotification = showNotification;
+window.handleQualityControlResponse = handleQualityControlResponse;
+window.loadCurrentInstance = loadCurrentInstance;
+
+// ========================================
+// PAIRWISE ANNOTATION HANDLERS
+// ========================================
+
+/**
+ * Initialize pairwise annotation interface.
+ * Called after DOMContentLoaded and after forms are generated.
+ */
+function initPairwiseAnnotation() {
+    debugLog('[PAIRWISE] Initializing pairwise annotation');
+
+    // Setup tile click handlers for binary mode
+    document.querySelectorAll('.pairwise-tile').forEach(tile => {
+        tile.addEventListener('click', function() {
+            selectPairwiseTile(this);
+        });
+
+        // Keyboard support (Enter/Space)
+        tile.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                selectPairwiseTile(this);
+            }
+        });
+    });
+
+    // Setup tie/neither button handlers
+    document.querySelectorAll('.pairwise-tie-btn, .pairwise-neither-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            selectPairwiseOption(this);
+        });
+    });
+
+    // Setup justification checkbox handlers
+    document.querySelectorAll('.pairwise-reason-cb').forEach(cb => {
+        cb.addEventListener('change', function() {
+            const schema = this.getAttribute('data-schema');
+            savePairwiseJustification(schema);
+        });
+    });
+
+    // Populate pairwise tile content from instance data
+    populatePairwiseTileContent();
+
+    debugLog('[PAIRWISE] Initialization complete');
+}
+
+/**
+ * Populate pairwise tile content from the current instance data.
+ */
+function populatePairwiseTileContent() {
+    const pairwiseForms = document.querySelectorAll('.annotation-form.pairwise');
+
+    if (pairwiseForms.length === 0) {
+        return;
+    }
+
+    // Get items from instance text
+    let items = null;
+    const instanceText = document.getElementById('instance-text');
+
+    if (instanceText) {
+        const textContent = instanceText.querySelector('#text-content');
+        const contentElement = textContent || instanceText;
+
+        // Method 1: Check for data-item-index attributes
+        const listItems = contentElement.querySelectorAll('[data-item-index]');
+        if (listItems.length >= 2) {
+            items = Array.from(listItems).map(el => el.textContent.trim());
+        }
+
+        // Method 2: Parse HTML with <b>A.</b> / <b>B.</b> markers (list_as_text format)
+        if (!items) {
+            const html = contentElement.innerHTML;
+            const parts = html.split(/<br\s*\/?>\s*<br\s*\/?>/i);
+            if (parts.length >= 2) {
+                items = parts.map(part => {
+                    const temp = document.createElement('div');
+                    temp.innerHTML = part;
+                    let text = temp.textContent || '';
+                    text = text.replace(/^[A-Z]\.\s*/, '').trim();
+                    return text;
+                }).filter(t => t.length > 0);
+                if (items.length < 2) items = null;
+            }
+        }
+
+        // Method 3: Parse text content directly with regex
+        if (!items) {
+            const rawText = contentElement.textContent || '';
+            const regex = /([A-Z])\.\s*([\s\S]*?)(?=(?:[A-Z]\.\s)|$)/g;
+            const matches = [];
+            let match;
+            while ((match = regex.exec(rawText)) !== null) {
+                const text = match[2].trim();
+                if (text.length > 0) matches.push(text);
+            }
+            if (matches.length >= 2) items = matches;
+        }
+    }
+
+    // Method 4: Try window.currentInstanceData
+    if (!items) {
+        const firstForm = pairwiseForms[0];
+        const itemsKey = firstForm.getAttribute('data-items-key') || 'text';
+        if (window.currentInstanceData && window.currentInstanceData[itemsKey]) {
+            const data = window.currentInstanceData[itemsKey];
+            if (Array.isArray(data) && data.length >= 2) items = data;
+        }
+    }
+
+    if (items && items.length >= 2) {
+        // Create pairwise items display ONCE at top (if not exists)
+        createPairwiseItemsDisplay(items, pairwiseForms[0]);
+
+        // Wrap pairwise forms in a flex container for side-by-side layout
+        wrapPairwiseFormsInFlexContainer(pairwiseForms);
+
+        // Hide the "Text to Annotate" section
+        const instanceTextContainer = document.querySelector('.instance-text-container');
+        if (instanceTextContainer) {
+            instanceTextContainer.style.display = 'none';
+        }
+        // Also hide the "Text to Annotate" heading
+        const textHeading = document.querySelector('h5.mb-3');
+        if (textHeading && textHeading.textContent.includes('Text to Annotate')) {
+            textHeading.style.display = 'none';
+        }
+    }
+}
+
+/**
+ * Wrap ALL annotation forms in a grid container for layout control.
+ * Forms can specify column span via data-grid-columns attribute.
+ * This enables side-by-side layout for multiple annotation schemas.
+ *
+ * Note: If FormLayoutManager is initialized, it handles wrapping.
+ * This function provides fallback behavior for backwards compatibility.
+ */
+function wrapPairwiseFormsInFlexContainer(pairwiseForms) {
+    // Check if FormLayoutManager already handled this
+    if (window.formLayoutManager && window.formLayoutManager.initialized) {
+        debugLog('[wrapPairwiseFormsInFlexContainer] Skipping - FormLayoutManager active');
+        return;
+    }
+
+    // Check if wrapper already exists
+    if (document.querySelector('.annotation-forms-layout') ||
+        document.querySelector('.annotation-forms-grid')) {
+        return;
+    }
+
+    // Get ALL annotation forms in the container
+    const annotationFormsContainer = document.getElementById('annotation-forms');
+    if (!annotationFormsContainer) return;
+
+    const allForms = annotationFormsContainer.querySelectorAll('.annotation-form');
+    if (allForms.length < 2) {
+        return; // No need to wrap if only one form
+    }
+
+    // Create a wrapper div with grid layout
+    const wrapper = document.createElement('div');
+    wrapper.className = 'pairwise-forms-wrapper annotation-forms-grid';
+
+    // Insert wrapper at the end of the pairwise items display (if exists) or at start
+    const pairwiseDisplay = annotationFormsContainer.querySelector('.pairwise-items-display-container');
+    if (pairwiseDisplay) {
+        pairwiseDisplay.after(wrapper);
+    } else {
+        annotationFormsContainer.insertBefore(wrapper, annotationFormsContainer.firstChild);
+    }
+
+    // Move ALL annotation forms into the wrapper
+    allForms.forEach(form => {
+        // Set default grid column if not specified
+        if (!form.hasAttribute('data-grid-columns')) {
+            form.setAttribute('data-grid-columns', '1');
+        }
+        wrapper.appendChild(form);
+    });
+}
+
+/**
+ * Create a single pairwise items display at the top of the annotation forms.
+ */
+function createPairwiseItemsDisplay(items, referenceForm) {
+    // Check if display already exists
+    if (document.querySelector('.pairwise-items-display-container')) {
+        // Just update the content
+        const boxes = document.querySelectorAll('.pairwise-items-display-container .pairwise-item-box');
+        boxes.forEach((box, index) => {
+            if (index < items.length) box.textContent = items[index];
+        });
+        return;
+    }
+
+    // Get labels from the first pairwise form
+    const labels = ['Response A', 'Response B'];
+
+    // Create the display container
+    const displayContainer = document.createElement('div');
+    displayContainer.className = 'pairwise-items-display-container';
+    displayContainer.innerHTML = `
+        <div class="pairwise-items-display">
+            <div class="pairwise-item-wrapper">
+                <div class="pairwise-item-title">${labels[0]}</div>
+                <div class="pairwise-item-box">${escapeHtml(items[0])}</div>
+            </div>
+            <div class="pairwise-item-wrapper">
+                <div class="pairwise-item-title">${labels[1]}</div>
+                <div class="pairwise-item-box">${escapeHtml(items[1])}</div>
+            </div>
+        </div>
+    `;
+
+    // Insert before the first pairwise form
+    const annotationForms = document.getElementById('annotation-forms');
+    if (annotationForms) {
+        annotationForms.insertBefore(displayContainer, annotationForms.firstChild);
+    }
+}
+
+/**
+ * Simple HTML escape function.
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Select a pairwise tile (binary mode).
+ * @param {HTMLElement} tile - The tile element clicked
+ */
+function selectPairwiseTile(tile) {
+    const schema = tile.getAttribute('data-schema');
+    const value = tile.getAttribute('data-value');
+    const dimension = tile.getAttribute('data-dimension');
+    const form = tile.closest('form');
+
+    if (!form) return;
+
+    debugLog(`[PAIRWISE] Selecting tile: schema=${schema}, value=${value}, dim=${dimension || 'none'}`);
+
+    // For multi-dimension mode, scope to the dimension row
+    const scope = dimension ? tile.closest('.pairwise-dimension-row') : form;
+
+    // Deselect all tiles and buttons in scope
+    scope.querySelectorAll('.pairwise-tile').forEach(t => t.classList.remove('selected'));
+    scope.querySelectorAll('.pairwise-tie-btn, .pairwise-neither-btn').forEach(b => b.classList.remove('selected'));
+
+    // Select this tile
+    tile.classList.add('selected');
+
+    // Update hidden input — in multi-dim mode find the dimension-specific input
+    let hiddenInput;
+    if (dimension) {
+        hiddenInput = scope.querySelector(`.pairwise-dim-input[data-dimension="${dimension}"]`);
+    } else {
+        hiddenInput = form.querySelector('.pairwise-value');
+    }
+    if (hiddenInput) {
+        hiddenInput.value = value;
+        // Trigger annotation save
+        registerAnnotation(hiddenInput);
+        // Trigger change event for validation
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // Update validation
+    validateRequiredFields();
+}
+
+/**
+ * Select a pairwise option button (tie/neither).
+ * @param {HTMLElement} btn - The button element clicked
+ */
+function selectPairwiseOption(btn) {
+    const schema = btn.getAttribute('data-schema');
+    const value = btn.getAttribute('data-value');
+    const dimension = btn.getAttribute('data-dimension');
+    const form = btn.closest('form');
+
+    if (!form) return;
+
+    debugLog(`[PAIRWISE] Selecting option: schema=${schema}, value=${value}, dim=${dimension || 'none'}`);
+
+    // For multi-dimension mode, scope to the dimension row
+    const scope = dimension ? btn.closest('.pairwise-dimension-row') : form;
+
+    // Deselect all tiles and buttons in scope
+    scope.querySelectorAll('.pairwise-tile').forEach(t => t.classList.remove('selected'));
+    scope.querySelectorAll('.pairwise-tie-btn, .pairwise-neither-btn').forEach(b => b.classList.remove('selected'));
+
+    // Select this button
+    btn.classList.add('selected');
+
+    // Update hidden input
+    let hiddenInput;
+    if (dimension) {
+        hiddenInput = scope.querySelector(`.pairwise-dim-input[data-dimension="${dimension}"]`);
+    } else {
+        hiddenInput = form.querySelector('.pairwise-value');
+    }
+    if (hiddenInput) {
+        hiddenInput.value = value;
+        // Trigger annotation save
+        registerAnnotation(hiddenInput);
+        // Trigger change event for validation
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // Update validation
+    validateRequiredFields();
+}
+
+/**
+ * Update the pairwise scale display when slider value changes.
+ * @param {HTMLElement} slider - The slider input element
+ */
+function updatePairwiseScaleDisplay(slider) {
+    const form = slider.closest('form');
+    if (!form) return;
+
+    const valueDisplay = form.querySelector('.pairwise-scale-current-value');
+    if (valueDisplay) {
+        valueDisplay.textContent = slider.value;
+    }
+}
+
+/**
+ * Restore pairwise annotation state from saved annotations.
+ * Called during populateInputValues.
+ */
+function restorePairwiseAnnotations() {
+    if (!currentAnnotations) return;
+
+    debugLog('[PAIRWISE] Restoring pairwise annotations');
+
+    // Restore binary mode selections
+    document.querySelectorAll('.annotation-form.pairwise-binary').forEach(form => {
+        const hiddenInput = form.querySelector('.pairwise-value');
+        if (!hiddenInput) return;
+
+        const schema = hiddenInput.getAttribute('schema');
+        const labelName = hiddenInput.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            const savedValue = currentAnnotations[schema][labelName];
+            hiddenInput.value = savedValue;
+
+            // Select the appropriate tile or button
+            if (savedValue === 'tie' || savedValue === 'neither') {
+                const optionBtn = form.querySelector(`.pairwise-tie-btn[data-value="${savedValue}"], .pairwise-neither-btn[data-value="${savedValue}"]`);
+                if (optionBtn) {
+                    optionBtn.classList.add('selected');
+                }
+            } else {
+                const tile = form.querySelector(`.pairwise-tile[data-value="${savedValue}"]`);
+                if (tile) {
+                    tile.classList.add('selected');
+                }
+            }
+
+            debugLog(`[PAIRWISE] Restored binary selection: ${schema}/${labelName} = ${savedValue}`);
+        }
+    });
+
+    // Restore scale mode values
+    document.querySelectorAll('.annotation-form.pairwise-scale').forEach(form => {
+        const slider = form.querySelector('.pairwise-scale-slider');
+        if (!slider) return;
+
+        const schema = slider.getAttribute('schema');
+        const labelName = slider.getAttribute('label_name');
+
+        if (schema && labelName && currentAnnotations[schema] && currentAnnotations[schema][labelName]) {
+            const savedValue = currentAnnotations[schema][labelName];
+            slider.value = savedValue;
+            updatePairwiseScaleDisplay(slider);
+
+            debugLog(`[PAIRWISE] Restored scale value: ${schema}/${labelName} = ${savedValue}`);
+        }
+    });
+
+    // Restore multi-dimension mode
+    document.querySelectorAll('.annotation-form.pairwise-multi-dimension').forEach(form => {
+        const schema = form.getAttribute('data-schema-name');
+        if (!schema || !currentAnnotations[schema]) return;
+
+        form.querySelectorAll('.pairwise-dim-input').forEach(input => {
+            const dim = input.getAttribute('data-dimension');
+            if (!dim || !currentAnnotations[schema][dim]) return;
+            const val = currentAnnotations[schema][dim];
+            input.value = val;
+
+            const row = input.closest('.pairwise-dimension-row');
+            if (!row) return;
+
+            row.querySelectorAll('.pairwise-tile, .pairwise-tie-btn').forEach(t => t.classList.remove('selected'));
+            if (val === 'tie') {
+                const btn = row.querySelector('.pairwise-tie-btn');
+                if (btn) btn.classList.add('selected');
+            } else {
+                const tile = row.querySelector(`.pairwise-tile[data-value="${val}"]`);
+                if (tile) tile.classList.add('selected');
+            }
+            debugLog(`[PAIRWISE] Restored multi-dim: ${schema}/${dim} = ${val}`);
+        });
+    });
+
+    // Restore justification data
+    document.querySelectorAll('.pairwise-justification').forEach(div => {
+        const schema = div.getAttribute('data-schema');
+        if (!schema || !currentAnnotations[schema] || !currentAnnotations[schema]['justification']) return;
+
+        try {
+            const jdata = JSON.parse(currentAnnotations[schema]['justification']);
+            const hiddenInput = div.querySelector('.pairwise-justification-value');
+            if (hiddenInput) {
+                hiddenInput.value = currentAnnotations[schema]['justification'];
+                hiddenInput.setAttribute('data-server-set', 'true');
+                hiddenInput.setAttribute('data-modified', 'true');
+            }
+
+            if (jdata.reasons) {
+                div.querySelectorAll('.pairwise-reason-cb').forEach(cb => {
+                    cb.checked = jdata.reasons.includes(cb.value);
+                });
+            }
+            if (jdata.rationale) {
+                const ta = div.querySelector('.pairwise-rationale-textarea');
+                if (ta) {
+                    ta.value = jdata.rationale;
+                    updatePairwiseRationaleCounter(ta);
+                }
+            }
+        } catch(e) {
+            debugLog('[PAIRWISE] Error restoring justification:', e);
+        }
+    });
+}
+
+/**
+ * Update the rationale character counter.
+ * @param {HTMLElement} textarea - The rationale textarea
+ */
+function updatePairwiseRationaleCounter(textarea) {
+    const schema = textarea.getAttribute('data-schema');
+    const minChars = parseInt(textarea.getAttribute('data-min-chars') || '0', 10);
+    const counter = textarea.closest('.pairwise-justification').querySelector('.pairwise-rationale-counter');
+    if (!counter) return;
+    const len = textarea.value.length;
+    counter.textContent = `${len} / ${minChars} characters`;
+    counter.classList.toggle('insufficient', len < minChars && minChars > 0);
+
+    // Save justification data
+    savePairwiseJustification(schema);
+}
+
+/**
+ * Save pairwise justification (reasons + rationale) to hidden input.
+ */
+function savePairwiseJustification(schema) {
+    const div = document.querySelector(`.pairwise-justification[data-schema="${schema}"]`);
+    if (!div) return;
+
+    const reasons = [];
+    div.querySelectorAll('.pairwise-reason-cb:checked').forEach(cb => reasons.push(cb.value));
+    const ta = div.querySelector('.pairwise-rationale-textarea');
+    const rationale = ta ? ta.value : '';
+
+    const data = JSON.stringify({ reasons: reasons, rationale: rationale });
+    const input = div.querySelector('.pairwise-justification-value');
+    if (input) {
+        input.value = data;
+        input.setAttribute('data-modified', 'true');
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+}
+
+// Export pairwise functions globally
+window.initPairwiseAnnotation = initPairwiseAnnotation;
+window.selectPairwiseTile = selectPairwiseTile;
+window.selectPairwiseOption = selectPairwiseOption;
+window.updatePairwiseScaleDisplay = updatePairwiseScaleDisplay;
+window.restorePairwiseAnnotations = restorePairwiseAnnotations;
+window.updatePairwiseRationaleCounter = updatePairwiseRationaleCounter;
+window.savePairwiseJustification = savePairwiseJustification;
+
+// ========================================
+// BWS (BEST-WORST SCALING) ANNOTATION HANDLERS
+// ========================================
+
+/**
+ * Initialize BWS annotation interface.
+ * Called after DOMContentLoaded and after forms are generated.
+ */
+function initBwsAnnotation() {
+    const bwsForms = document.querySelectorAll('.annotation-form.bws');
+    if (bwsForms.length === 0) return;
+
+    debugLog('[BWS] Initializing BWS annotation');
+
+    // Setup tile click handlers
+    document.querySelectorAll('.bws-tile').forEach(tile => {
+        tile.addEventListener('click', function() {
+            selectBwsTile(this);
+        });
+        tile.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                selectBwsTile(this);
+            }
+        });
+    });
+
+    // Populate BWS items display from var_elems
+    populateBwsItemsDisplay();
+
+    debugLog('[BWS] Initialization complete');
+}
+
+/**
+ * Populate BWS items display from the bws_items var_elems data.
+ */
+function populateBwsItemsDisplay() {
+    const bwsForms = document.querySelectorAll('.annotation-form.bws');
+    if (bwsForms.length === 0) return;
+
+    // Read BWS items from var_elems <script> tag
+    let bwsItems = null;
+    const bwsItemsScript = document.getElementById('bws_items');
+    if (bwsItemsScript) {
+        try {
+            bwsItems = JSON.parse(bwsItemsScript.textContent);
+        } catch (e) {
+            debugLog('[BWS] Error parsing bws_items JSON:', e);
+        }
+    }
+
+    if (!bwsItems || !Array.isArray(bwsItems) || bwsItems.length === 0) {
+        debugLog('[BWS] No BWS items data found');
+        return;
+    }
+
+    debugLog('[BWS] Populating items display with', bwsItems.length, 'items');
+
+    // Build items display for each BWS form
+    bwsForms.forEach(form => {
+        const displayContainer = form.querySelector('.bws-items-display');
+        if (!displayContainer) return;
+
+        let html = '<div class="bws-items-list">';
+        bwsItems.forEach(item => {
+            const pos = escapeHtml(item.position || '');
+            const text = escapeHtml(item.text || '');
+            html += `
+                <div class="bws-item" data-position="${pos}">
+                    <span class="bws-item-label">${pos}.</span>
+                    <span class="bws-item-text">${text}</span>
+                </div>`;
+        });
+        html += '</div>';
+        displayContainer.innerHTML = html;
+    });
+
+    // Hide the standard "Text to Annotate" section
+    const instanceTextContainer = document.querySelector('.instance-text-container');
+    if (instanceTextContainer) {
+        instanceTextContainer.style.display = 'none';
+    }
+    const textHeading = document.querySelector('h5.mb-3');
+    if (textHeading && textHeading.textContent.includes('Text to Annotate')) {
+        textHeading.style.display = 'none';
+    }
+}
+
+/**
+ * Select a BWS tile (best or worst).
+ * @param {HTMLElement} tile - The tile element clicked
+ */
+function selectBwsTile(tile) {
+    const schema = tile.getAttribute('data-schema');
+    const value = tile.getAttribute('data-value');
+    const role = tile.getAttribute('data-role'); // "best" or "worst"
+    const form = tile.closest('form');
+
+    if (!form) return;
+
+    debugLog(`[BWS] Selecting tile: schema=${schema}, value=${value}, role=${role}`);
+
+    // Prevent selecting the same item as both best and worst
+    const otherRole = role === 'best' ? 'worst' : 'best';
+    const otherRoleClass = role === 'best' ? '.bws-worst-tile' : '.bws-best-tile';
+    const otherSelected = form.querySelector(`${otherRoleClass}.selected`);
+    if (otherSelected && otherSelected.getAttribute('data-value') === value) {
+        debugLog(`[BWS] Blocked: cannot select same item as both best and worst`);
+        return;
+    }
+
+    // Deselect all tiles of the same role in this form
+    const roleClass = role === 'best' ? '.bws-best-tile' : '.bws-worst-tile';
+    form.querySelectorAll(roleClass).forEach(t => t.classList.remove('selected'));
+
+    // Select this tile
+    tile.classList.add('selected');
+
+    // Disable the same item in the other role, enable all others
+    form.querySelectorAll(otherRoleClass).forEach(t => {
+        if (t.getAttribute('data-value') === value) {
+            t.classList.add('bws-disabled');
+        } else {
+            t.classList.remove('bws-disabled');
+        }
+    });
+
+    // Update the corresponding hidden input
+    const labelName = role; // "best" or "worst"
+    const hiddenInput = form.querySelector(`.bws-value[label_name="${labelName}"]`);
+    if (hiddenInput) {
+        hiddenInput.value = value;
+        hiddenInput.setAttribute('data-modified', 'true');
+        registerAnnotation(hiddenInput);
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // Update validation
+    validateRequiredFields();
+}
+
+/**
+ * Validate that best and worst selections are different.
+ * @param {HTMLElement} form - The BWS form
+ */
+function validateBwsSelection(form) {
+    const bestInput = form.querySelector('.bws-value[label_name="best"]');
+    const worstInput = form.querySelector('.bws-value[label_name="worst"]');
+    const errorDiv = form.querySelector('.bws-validation-error');
+
+    if (!bestInput || !worstInput) return;
+
+    const bestVal = bestInput.value;
+    const worstVal = worstInput.value;
+
+    if (bestVal && worstVal && bestVal === worstVal) {
+        if (errorDiv) errorDiv.style.display = 'block';
+        // Clear the more recently selected one — we detect by checking which role
+        // was just selected. Since we can't easily tell, clear worst.
+        worstInput.value = '';
+        form.querySelectorAll('.bws-worst-tile').forEach(t => t.classList.remove('selected'));
+        registerAnnotation(worstInput);
+        debugLog('[BWS] Validation error: best == worst, cleared worst');
+    } else {
+        if (errorDiv) errorDiv.style.display = 'none';
+    }
+}
+
+/**
+ * Restore BWS annotation state from saved annotations.
+ * Called during populateInputValues.
+ */
+function restoreBwsAnnotations() {
+    if (!currentAnnotations) return;
+
+    debugLog('[BWS] Restoring BWS annotations');
+
+    document.querySelectorAll('.annotation-form.bws').forEach(form => {
+        // Restore best
+        const bestInput = form.querySelector('.bws-value[label_name="best"]');
+        if (bestInput) {
+            const schema = bestInput.getAttribute('schema');
+            if (schema && currentAnnotations[schema] && currentAnnotations[schema]['best']) {
+                const savedValue = currentAnnotations[schema]['best'];
+                bestInput.value = savedValue;
+                bestInput.setAttribute('data-modified', 'true');
+                const tile = form.querySelector(`.bws-best-tile[data-value="${savedValue}"]`);
+                if (tile) tile.classList.add('selected');
+                debugLog(`[BWS] Restored best: ${schema}/best = ${savedValue}`);
+            }
+        }
+
+        // Restore worst
+        const worstInput = form.querySelector('.bws-value[label_name="worst"]');
+        if (worstInput) {
+            const schema = worstInput.getAttribute('schema');
+            if (schema && currentAnnotations[schema] && currentAnnotations[schema]['worst']) {
+                const savedValue = currentAnnotations[schema]['worst'];
+                worstInput.value = savedValue;
+                worstInput.setAttribute('data-modified', 'true');
+                const tile = form.querySelector(`.bws-worst-tile[data-value="${savedValue}"]`);
+                if (tile) tile.classList.add('selected');
+                debugLog(`[BWS] Restored worst: ${schema}/worst = ${savedValue}`);
+            }
+        }
+    });
+}
+
+// Export BWS functions globally
+window.initBwsAnnotation = initBwsAnnotation;
+window.selectBwsTile = selectBwsTile;
+window.restoreBwsAnnotations = restoreBwsAnnotations;
+
+/**
+ * Populate dynamic schema content from instance data.
+ *
+ * Schemas like extractive_qa, text_edit, error_span, card_sort, and conjoint
+ * need data from the current instance (question text, source text, items list, etc.)
+ * that is NOT available at schema generation time. This function fetches the
+ * instance data and injects it into the appropriate DOM containers.
+ */
+async function populateDynamicSchemaContent() {
+    // Check if any dynamic schemas exist on the page
+    const dynamicForms = document.querySelectorAll(
+        '.shadcn-extractive-qa-container, .shadcn-text-edit-container, ' +
+        '.shadcn-error-span-container, .shadcn-card-sort-container, ' +
+        '.shadcn-conjoint-container'
+    );
+    if (dynamicForms.length === 0) return;
+
+    // Fetch instance data from server
+    let instanceData = null;
+    try {
+        const resp = await fetch('/api/instance_data');
+        if (resp.ok) {
+            instanceData = resp.json ? await resp.json() : null;
+        }
+    } catch (e) {
+        // Fallback: try to parse from embedded JSON
+        debugLog('[DynamicSchema] Could not fetch instance data, using fallback');
+    }
+
+    // Fallback: read from the embedded <script id="instance_data"> tag (full instance data)
+    if (!instanceData) {
+        try {
+            const instanceDataScript = document.getElementById('instance_data');
+            if (instanceDataScript) {
+                instanceData = JSON.parse(instanceDataScript.textContent);
+            }
+        } catch (e) {
+            debugLog('[DynamicSchema] Could not parse embedded instance_data');
+        }
+    }
+
+    // Second fallback: read from the embedded <script id="instance"> tag (text only)
+    if (!instanceData) {
+        try {
+            const instanceScript = document.getElementById('instance');
+            if (instanceScript) {
+                instanceData = JSON.parse(instanceScript.textContent);
+            }
+        } catch (e) {
+            debugLog('[DynamicSchema] Could not parse embedded instance data');
+        }
+    }
+
+    if (!instanceData) {
+        debugLog('[DynamicSchema] No instance data available');
+        return;
+    }
+
+    // Store globally for schema inline scripts
+    window.currentInstanceData = instanceData;
+
+    // Get the instance text from the DOM (already rendered by the template)
+    const instanceTextEl = document.getElementById('text-content') || document.getElementById('instance-text');
+    const instanceText = instanceTextEl ? (instanceTextEl.textContent || '') : '';
+
+    dynamicForms.forEach(form => {
+        const type = form.getAttribute('data-annotation-type');
+        const schemaName = form.getAttribute('data-schema-name');
+
+        switch (type) {
+            case 'extractive_qa':
+                populateExtractiveQa(form, schemaName, instanceData, instanceText);
+                break;
+            case 'text_edit':
+                populateTextEdit(form, schemaName, instanceData);
+                break;
+            case 'error_span':
+                populateErrorSpan(form, schemaName, instanceData, instanceText);
+                break;
+            case 'card_sort':
+                populateCardSort(form, schemaName, instanceData);
+                break;
+            case 'conjoint':
+                populateConjoint(form, schemaName, instanceData);
+                break;
+        }
+    });
+}
+
+function populateExtractiveQa(form, schemaName, data, instanceText) {
+    // Populate question text
+    const questionField = form.getAttribute('data-question-field') || 'question';
+    const questionEl = form.querySelector('.eqa-question-text');
+    if (questionEl && data[questionField]) {
+        questionEl.textContent = data[questionField];
+    }
+
+    // Populate passage text (for selection)
+    const passageField = form.getAttribute('data-passage-field') || 'passage';
+    const passageEl = document.getElementById(schemaName + '-passage');
+    if (passageEl) {
+        const passageText = data[passageField] || instanceText;
+        if (passageText && !passageEl.textContent.trim()) {
+            passageEl.textContent = passageText;
+        }
+    }
+}
+
+function populateTextEdit(form, schemaName, data) {
+    const sourceField = form.getAttribute('data-source-field');
+    if (!sourceField || !data[sourceField]) return;
+
+    const sourceText = data[sourceField];
+
+    // Set the source (original) text display
+    const sourceEl = document.getElementById(schemaName + '-source-text');
+    if (sourceEl && !sourceEl.textContent.trim()) {
+        sourceEl.textContent = sourceText;
+    }
+
+    // Pre-fill the editor textarea with source text
+    const editor = document.getElementById(schemaName + '-editor');
+    if (editor && !editor.value.trim()) {
+        editor.value = sourceText;
+    }
+}
+
+function populateErrorSpan(form, schemaName, data, instanceText) {
+    const textContainer = document.getElementById(schemaName + '-text');
+    if (textContainer && !textContainer.textContent.trim()) {
+        textContainer.textContent = instanceText;
+    }
+
+    // Hide the duplicate "Text to Annotate" section — the error span container
+    // IS the interactive text area and showing the same text twice is confusing
+    const instanceTextSection = document.getElementById('instance-text');
+    if (instanceTextSection) {
+        instanceTextSection.style.display = 'none';
+    }
+}
+
+function populateCardSort(form, schemaName, data) {
+    const itemsField = form.getAttribute('data-items-field') || 'items';
+    const items = data[itemsField];
+    if (!items || !Array.isArray(items)) return;
+
+    const sourceItems = document.getElementById(schemaName + '-source-items');
+    if (!sourceItems || sourceItems.children.length > 0) return;
+
+    items.forEach(function(item, idx) {
+        const card = document.createElement('div');
+        card.className = 'card-sort-card';
+        card.draggable = true;
+        card.setAttribute('data-card-text', item);
+        card.textContent = item;
+        card.ondragstart = function(e) {
+            e.dataTransfer.setData('text/plain', item);
+            e.dataTransfer.setData('application/x-source-group', '__source__');
+            card.classList.add('card-sort-dragging');
+        };
+        card.ondragend = function() {
+            card.classList.remove('card-sort-dragging');
+        };
+        sourceItems.appendChild(card);
+    });
+}
+
+function populateConjoint(form, schemaName, data) {
+    // Check if profiles are in the instance data
+    const profilesField = form.getAttribute('data-profiles-field');
+    let profiles = null;
+
+    if (profilesField && data[profilesField]) {
+        profiles = data[profilesField];
+    }
+
+    // If no profiles in data, generate from config attributes
+    if (!profiles) {
+        // Read attribute definitions from the form's data-attributes or from inline config
+        const attrCells = form.querySelectorAll('.conjoint-attr-value');
+        if (attrCells.length === 0) return;
+
+        // Collect unique attributes
+        const attrs = {};
+        attrCells.forEach(cell => {
+            const attrName = cell.getAttribute('data-attr');
+            if (attrName && !attrs[attrName]) attrs[attrName] = [];
+        });
+
+        // Try to read levels from inline script config
+        const formScript = form.closest('.annotation_schema');
+        const scriptEl = formScript ? formScript.querySelector('script') : null;
+        let configData = null;
+        if (scriptEl) {
+            try {
+                // Look for conjointConfig in the script text
+                const scriptText = scriptEl.textContent;
+                const match = scriptText.match(/var\s+conjointConfig\s*=\s*(\{[^;]+\})/);
+                if (match) configData = JSON.parse(match[1]);
+            } catch (e) {}
+        }
+
+        // If we have config data, use it to generate random profiles
+        if (configData && configData.attributes) {
+            const profileCards = form.querySelectorAll('.conjoint-profile-card');
+            profileCards.forEach((card, idx) => {
+                const profileNum = card.getAttribute('data-profile');
+                configData.attributes.forEach(attr => {
+                    const cell = card.querySelector(`.conjoint-attr-value[data-attr="${attr.name}"]`);
+                    if (cell && attr.levels && attr.levels.length > 0) {
+                        // Use a deterministic index based on profile num and attribute
+                        // to vary levels across profiles for each instance
+                        const instanceId = document.getElementById('instance_id');
+                        const seed = (instanceId ? instanceId.value.length : 0) + idx;
+                        const levelIdx = (seed + attr.name.length + idx * 7) % attr.levels.length;
+                        cell.textContent = attr.levels[levelIdx];
+                    }
+                });
+            });
+        }
+    } else if (Array.isArray(profiles)) {
+        // Profiles from data
+        const profileCards = form.querySelectorAll('.conjoint-profile-card');
+        profiles.forEach((profile, idx) => {
+            if (idx < profileCards.length) {
+                const card = profileCards[idx];
+                Object.keys(profile).forEach(attrName => {
+                    const cell = card.querySelector(`.conjoint-attr-value[data-attr="${attrName}"]`);
+                    if (cell) cell.textContent = profile[attrName];
+                });
+            }
+        });
+    }
+}

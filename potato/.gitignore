@@ -1,0 +1,156 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+**/.DS_Store
+# C extensions
+*.so
+
+# Distribution / packaging
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Rope
+.ropeproject
+
+# Django stuff:
+*.log
+*.pot
+
+# Sphinx documentation
+docs/_build/
+
+# Generated template files
+potato/templates/generated/
+
+# IDE and editor configs
+.cursorignore
+.cursorrules
+.idea/
+.vscode/
+*.swp
+*~
+\#*\#
+
+# AI assistant files
+CLAUDE.md
+BLOG_INCONSISTENCIES.md
+WEBSITE_CORRECTIONS.md
+CORE_QUALITY_FEATURES_PLAN.md
+FEATURE_PRIORITY_LIST.md
+MERGE_PLAN.md
+social_media_announcement.md
+
+# Node.js
+node_modules/
+package.json
+package-lock.json
+
+# Annotation output directories
+annotation_output/
+output/
+tests/output/
+tests/server/output/
+examples/**/annotation_output/
+examples/**/layouts/
+examples/**/waveform_cache/
+
+# Test results and debug files
+test_output.txt
+test_results.txt
+full_test_results.txt
+tests/debug_*.html
+tests/debug_*.png
+
+# Temporary files and directories
+tmp/
+*.zip
+quick_test.py
+resumes/
+my_annotation_task/
+
+# AI endpoint config files (contain API keys / environment-specific URLs)
+ai-config.yaml
+ai-config*.yaml
+
+# Demo and test configs (user-specific)
+admin_demo_config.yaml
+demo_config.yaml
+create_admin_demo_data.py
+
+# Development junk files
+potato/static/junk.js
+potato/templates/test_*.html
+potato/archive/
+
+# Example projects (optional, user-created)
+example-projects/
+example-tasks/
+layouts/
+
+# Duplicate/temp test directories
+tests/tests/
+
+# Debug test configs
+tests/configs/*debug*.yaml
+
+# Test config temp files
+test_config_port_*.yaml
+temp_screenshots/
+
+# Implementation plans
+plans/
+
+# Internal documentation (competitive analysis, strategy docs, etc.)
+internal/
+
+# Documentation site build output
+site/
+
+# Virtual Environments
+venv/
+.pypirc
+
+# Local-only LLM endpoint override configs (burger/gemini/etc.) -- these
+# are for local testing and must never be committed.
+**/config-burger.*
+**/*-burger.yaml
+**/config-gemini.*
+**/config-ollama-local.*
+
+# QA: stray per-example databases and generated outputs (should not be committed)
+examples/**/project.sqlite
+examples/**/project.sqlite-wal
+examples/**/project.sqlite-shm
+examples/**/admin_api_key.txt
+qa-testing/

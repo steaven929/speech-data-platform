@@ -1,0 +1,3094 @@
+[
+  {
+    "id": "20260720151906185",
+    "sample_id": "20260720151906185",
+    "audio_url": "/media/20260720151906185.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 3.601,
+        "text": "六一零二三号话务员为您服务。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 3.601,
+        "end_time": 6.43,
+        "text": "你好，有什么可以帮您？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 6.43,
+        "end_time": 7.202,
+        "text": "你好。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 7.202,
+        "end_time": 10.288,
+        "text": "你好你好，我想投诉吧嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 10.288,
+        "end_time": 15.175,
+        "text": "就是店家河马一三城店那那个县区水果看。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 15.175,
+        "end_time": 23.148,
+        "text": "就是那员工去骨机从来不带手套，那个东西那个人吃了有问题怎么办？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 23.148,
+        "end_time": 25.205,
+        "text": "稍等一下印象城。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 25.205,
+        "end_time": 25.977,
+        "text": "河马。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 25.977,
+        "end_time": 27.52,
+        "text": "先生是吧嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 27.52,
+        "end_time": 33.95,
+        "text": "嗯，盒马鲜生这个。\n切水果的人员是吧？对，就是员工。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 33.95,
+        "end_time": 37.294,
+        "text": "每天都是这样，总人员对没。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 37.294,
+        "end_time": 50.668,
+        "text": "你先忙，每天都不行。\n说明天早上啊呃，寄点呃，六点上班一下，到十点去去过去。从来不戴手套，这个东西卖给谁？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 50.668,
+        "end_time": 62.499,
+        "text": "吃出了问题，谁负责任人每天都不带手套，对，不带一次性就的去那个现切的水果啊，不带一次性手套。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 62.499,
+        "end_time": 63.528,
+        "text": "还有吗？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 63.528,
+        "end_time": 70.215,
+        "text": "呃，就是呀说我买了三个东西吃的又不会生，我咋办呢啊？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 70.215,
+        "end_time": 74.844,
+        "text": "就是不卫生是吧，就这个问题对这个店。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 74.844,
+        "end_time": 84.103,
+        "text": "您的诉求是什么？整改吗？对小姐呀，四个人还是可以在天天在这里上班吗？嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 84.103,
+        "end_time": 94.134,
+        "text": "希望该店。\n快整改是吧？对对，这个员工还可以在这边上班嘛，天天都有啊。你说那个。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0019",
+        "start_time": 94.134,
+        "end_time": 95.163,
+        "text": "赵慧琴。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0020",
+        "start_time": 95.163,
+        "end_time": 109.823,
+        "text": "稍等一下，赵慧琴呃，赵照就是走字旁的，走自己的照，所以对慧慧那个呃叫汇，就是上面两个丰给了这一个新的那一块子，贵。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0021",
+        "start_time": 109.823,
+        "end_time": 112.395,
+        "text": "智慧的慧啊，什么秦。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0022",
+        "start_time": 112.395,
+        "end_time": 116.253,
+        "text": "呃，就是芹菜行吧，芹菜的芹吗？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0023",
+        "start_time": 116.253,
+        "end_time": 123.455,
+        "text": "对呃，这就是这个群吧，就是行的行吗？对对对，钢铁的群嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0024",
+        "start_time": 123.455,
+        "end_time": 131.942,
+        "text": "那你现在是希望这个该店尽快整改，并词汇改变人工作人员。\n是吗？对嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0025",
+        "start_time": 131.942,
+        "end_time": 132.457,
+        "text": "嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0026",
+        "start_time": 132.457,
+        "end_time": 136.829,
+        "text": "匿名还是实名反映线下边保密。\n什么？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0027",
+        "start_time": 136.829,
+        "end_time": 145.831,
+        "text": "匿名还是实名反映信息要不要保密？\n呃，匿名，抱歉嗯，好的，记录了啊嗯好。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0028",
+        "start_time": 145.831,
+        "end_time": 148.66,
+        "text": "好的，感谢来电，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720151906185.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61023/20260720151906185.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 37
+  },
+  {
+    "id": "20260720151719221",
+    "sample_id": "20260720151719221",
+    "audio_url": "/media/20260720151719221.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 3.308,
+        "text": "嗯，六一零二九号话务员为您。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 3.308,
+        "end_time": 6.615,
+        "text": "服务。您好，有什么可以帮您？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 6.615,
+        "end_time": 18.428,
+        "text": "你好，我我在晋江市买了，是元店里买了一部手机。现在我那个微今天才第三天呢，现在我那个手机啊充电发烫。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 18.428,
+        "end_time": 24.334,
+        "text": "呃，顺便呃呃看看看抖音的话，十来二十分钟就怕胖了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 24.334,
+        "end_time": 27.169,
+        "text": "还有现在微信都开出来的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 27.169,
+        "end_time": 47.487,
+        "text": "已经帮您记录了，在反映当中呢，女士，哎，我在，不过我现在现在又出现了一个问题呢，就是那个微信都开不出来了，现在微信都开不出来微信哎，微信都开不出来了。今天才第三天呢，所以。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 47.487,
+        "end_time": 49.85,
+        "text": "我请你们帮帮忙帮我。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 49.85,
+        "end_time": 56.465,
+        "text": "呃，早点帮我处理这个问题。好的，谢谢，我帮您催办一下啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 56.465,
+        "end_time": 59.3,
+        "text": "嗯，好，感谢来电，再见。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720151719221.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61029/20260720151719221.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 38
+  },
+  {
+    "id": "20260720151516032",
+    "sample_id": "20260720151516032",
+    "audio_url": "/media/20260720151516032.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 3.668,
+        "text": "六一零二二号话务员为您服务。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 3.668,
+        "end_time": 6.55,
+        "text": "您好，有什么可以帮您？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 6.55,
+        "end_time": 17.815,
+        "text": "喂，你好你好，哎，麻烦问一下那个有没有我们附近的就是动物病理讲课的一个三方机构名录啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 17.815,
+        "end_time": 24.102,
+        "text": "有没有什么动物病理一节课，动物病理的动物独立了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 24.102,
+        "end_time": 28.556,
+        "text": "动物独立犊犊对众德的独理论的里面。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 28.556,
+        "end_time": 32.224,
+        "text": "检测资质的第三方名录都有啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 32.224,
+        "end_time": 35.368,
+        "text": "呃，呃读的读啊读的读啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 35.368,
+        "end_time": 42.965,
+        "text": "理论的理。对对对对，检测机构对检测机构的第三方面啊，对你。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 42.965,
+        "end_time": 45.061,
+        "text": "嗯，您稍等啊嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 45.061,
+        "end_time": 64.71,
+        "text": "我们这边目前的话有那个呃畜牧兽医技术服务中心和那个兽医站的一个咨询电话，没有其他的检测机构了嗯，没有其他的检测机构是吧？哦，好好，其他的是野生动物的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 64.71,
+        "end_time": 87.502,
+        "text": "也是那么早哦，好好好好好，就独立了，他这个也没有是吧，啊，对，没有，我们这边是没有的，可以可能需要问问泰州那边，看着那边是吧？好的好，谢谢谢谢谢谢。不需要这个刚刚提供的是吗？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 87.502,
+        "end_time": 95.1,
+        "text": "呃，不需要不需要，谢谢啊，感谢感谢的没关系，感谢嗯，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720151516032.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61022/20260720151516032.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 39
+  },
+  {
+    "id": "20260720153222673",
+    "sample_id": "20260720153222673",
+    "audio_url": "/media/20260720153222673.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 3.802,
+        "text": "六一零二三号话务员为您服务。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 3.802,
+        "end_time": 10.592,
+        "text": "你好什么？哎，你好你好，我陈志新江派出所什么问题？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 10.592,
+        "end_time": 11.406,
+        "text": "举报。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 11.406,
+        "end_time": 16.838,
+        "text": "具体有什么问题？\n具体什么问题啊，我要我。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 16.838,
+        "end_time": 20.64,
+        "text": "可是培训他就是让罗用权什么。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 20.64,
+        "end_time": 23.627,
+        "text": "可是他就是说让我有权。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 23.627,
+        "end_time": 29.331,
+        "text": "什么问题具体什么问题？\n还有那个啥子后后街。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 29.331,
+        "end_time": 42.638,
+        "text": "是什么问题呀？你要先搞这样。\n问题，我还是那个盛群鉴定，我以前不是举报的，他说我帮我解决问题的到去。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 42.638,
+        "end_time": 47.255,
+        "text": "答应我去用二十号前把我问题解决的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 47.255,
+        "end_time": 52.958,
+        "text": "我今号码来电的吗？\n呃，也是这个号码打的还。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 52.958,
+        "end_time": 56.76,
+        "text": "一下稍等一下嗯，我打了许多。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 56.76,
+        "end_time": 73.055,
+        "text": "是这个二零一六年四月十八号晚上啊十点钟左右，夫妻两人莫名被二十名陌生人殴打吗？嗯？\n看一下他们，他们现在是播去包庇不作为。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 73.055,
+        "end_time": 92.609,
+        "text": "稍等一下，我看一下这边答复的话，说的是已经当面联系您，告知您了，沟通了相关的情况了呀。\n骗你骗你们领导的没有，我刚刚才呀，我刚刚就从派出所出来的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 92.609,
+        "end_time": 119.495,
+        "text": "这个可以再来帮您反映啊，但你这个已经是最终答复了。如果我再反映的话，可能还是这个答复啊。\n他现在在楼上办公室里不下来，他都是都是骗人，又是在去哪了又是去哪了，去紧了，他是骗人的。学说在内上面办公室里。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 119.495,
+        "end_time": 129.272,
+        "text": "可以再来帮您反映，但可能还是这个答复啊。\n这都是屁屁。你们领导的去下门上。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 129.272,
+        "end_time": 139.321,
+        "text": "理解的啊，我们可以再来帮您反映的，但可能还是这个答复，要提前先告知您一下。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 139.321,
+        "end_time": 143.937,
+        "text": "好，谢谢你啊。嗯，好的，没事的啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 143.937,
+        "end_time": 146.11,
+        "text": "感谢来电，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720153222673.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61023/20260720153222673.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 40
+  },
+  {
+    "id": "20260720152143874",
+    "sample_id": "20260720152143874",
+    "audio_url": "/media/20260720152143874.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 11.948,
+        "text": "六一零一七号话务员为您服务。您好，有什么可以帮您？\n哎，你好，我要投诉本地发货商家。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 11.948,
+        "end_time": 19.816,
+        "text": "本地发货商家，您说的是什么？\n哎，他他我跟你说一下这个。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 19.816,
+        "end_time": 29.14,
+        "text": "订单编号吧。行行吧，你记一下啊，您说订单圆通单号是yt 三个八嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 29.14,
+        "end_time": 30.889,
+        "text": "六二六四嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 30.889,
+        "end_time": 41.962,
+        "text": "七八六八八六八嗯五九五九。对呃，我在拼多多买了五十枚那个卤蛋，那个计时的我。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 41.962,
+        "end_time": 50.413,
+        "text": "武春梅路。\n但是吧我记一下啊，对快递揽收重量是零点四一千克。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 50.413,
+        "end_time": 51.579,
+        "text": "我收到。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 51.579,
+        "end_time": 54.784,
+        "text": "我收货青年只只有八枚。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 54.784,
+        "end_time": 77.222,
+        "text": "稍等一下，是您这个收货重量是什么？零点四一千克。\n哦，对，就就是揽收的时候，就是快递员把那个就是订单圆通啊，圆通揽收的时候就是零点c h 二把那个截图发给我了。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 77.222,
+        "end_time": 79.553,
+        "text": "快递员。嗯，对。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 79.553,
+        "end_time": 90.627,
+        "text": "就是揽收的时候就是零点是一千克。嗯，我一共收到收到清单，清点了一下，是八门。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 90.627,
+        "end_time": 94.706,
+        "text": "八十四。我买的是五是没有的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 94.706,
+        "end_time": 113.356,
+        "text": "哦，就是是这个重量少了是吧，就是少。\n好了，我是看到我是他的个数买的，实际上不是按照重量买的，但是揽收的时候一一共是零点四一千克。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 113.356,
+        "end_time": 122.973,
+        "text": "所以说期间是存在问题。\n您这个重量数量严重不符，属于主管故意少发货。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 122.973,
+        "end_time": 125.012,
+        "text": "构成消费欺诈。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 125.012,
+        "end_time": 126.47,
+        "text": "欲少发货。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 126.47,
+        "end_time": 137.251,
+        "text": "不成消费欺诈是吧？\n收货时收货实拍面单。嗯，他们这种记录全面，我有都有留存。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 137.251,
+        "end_time": 145.702,
+        "text": "收获时拍面单，还有您刚才还是说什么？\n称重记录全部我有留存。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0019",
+        "start_time": 145.702,
+        "end_time": 152.696,
+        "text": "都有留存好的。\n对呃，之前拼多多仅退仅退部分退款。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0020",
+        "start_time": 152.696,
+        "end_time": 153.279,
+        "text": "嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0021",
+        "start_time": 153.279,
+        "end_time": 160.272,
+        "text": "仅退部分退款。\n是吧，对，只是北京返还不属于赔偿。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0022",
+        "start_time": 160.272,
+        "end_time": 168.723,
+        "text": "嘿好好的。\n你你听我讲完，你记一下哈嗯我不接受我该处理方式。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0023",
+        "start_time": 168.723,
+        "end_time": 176.3,
+        "text": "嗯，上班处理方式啊。\n根据消费者权益保护法第五十五条。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0024",
+        "start_time": 176.3,
+        "end_time": 182.419,
+        "text": "消费者权益保护法第五十五条二。\n诉求有两点。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0025",
+        "start_time": 182.419,
+        "end_time": 187.664,
+        "text": "两点嗯，您说嗯。\n第一，订单全额退还。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0026",
+        "start_time": 187.664,
+        "end_time": 192.036,
+        "text": "求订单全额退还。\nb 二退一赔三。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0027",
+        "start_time": 192.036,
+        "end_time": 198.155,
+        "text": "对，一赔三。\n赔付不足五百元，按五百元赔付。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0028",
+        "start_time": 198.155,
+        "end_time": 209.52,
+        "text": "三百元按照五百元赔付。您对，这是您两个诉求嗯。\n对要求单位针对商家欺诈行为介入。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0029",
+        "start_time": 209.52,
+        "end_time": 210.977,
+        "text": "核查处理。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0030",
+        "start_time": 210.977,
+        "end_time": 220.885,
+        "text": "七三零为介入核查处理。好的。\n出具正规的调解结果，并主动和我电话沟通。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0031",
+        "start_time": 220.885,
+        "end_time": 231.958,
+        "text": "出具正规的调解结果是吗？哦？\n对我要求他我要求告知我立案告知书发我一下再说吧。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0032",
+        "start_time": 231.958,
+        "end_time": 251.482,
+        "text": "并向您提供这个立案告知书是吧？\n对对对，他现在就是你要听我讲，第一，他赔付我是我可以你们市场监管局没有权利让他赔付我。但是我要求书法家。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0033",
+        "start_time": 251.482,
+        "end_time": 258.767,
+        "text": "幺立案调查，我要立案告知书，我就好起诉他，要么就。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0034",
+        "start_time": 258.767,
+        "end_time": 259.35,
+        "text": "哦。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0035",
+        "start_time": 259.35,
+        "end_time": 276.543,
+        "text": "您您这个商家是能提供一下吗？哪个商家呀嗯。\n商家，我给你发的订单号呀，我商家怎么给你提供呀？平常多少我也不懂，不会弄啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0036",
+        "start_time": 276.543,
+        "end_time": 292.861,
+        "text": "因为他这个就是说市场监管局啊，他是根据您那个商家的那个范围去去派单到各个。\n商家，我现在我我点了个商家，怎么点啊？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0037",
+        "start_time": 292.861,
+        "end_time": 308.597,
+        "text": "呃，您点开商家之后，能不能看到他那个商家地址在哪？\n商家地址好，我看一下啊嗯嗯因为他就是中国大陆发货地江苏省。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0038",
+        "start_time": 308.597,
+        "end_time": 312.677,
+        "text": "啊，对，找到了江苏省宿迁市。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0039",
+        "start_time": 312.677,
+        "end_time": 315.3,
+        "text": "四千是吧。\n宿迁市。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0040",
+        "start_time": 315.3,
+        "end_time": 325.79,
+        "text": "那您这个跟我们晋江市是哪个？上面是对上了。\n不是，但是呃稍等啊，我看一下。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0041",
+        "start_time": 325.79,
+        "end_time": 334.241,
+        "text": "我们是晋江的呀。\n他是，那你的意思我就直接打他的长子电话吗？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0042",
+        "start_time": 334.241,
+        "end_time": 350.56,
+        "text": "就是您要看一下您这个商家地址是在哪里的。然后您这个邮箱当地的这个市场监督管理局进行监管。\n我看了看他有个什么参数。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0043",
+        "start_time": 350.56,
+        "end_time": 356.679,
+        "text": "他商家商品参数嗯嗯呃长治市江苏省宿迁市呢？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0044",
+        "start_time": 356.679,
+        "end_time": 366.587,
+        "text": "对呀，那那我们这边是进教室呀嗯。\n哦，那你转到那个，你能给我转过去吗？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0045",
+        "start_time": 366.587,
+        "end_time": 380.866,
+        "text": "我帮您尝试转一下，您不要挂机啊，因为这是我们晋江只有权限受理我们晋江的这个商家。\n哎，不好意思了啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0046",
+        "start_time": 380.866,
+        "end_time": 387.568,
+        "text": "没关系，您不要挂机。好吧。\n我帮您转好，您稍等。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0047",
+        "start_time": 387.568,
+        "end_time": 395.436,
+        "text": "您这边不要挂机啊，我帮您转接。\n嗯，好，谢谢嗯嗯不客气。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0048",
+        "start_time": 395.436,
+        "end_time": 396.31,
+        "text": "你好。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720152143874.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61017/20260720152143874.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 41
+  },
+  {
+    "id": "20260720153831899",
+    "sample_id": "20260720153831899",
+    "audio_url": "/media/20260720153831899.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 2.62,
+        "text": "六一零二三号话务员为您服务。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 2.62,
+        "end_time": 9.544,
+        "text": "你好，有什么可以帮您？哎，你好，我想问一下，就是我那个有一个车叫苏mfk。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 9.544,
+        "end_time": 22.83,
+        "text": "下载一下交管幺二幺二三二我们。\n这边挪不了车了哦，现在不不归你们这个给你了。是的，我很不下车了啊。好的，谢谢。嗯嗯，好，没事的，感谢来电，再见。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720153831899.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61023/20260720153831899.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 42
+  },
+  {
+    "id": "20260720153700809",
+    "sample_id": "20260720153700809",
+    "audio_url": "/media/20260720153700809.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 4.391,
+        "text": "六一零一零号话务员为您服务。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 4.391,
+        "end_time": 8.469,
+        "text": "您好，请问有什么可以帮您？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 8.469,
+        "end_time": 15.997,
+        "text": "你好，刚才幺二三四五给给我那个反馈，就是说那个。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 15.997,
+        "end_time": 16.624,
+        "text": "的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 16.624,
+        "end_time": 17.252,
+        "text": "呃。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 17.252,
+        "end_time": 29.171,
+        "text": "就在今日空调厂的那个厂房的回复，我现在提出几个不同的观点。\n稍等啊，我看一下。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 29.171,
+        "end_time": 33.249,
+        "text": "嗯，浦桥村的孤山镇土桥村。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 33.249,
+        "end_time": 40.777,
+        "text": "有没有看到我上一次那个投诉的？\n孤山镇姜八东路吗？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 40.777,
+        "end_time": 45.482,
+        "text": "对，八路。\n测水港西侧的厂房对。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 45.482,
+        "end_time": 47.991,
+        "text": "这个我看一下啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 47.991,
+        "end_time": 56.147,
+        "text": "这个刚才泰州那边是已经重新帮您记录反映了，是吗？对。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 56.147,
+        "end_time": 61.793,
+        "text": "我因为在晋江也投诉了，我继续反映嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 61.793,
+        "end_time": 62.734,
+        "text": "第一。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 62.734,
+        "end_time": 74.653,
+        "text": "第一，该厂事实上不是对老旧墙墙纸加固翻新，现场可以看到已经是全部拆掉重建了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 74.653,
+        "end_time": 80.613,
+        "text": "没有加固的说法，孤山镇答复不符合事实。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 80.613,
+        "end_time": 100.374,
+        "text": "他们能不能呃，他们能提供这个账，就是现场的前后对比照片，我们可以我们可以提供。\n就是这个厂房是将老旧墙体拆除重建，并未进行加固。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 100.374,
+        "end_time": 115.117,
+        "text": "对，没有翻新加固就是直接。\n拆掉了检原厂方只有一层，现在准备搭建第二层，没有住规局的规划许可证。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 115.117,
+        "end_time": 116.999,
+        "text": "对，没有嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0019",
+        "start_time": 116.999,
+        "end_time": 124.84,
+        "text": "没有自然规没有自然和规划局的建设工程规划许可证嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0020",
+        "start_time": 124.84,
+        "end_time": 132.996,
+        "text": "然后就是说该厂房他现在是翻新，而且这地址明显扩大了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0021",
+        "start_time": 132.996,
+        "end_time": 133.623,
+        "text": "是。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0022",
+        "start_time": 133.623,
+        "end_time": 153.384,
+        "text": "然后就是说姑山镇和土桥村答复的是未经过实事求是，就是有有点那个真的眼睛说瞎话了。\n好的，我看到泰州也帮您记录了，说他们虚假答复。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0023",
+        "start_time": 153.384,
+        "end_time": 164.049,
+        "text": "对对对对对对的对的。就是太明目张胆了，就是说太太不符合实事求是了嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0024",
+        "start_time": 164.049,
+        "end_time": 185.065,
+        "text": "麻烦你帮我记好啊。好的。\n然后是诉求是要求部门尽快制止这个违建的行为，然后投诉工山镇政府和土桥村委不作为，明显包庇该户的违建行为，是吗？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0025",
+        "start_time": 185.065,
+        "end_time": 186.006,
+        "text": "对的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0026",
+        "start_time": 186.006,
+        "end_time": 186.947,
+        "text": "好的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0027",
+        "start_time": 186.947,
+        "end_time": 201.376,
+        "text": "好的，谢谢你啊，不用谢，不好意思嗯，嗯，好的好的，谢谢，不用。\n行，那我这边再来帮您催促跟进。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0028",
+        "start_time": 201.376,
+        "end_time": 205.453,
+        "text": "好的好的。\n感谢来电，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0029",
+        "start_time": 205.453,
+        "end_time": 208.59,
+        "text": "好的，拜拜嗯，再见。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720153700809.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61010/20260720153700809.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 43
+  },
+  {
+    "id": "20260720153544797",
+    "sample_id": "20260720153544797",
+    "audio_url": "/media/20260720153544797.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 13.273,
+        "text": "六一零二九号话务员为您服务。您好，有什么可以帮您？\n喂，你好，我是城南花苑北区的，我是我星期五跟你跟你们反映的情况，说礼拜一给我打。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 13.273,
+        "end_time": 14.703,
+        "text": "也没有答复嘛。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 14.703,
+        "end_time": 24.709,
+        "text": "您稍等我看一下啊。城南花苑北区一幢一单元电梯的问题是吧？\n哎，对对对，那个电梯响的不得了，又没有风。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 24.709,
+        "end_time": 28.588,
+        "text": "他们到你们头头疼，年纪大的都不感兴趣。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 28.588,
+        "end_time": 29.405,
+        "text": "二十一。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 29.405,
+        "end_time": 43.291,
+        "text": "你这个七月十八号反应的没有那么快，有答复的先生，我来帮您再催一下啊，他部门一般处理时间在五个工作日。\n那好，那我不能给我明天去做打电话嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 43.291,
+        "end_time": 51.255,
+        "text": "我现在就帮您催催一下这个部门好吗？\n嗯，好的好的好的。看有没有解决，不好意思啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 51.255,
+        "end_time": 56.36,
+        "text": "嗯，没事的，我来帮您催一下啊。好好好嗯，好，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720153544797.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61029/20260720153544797.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 44
+  },
+  {
+    "id": "20260720153544797_r44",
+    "sample_id": "20260720153544797_r44",
+    "audio_url": "/media/20260720153544797_r44.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 13.273,
+        "text": "六一零二九号话务员为您服务。您好，有什么可以帮您？\n喂，你好，我是城南花苑北区的，我是我星期五跟你跟你们反映的情况，说礼拜一给我打。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 13.273,
+        "end_time": 14.703,
+        "text": "也没有答复嘛。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 14.703,
+        "end_time": 24.709,
+        "text": "您稍等我看一下啊。城南花苑北区一幢一单元电梯的问题是吧？\n哎，对对对，那个电梯响的不得了，又没有风。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 24.709,
+        "end_time": 28.588,
+        "text": "他们到你们头头疼，年纪大的都不感兴趣。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 28.588,
+        "end_time": 29.405,
+        "text": "二十一。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 29.405,
+        "end_time": 43.291,
+        "text": "你这个七月十八号反应的没有那么快，有答复的先生，我来帮您再催一下啊，他部门一般处理时间在五个工作日。\n那好，那我不能给我明天去做打电话嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 43.291,
+        "end_time": 51.255,
+        "text": "我现在就帮您催催一下这个部门好吗？\n嗯，好的好的好的。看有没有解决，不好意思啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 51.255,
+        "end_time": 56.36,
+        "text": "嗯，没事的，我来帮您催一下啊。好好好嗯，好，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720153544797_r44.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61029/20260720153544797.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 45
+  },
+  {
+    "id": "20260720153537329",
+    "sample_id": "20260720153537329",
+    "audio_url": "/media/20260720153537329.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 16.939,
+        "text": "六一零一七号话务员为您服务。您好，有什么可以帮您？\n嗯，你好，我还是同事，我同事尽量新桥派出所呃，不作为报税，问老有老是讲王友全。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 16.939,
+        "end_time": 20.115,
+        "text": "稍等我看一下，还有一件。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 20.115,
+        "end_time": 20.644,
+        "text": "嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 20.644,
+        "end_time": 25.143,
+        "text": "还可以适合的合啊，那回去去出的去。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 25.143,
+        "end_time": 39.171,
+        "text": "这个你那个那个还是您之前的那个问题吗？说是四月一六年四月十八号晚上，是您夫妻两人是莫名被二十名陌生人殴打。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 39.171,
+        "end_time": 43.406,
+        "text": "是这个吗还是这个案件吗？是这个。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 43.406,
+        "end_time": 57.962,
+        "text": "哦，就现在是什么情况，他就说还是没有跟您说这个具体的。\n这个我去的嗯，我那个六月二十九号是陈公安厅维权嗯打电话。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 57.962,
+        "end_time": 69.078,
+        "text": "电话叫我回来帮我解决问题的嗯解决问题。我七月二号到新桥派出所到新疆拍的很，然后他说。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 69.078,
+        "end_time": 80.988,
+        "text": "他说在只有二十号前帮我解决问题，我今天去看见人人上面你不下来，还不记得他叫何接下来敷衍我。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 80.988,
+        "end_time": 84.429,
+        "text": "啊，又是又是什么什么时间？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 84.429,
+        "end_time": 103.485,
+        "text": "您说的是这个复印的是什么？您说的是办案民警吗？还是谁呀？\n他叫一个一个民警，现在忽悠我就是骗我，又是这样那样的，就是有时候时间长了，又是怎么来就。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 103.485,
+        "end_time": 110.102,
+        "text": "您要找的是谁？\n是哪个领导，他不帮助老百姓解决问题。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 110.102,
+        "end_time": 111.955,
+        "text": "帮助仙居站啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 111.955,
+        "end_time": 112.484,
+        "text": "啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 112.484,
+        "end_time": 125.453,
+        "text": "啊，我没有钱没有钱，他根本就不解决问题，他就这个用户名是谁呀？嗯，他是组长，所长是吧，啊，可以的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 125.453,
+        "end_time": 132.334,
+        "text": "就是说所有露露有全是。\n那以前啊大陆的陆吗？是啊，有。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 132.334,
+        "end_time": 136.569,
+        "text": "是有没有的，有啊。\n嗯，朋友的友。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 136.569,
+        "end_time": 139.745,
+        "text": "朋友的友泉呢？\n权利的权。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0019",
+        "start_time": 139.745,
+        "end_time": 146.097,
+        "text": "权利的权就是这个新桥派出所所长陆有权。\n嗯，说啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0020",
+        "start_time": 146.097,
+        "end_time": 154.037,
+        "text": "找了这个民警就是敷衍零是吧？\n嗯，找个明天就可见如何的河。嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0021",
+        "start_time": 154.037,
+        "end_time": 159.86,
+        "text": "结是什么？杰杰出的杰吗？\n卖卖炉子下面四点哦。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0022",
+        "start_time": 159.86,
+        "end_time": 162.771,
+        "text": "敷衍您是吧？\n啊，是啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0023",
+        "start_time": 162.771,
+        "end_time": 169.123,
+        "text": "他是跟您承诺说，七月二十号之前给您这个处理问题。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0024",
+        "start_time": 169.123,
+        "end_time": 185.003,
+        "text": "然后。\n地上是拒绝解除，他有七月二十号之前解决我的事情。那我是我是七月二十号下午来找他，他正在路上不下来，他说他出井了到。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0025",
+        "start_time": 185.003,
+        "end_time": 191.884,
+        "text": "电话更气了，要三月份去了哦，那其实就在没紧张不下来。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0026",
+        "start_time": 191.884,
+        "end_time": 200.618,
+        "text": "那您您现在就是说您的诉求。\n是什么呢？唔，我的诉求就是说嗯他们就说。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0027",
+        "start_time": 200.618,
+        "end_time": 215.175,
+        "text": "你三个上密鉴定一个今天损伤就是在上海第六人民也有竖着的。嗯，现在那个商就是臂丛神经损伤，是在幺零二解放军医院。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0028",
+        "start_time": 215.175,
+        "end_time": 216.763,
+        "text": "一零二医院。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0029",
+        "start_time": 216.763,
+        "end_time": 220.733,
+        "text": "叫寂剑图。诊断和那个临床诊断。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0030",
+        "start_time": 220.733,
+        "end_time": 226.556,
+        "text": "专家教助诊断个他就这是重症，前期地上治不好。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0031",
+        "start_time": 226.556,
+        "end_time": 234.231,
+        "text": "还有一个轩儿童西装件，金脚下损伤。嗯，这三个上他不肯坚定。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0032",
+        "start_time": 234.231,
+        "end_time": 236.613,
+        "text": "这三个商品是大伤。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0033",
+        "start_time": 236.613,
+        "end_time": 238.731,
+        "text": "我给您记一下啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0034",
+        "start_time": 238.731,
+        "end_time": 249.847,
+        "text": "您当时跟我们写的是说要补充这个什么伤残鉴定？\n这个要补充这个送钱鉴定啊，就是这样的呀。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0035",
+        "start_time": 249.847,
+        "end_time": 259.375,
+        "text": "就是新桥派出所不愿意补充这个这个鉴定是吗？\n下面那个鉴定他一直都是忽悠我。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0036",
+        "start_time": 259.375,
+        "end_time": 259.904,
+        "text": "哦。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0037",
+        "start_time": 259.904,
+        "end_time": 274.196,
+        "text": "七二号我就是七月二十六月二十九号去省公安厅呃，叫维权的吧，成功，那就他不是下令标的解决问题吗？嗯，七月二号。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0038",
+        "start_time": 274.196,
+        "end_time": 286.635,
+        "text": "就是六月二十九号，神公安厅下令叫他解决问题了吗？去用二号他返我那个去聊派出所，就是解决问题的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0039",
+        "start_time": 286.635,
+        "end_time": 299.075,
+        "text": "这个我看到您说的那个刚才问我说有个什么臂丛神经损伤是吧？\n成本上还有我们成立数据推送一些费用呃。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0040",
+        "start_time": 299.075,
+        "end_time": 304.633,
+        "text": "这个是明天就回来解决，帮助我解决问题的嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0041",
+        "start_time": 304.633,
+        "end_time": 313.896,
+        "text": "今天我我就等了你，耐心等着你，帮你解决。我今天上午没有来，昨天下午门。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0042",
+        "start_time": 313.896,
+        "end_time": 315.749,
+        "text": "他又忽悠我了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0043",
+        "start_time": 315.749,
+        "end_time": 323.689,
+        "text": "就是您您就是要求他去解决您的诉求，是吧？\n按照预先承诺的嗯啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0044",
+        "start_time": 323.689,
+        "end_time": 337.187,
+        "text": "好的，我们这个给法律行事诉讼法第一百四十六条规定，你预先定，你必须鉴定意见，有异议，可以提出补充鉴定。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0045",
+        "start_time": 337.187,
+        "end_time": 349.626,
+        "text": "重新鉴定的申请，我今天才派出所问他，问个后借，我说这个这个东西不是我写的吧啊，就是放的规定吧。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0046",
+        "start_time": 349.626,
+        "end_time": 360.743,
+        "text": "嗯，这个我们当时也给您寄了，您说的这个刑事诉讼法第一百四十六条规定了。对。\n谢谢你啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0047",
+        "start_time": 360.743,
+        "end_time": 374.241,
+        "text": "我们再帮您反馈一下您这个号码，还是留您这个联系方式吗？尾号零七四二的。\n我一直是打的这个手机号码哦，好。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0048",
+        "start_time": 374.241,
+        "end_time": 381.916,
+        "text": "好的，我们再帮您问一下派出所这边是什么？\n情况啊嗯嗯好的好。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0049",
+        "start_time": 381.916,
+        "end_time": 382.71,
+        "text": "再见。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720153537329.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61017/20260720153537329.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 46
+  },
+  {
+    "id": "20260720155317419",
+    "sample_id": "20260720155317419",
+    "audio_url": "/media/20260720155317419.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 2.47,
+        "text": "六一零二三号话务员为您。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 2.47,
+        "end_time": 5.764,
+        "text": "为您服务，您好，有什么可以帮您？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 5.764,
+        "end_time": 13.586,
+        "text": "啊，喂你好，我想咨询一下，就是爸爸妈妈背的四零五零保险。\n嗯，具体是什么问题？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 13.586,
+        "end_time": 23.26,
+        "text": "因为社区的人，我已经去了十次了，他一直都在拖他，然后跟我说的是快好了快好了，我从二五。\n五年间。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 23.26,
+        "end_time": 26.554,
+        "text": "我从二五年的下半年就开始申请了。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 26.554,
+        "end_time": 32.112,
+        "text": "然后今年三月份的时候又去，他说会给你提交。\n资料的要的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 32.112,
+        "end_time": 43.639,
+        "text": "那个人社局下来给您核查，请你注意接听电话这种类似的回复我也是可以接受的。然后今天六月份的时候，我又问他，他那边。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 43.639,
+        "end_time": 51.873,
+        "text": "先给出的回复是，我的爸爸是可以的，我的妈妈不行，然后我问他，我妈妈申请。\n是吧对。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 51.873,
+        "end_time": 61.547,
+        "text": "不是，我已经问了他，我的妈妈为什么不行，他就他说暂时不可以为了，问那个车里的人。\n办理什么业务？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 61.547,
+        "end_time": 68.134,
+        "text": "啊，有没有问过人社局？你妈妈是因为什么原因不能申请？我问过了人。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 68.134,
+        "end_time": 82.132,
+        "text": "设计那边完全都没有得到我妈妈的资料。我今天刚去人家设计那边什么资料都没有，他就没有上交。\n嗯，你告知一下家住哪里，然后妈妈的这个具体信息。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 82.132,
+        "end_time": 86.866,
+        "text": "哦，我妈妈是那个晋江市东兴镇的嗯。\n东兴在哪里？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 86.866,
+        "end_time": 92.218,
+        "text": "嗯，河新村。\n东兴镇和新村合资合作的和高清兴是吧？对。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 92.218,
+        "end_time": 93.865,
+        "text": "嗯，哪个贷几号？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 93.865,
+        "end_time": 98.805,
+        "text": "哪个袋机号是什么意思啊？\n哪个在几号具体位置啊呃。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 98.805,
+        "end_time": 101.481,
+        "text": "商家围的。\n下午什么葱啊汤。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 101.481,
+        "end_time": 108.068,
+        "text": "是汤是吧？对，就是那个哦微信号二十七号二十七号。然后母亲叫什么？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 108.068,
+        "end_time": 111.567,
+        "text": "呃，遥就是那个女字旁加一个照。\n嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0019",
+        "start_time": 111.567,
+        "end_time": 117.948,
+        "text": "燕是小燕子的燕。嗯。\n对，就是这个名字呃，身份证号码报一下身份。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0020",
+        "start_time": 117.948,
+        "end_time": 121.654,
+        "text": "份证号码稍等，我要看一下。\n行，好的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0021",
+        "start_time": 121.654,
+        "end_time": 126.182,
+        "text": "呃，三二幺二八二。\n稍等一下啊，三二一二八二。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0022",
+        "start_time": 126.182,
+        "end_time": 128.241,
+        "text": "一九七四。\n一九七四。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0023",
+        "start_time": 128.241,
+        "end_time": 130.299,
+        "text": "零二零三。\n零二零三。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0024",
+        "start_time": 130.299,
+        "end_time": 133.798,
+        "text": "四零四七。\n四零四七呃，是想要申请。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0025",
+        "start_time": 133.798,
+        "end_time": 136.886,
+        "text": "这个四零五零的补贴是吧？是的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0026",
+        "start_time": 136.886,
+        "end_time": 143.267,
+        "text": "四零五零补贴，然后什么时候提，有没有提交过材料，向哪里提交的？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0027",
+        "start_time": 143.267,
+        "end_time": 160.558,
+        "text": "我已经加过无数遍的材料了，我从二五年的九月份就已经开始教他，就一直在交材料，我连无犯罪记录证明我都已经在我妈打了三到四次了。\n就是从二零二五年九月份就已经多次向就是东信。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0028",
+        "start_time": 160.558,
+        "end_time": 165.91,
+        "text": "那个汤是村委是吧，汤家伟的村委对的，向村委提交材料。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0029",
+        "start_time": 165.91,
+        "end_time": 169.203,
+        "text": "提交就是各种各种证明和材料是吧？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0030",
+        "start_time": 169.203,
+        "end_time": 182.172,
+        "text": "这已经是每次收到材料，我每次都交上去了，然后他还是说不行，然后又又提交，提交了之后又说不行。然后后来给我的答复就是意思就是说。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0031",
+        "start_time": 182.172,
+        "end_time": 196.786,
+        "text": "是人社局那边来暗访了，说不行。所以我今天去人社局问了人社局那边说根本就没有收到。\n提交的资料就是让村委一直告知无法办理，且就是没有人事签，是吧？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0032",
+        "start_time": 196.786,
+        "end_time": 215.518,
+        "text": "他之前跟我的答复是快好了，好弄的，我把资料给您提交上去，你注意接听人社局的电话，他是这样跟我说的，然后到三月份的时候，我失去的时候，他就这样跟我说的，等资料提交好了，然后等于是及的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0033",
+        "start_time": 215.518,
+        "end_time": 219.841,
+        "text": "回访六月。\n我先告知，让您让您这个等待结果。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0034",
+        "start_time": 219.841,
+        "end_time": 224.369,
+        "text": "一直说指定结果哦，但至今。\n没有申请下来是吧？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0035",
+        "start_time": 224.369,
+        "end_time": 227.457,
+        "text": "然后六月份跟我说的是暂时不行。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0036",
+        "start_time": 227.457,
+        "end_time": 235.073,
+        "text": "稍等一下，他说人社局那边纺下来之后是有问题的，暂时不行，六月份还告知。\n诚。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0037",
+        "start_time": 235.073,
+        "end_time": 241.455,
+        "text": "暂时还那边是吧，对他意思是不给，就相当于不给您批，是不给审批。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0038",
+        "start_time": 241.455,
+        "end_time": 249.277,
+        "text": "涉及他的意思应该他的意思就是人社局查了下来之后，我妈妈是不符合这个条件。\n的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0039",
+        "start_time": 249.277,
+        "end_time": 252.364,
+        "text": "六月份还告知城市人社局查查后。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0040",
+        "start_time": 252.364,
+        "end_time": 256.275,
+        "text": "显示你母亲是不符合条件的。是的，他如。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0041",
+        "start_time": 256.275,
+        "end_time": 275.83,
+        "text": "我一开始说的话，我不会这么生气，你可以直接告诉我，我妈妈是不符合条件的，我也不会这么生气。我已经去了十几次了，我觉得有点太过分了。\n哦，就是您不认可，你认为这个村委就是一直在，他是不作为是吧？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0042",
+        "start_time": 275.83,
+        "end_time": 287.358,
+        "text": "不是说他不作为，我觉得他态度也很过分了。\n那你现在就是说投诉村委嘛，是吧，然后并尽快帮您母亲办理这个四零五零补贴。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0043",
+        "start_time": 287.358,
+        "end_time": 289.21,
+        "text": "是这个问题吗？对。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0044",
+        "start_time": 289.21,
+        "end_time": 295.591,
+        "text": "您需要投诉村委，然后希望这个村委尽快帮您申请这个四零五零补贴。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0045",
+        "start_time": 295.591,
+        "end_time": 305.266,
+        "text": "他可以不用办，但是我投诉是肯定要投诉的。因为真的气到了，他可以，他我去了十几次，他中间就可以。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0046",
+        "start_time": 305.266,
+        "end_time": 319.058,
+        "text": "直接明说你妈妈是不符合条件的，卡在了哪里，我完全可以接受。可以，那我就不办了没。\n没差别，对不对？就是如果疑问您去了，去村委稍等一下啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0047",
+        "start_time": 319.058,
+        "end_time": 320.498,
+        "text": "就每次材料都。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0048",
+        "start_time": 320.498,
+        "end_time": 333.261,
+        "text": "是按照他交的，基本就是他要什么材料，我给什么材料。\n是您疑问，您志村委提交了十几次材料，为何中间不提前告知你是不能办的，是吧？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0049",
+        "start_time": 333.261,
+        "end_time": 336.76,
+        "text": "对他从来没有说过他是最后才说最后。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0050",
+        "start_time": 336.76,
+        "end_time": 343.347,
+        "text": "或者说子还是暂时不太行，那就是带着一些一个告知。\n你母亲无法办理。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0051",
+        "start_time": 343.347,
+        "end_time": 354.257,
+        "text": "对他可以直接说的，至于这个样子，拖着人。\n嗯，好的好的，记录了啊，你这个诉求的话就是就是投诉从我也不作为啊。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0052",
+        "start_time": 354.257,
+        "end_time": 354.668,
+        "text": "对。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0053",
+        "start_time": 354.668,
+        "end_time": 368.46,
+        "text": "好的，记录了啊，我们来帮您反映一下嗯，是没反应了啊，保留这个号码了。好好好嗯嗯好的，记录了啊。嗯好好，拜拜。好的，好，感谢来电，再见。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720155317419.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61023/20260720155317419.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 47
+  },
+  {
+    "id": "20260720153521749",
+    "sample_id": "20260720153521749",
+    "audio_url": "/media/20260720153521749.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 13.954,
+        "text": "六一零二七号话务员为您服务。您好，哎，你好你好。\n就是我早上说的那个事情，打连续打了两个电话，说的事情，你怎么怎么反应？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 13.954,
+        "end_time": 23.651,
+        "text": "江城区还没给到答复啊。\n这件事情从二零二四年的三月份开始，一直到现在都没有都没有睡。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 23.651,
+        "end_time": 38.551,
+        "text": "就是说光可能忽悠我，今年明年过年了，呃，下雨了，开封了，就这么忽悠我们搞了。我跟你说，现在都要轻生了，以后没有加我的妈愁死了。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 38.551,
+        "end_time": 52.268,
+        "text": "已经在帮您跟进反映了，重新再跟进处理中了。\n你说时间是不是太长了？从二零二四年的三月份，今年都二零二六年的八月份了吗？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 52.268,
+        "end_time": 56.526,
+        "text": "对不对？你还不还。那么我们追加投了。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 56.526,
+        "end_time": 76.392,
+        "text": "因为我不是用这种给平白无故的给我房子，是我屏蔽的房子。你我两套小高人对吧？我已经生病了，买了一套房就没了，对吧？我现在你要没加了是吧，你也已经大了，然后我们身体也不好。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 76.392,
+        "end_time": 91.765,
+        "text": "我估计年纪大了，我借钱把房子收回来。我在那，难道难道我过分嘛？从二零二四年一直到现在都解决不了。我不懂我们政府职能干部都干什么了。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 91.765,
+        "end_time": 98.388,
+        "text": "这边会继续来帮您催促的。\n我你我你你告诉我你崔州哪个地方？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 98.388,
+        "end_time": 103.118,
+        "text": "是不是真正的生日，是不是真正的智能部门？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 103.118,
+        "end_time": 109.977,
+        "text": "从二零二四年从二零二四年到现在，多少个日月我们都吃夜难明。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 109.977,
+        "end_time": 114.707,
+        "text": "反映到江阴靖江工业园区的啊。\n我想问一下。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 114.707,
+        "end_time": 124.404,
+        "text": "就是我们家医院就记下来，你们上次也是这样的，然后给了我个空白资料，也还是没有动力。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 124.404,
+        "end_time": 127.715,
+        "text": "还有没有什么别的途径可以走？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 127.715,
+        "end_time": 136.466,
+        "text": "目前没有在受理，只有江阴靖江工业园区部门在受理中。\n你光光他不光是有人受理。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 136.466,
+        "end_time": 137.648,
+        "text": "你不受理。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 137.648,
+        "end_time": 139.777,
+        "text": "就是安慰我等等待。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 139.777,
+        "end_time": 142.615,
+        "text": "我等的是我还是登不起来。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 142.615,
+        "end_time": 149.71,
+        "text": "我没要求你到外面漂流在外半年多了吗？我都不知道他在哪个地方。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0019",
+        "start_time": 149.71,
+        "end_time": 165.083,
+        "text": "那目前的话，目前经将进价工业园区也没有给到我们答复啊，但是已经反映到他们那边了，今天再跟帮您跟进的，已经到这个部门在处理了。\n对呀。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0020",
+        "start_time": 165.083,
+        "end_time": 169.104,
+        "text": "家属的过年之前就处理了，去了几天。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0021",
+        "start_time": 169.104,
+        "end_time": 176.909,
+        "text": "还是没处理，没去过，你要怎么处理，我就问我，就想我这是不是叫什么？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0022",
+        "start_time": 176.909,
+        "end_time": 184.95,
+        "text": "过来再帮您跟进的啊。\n我就想问一下，跳过跳过这个还能往哪个部门上面走？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0023",
+        "start_time": 184.95,
+        "end_time": 188.261,
+        "text": "我实在受不了，我们家安去了。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0024",
+        "start_time": 188.261,
+        "end_time": 197.721,
+        "text": "我我作为江一次将原来的指明了吗？我感到惭愧。拿不行，那政府太不作为了漠视民生啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0025",
+        "start_time": 197.721,
+        "end_time": 205.526,
+        "text": "简直简直的嘛，这个将原始五十到几点。你就二零二四年到现在多长时间？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0026",
+        "start_time": 205.526,
+        "end_time": 221.136,
+        "text": "会继续来帮您催促他们的。\n对不对？你能解决你就解决，你解决不了，我问他一下子说要全部时间算了。妈了个逼的，我真的我无语。对他的这个证。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0027",
+        "start_time": 221.136,
+        "end_time": 227.522,
+        "text": "作为这个研究的指标给我检测。我打字我走了都没怎么吃不。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0028",
+        "start_time": 227.522,
+        "end_time": 239.347,
+        "text": "好的，现在帮您寄。\n对呀，我又不是要你白白的，要你送给我，我生命这个样子我没有跑到政府就要一块钱就是。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0029",
+        "start_time": 239.347,
+        "end_time": 244.077,
+        "text": "我是实在没办法没必要去你老大来的，请讲。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0030",
+        "start_time": 244.077,
+        "end_time": 246.679,
+        "text": "你回娘家有个家具机吧。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0031",
+        "start_time": 246.679,
+        "end_time": 253.301,
+        "text": "不是备案。好吧，我说我说借钱房房子送过来，我说你不要借。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0032",
+        "start_time": 253.301,
+        "end_time": 258.268,
+        "text": "问题是什么？红包没意思了，等的时间太长了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0033",
+        "start_time": 258.268,
+        "end_time": 259.923,
+        "text": "这没有希望的。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0034",
+        "start_time": 259.923,
+        "end_time": 265.363,
+        "text": "不然我不会打电话给你们说了，不会跟你们反映的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0035",
+        "start_time": 265.363,
+        "end_time": 280.263,
+        "text": "已经部门在处理中了，目前我们也不清楚什么答复，您再耐心等待一下，这边会立刻来帮您催促的。\n对吧，如果说实在打你们的电话也没有做。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0036",
+        "start_time": 280.263,
+        "end_time": 284.757,
+        "text": "对吧，那你建议我去什么地方，你可以说。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0037",
+        "start_time": 284.757,
+        "end_time": 292.562,
+        "text": "对吧，因为你们比较懂，我不懂我一个老百姓，我不我也不我也不想闹事。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0038",
+        "start_time": 292.562,
+        "end_time": 294.927,
+        "text": "对吧咱是想解决事情。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0039",
+        "start_time": 294.927,
+        "end_time": 309.117,
+        "text": "不要等到我们所有跑了，是我父亲，我我我附近来，我连你那个朋友一柜，他妈搞到，他妈的跟我视频，你拍搞了一个，政府晓得嘛啊？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0040",
+        "start_time": 309.117,
+        "end_time": 327.328,
+        "text": "那您这边再耐心等待一下。如果说没有这个相关部门，还是没有呃，给您合理的答复的话，您也可以去这个进行上级部门反映啊。\n就哪一个专业部门，我现在交的就是这个意。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0041",
+        "start_time": 327.328,
+        "end_time": 335.133,
+        "text": "嗯，这个我们的上级部门有信访的。\n新房我去了，他把我还推的我们联系。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0042",
+        "start_time": 335.133,
+        "end_time": 344.121,
+        "text": "嗯，那那没有其他部门了，我们的上级部门呃，目前只有信访部门啊。\n我真的无语了。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0043",
+        "start_time": 344.121,
+        "end_time": 345.54,
+        "text": "真的不知道。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0044",
+        "start_time": 345.54,
+        "end_time": 351.216,
+        "text": "你不是不不不能用这么敷衍了之，对吧？民生问题啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0045",
+        "start_time": 351.216,
+        "end_time": 357.365,
+        "text": "那您这边耐心等待，我们这边会继续来帮您跟进的。\n行吧。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0046",
+        "start_time": 357.365,
+        "end_time": 366.825,
+        "text": "我说您耐心等待，这边挂断后会立刻来帮您跟进处理的。\n行行行，谢谢你，麻烦你了啊你。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0047",
+        "start_time": 366.825,
+        "end_time": 369.9,
+        "text": "好的，感谢您的来电，再见。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720153521749.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61027/20260720153521749.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 48
+  },
+  {
+    "id": "20260720153435688",
+    "sample_id": "20260720153435688",
+    "audio_url": "/media/20260720153435688.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 20.633,
+        "text": "六一零二二号话务员为您服务。您好，有什么可以帮您？\n喂，你好你好你好，就是我们就是我在金江印象城那个年前干的活，到现在都没接到。我想问一下，我这个应该。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 20.633,
+        "end_time": 29.436,
+        "text": "咨询一下你们那边这个是看有没有什么那个帮助我们的对象在哪里上班。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 29.436,
+        "end_time": 36.864,
+        "text": "我是给他们干的那个活，就是商场里面给他们干的活工人吗？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 36.864,
+        "end_time": 40.165,
+        "text": "做什么？\n而做那个广告的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 40.165,
+        "end_time": 42.916,
+        "text": "什么时候去的？\n去年。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 42.916,
+        "end_time": 52.82,
+        "text": "二零二五年吗？对。\n我我我这边我这边全部都有那种水印照片什么的，全部都有。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 52.82,
+        "end_time": 60.523,
+        "text": "做广就做广告吗？\n对，做安装的我们是做安装的广告安装是吗？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 60.523,
+        "end_time": 64.099,
+        "text": "他拖欠你多少钱啊？\n七万多。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 64.099,
+        "end_time": 67.95,
+        "text": "请问一分一分都没发是吗？\n对。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 67.95,
+        "end_time": 68.501,
+        "text": "嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 68.501,
+        "end_time": 89.684,
+        "text": "呃，保留您这个手机号码，我来反映一下，然后这个处理时间是五个工作日。\n哦，好的好的，嗯，麻烦你了。嗯，没关系嗯嗯嗯因为我们实在不知道找谁找他们嗯，他们他们。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 89.684,
+        "end_time": 114.168,
+        "text": "你是你们是不是这有单位吗？还是找的私人的？\n呃，找的单位，但是单位我我也拿不到钱，单位说他们没给你的是吗？对对对，单位对单位也没说没钱，说没接到钱，然后我只能那个打电话问一下你们。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 114.168,
+        "end_time": 119.945,
+        "text": "不是这个不应该你们单位来要钱吗？\n哪个就是。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 119.945,
+        "end_time": 127.373,
+        "text": "是你们单位，我给你嗯去问他们要钱。\n我也是给人家干活的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 127.373,
+        "end_time": 136.176,
+        "text": "那我只能说原来为一体那个呀，所以我再问一下有没有什么解决的办法。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 136.176,
+        "end_time": 140.853,
+        "text": "哦，好的，我这边再反映一下吧啊嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 140.853,
+        "end_time": 144.429,
+        "text": "好，再见啊。\n好好麻烦你嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0018",
+        "start_time": 144.429,
+        "end_time": 147.18,
+        "text": "没关系嗯，好，再见。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "source_audio_filename": "20260720153435688.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61022/20260720153435688.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 49
+  },
+  {
+    "id": "20260720153426286",
+    "sample_id": "20260720153426286",
+    "audio_url": "/media/20260720153426286.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 14.196,
+        "text": "六一零一五号话务员为您服务。您好，请问有什么可以帮您？\n呃，喂我想咨询一下那个一四注册的事，什么注册？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 14.196,
+        "end_time": 16.184,
+        "text": "喂，什么注册？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 16.184,
+        "end_time": 32.367,
+        "text": "你好。\n哎，一四一四注册就是职业医师的那个注册。因为我当时就是就就这样说吧，我考了证之后就一直没有从事这个临床的呃。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 32.367,
+        "end_time": 52.242,
+        "text": "情绪工作。然后现在呢因为已经快十年了吧，我想去复训一下，找个单位附近一下。因为政策上规定是两年之内可以有市内本市的这个三级医院是可以搞定的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 52.242,
+        "end_time": 63.031,
+        "text": "如果超过两年的话，就得在省级单位。所以我想问一下这个具体怎么样怎么样去申请。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 63.031,
+        "end_time": 75.524,
+        "text": "超过三点要去省级的。\n对对，超过两年的超过两年没有注册的话，就得去省级单位，就这个意思嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 75.524,
+        "end_time": 76.943,
+        "text": "稍等一下。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 76.943,
+        "end_time": 86.597,
+        "text": "您是要咨询哪个部门啊，先生。\n呃，机动车机动车的专门管管这个一注册的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 86.597,
+        "end_time": 89.152,
+        "text": "你正可。\n对一正科。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 89.152,
+        "end_time": 91.707,
+        "text": "查询一下有没有对。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 91.707,
+        "end_time": 97.102,
+        "text": "是魏建伟那边。\n对微信委的规建委一正科。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 97.102,
+        "end_time": 107.891,
+        "text": "嗯，我提供一个魏建伟的d 窗口电话，您可以跟他咨询一下。\n呃，行，您稍等一下啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 107.891,
+        "end_time": 116.693,
+        "text": "嗯，您先稍等一下，我查询一下。\n呃，您说您说我记记一下八九幺八。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 116.693,
+        "end_time": 119.248,
+        "text": "八九幺八二二幺六。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 119.248,
+        "end_time": 120.668,
+        "text": "二二幺六。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 120.668,
+        "end_time": 128.334,
+        "text": "对晋江卫建委窗口电话。\n呃，是哪晋江我都不对南京的是吧？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 128.334,
+        "end_time": 149.06,
+        "text": "哦，那您是要加零二五一二三四五。\n哦，我刚刚打的是晋江的幺二三四五是吧，这边是晋江一二三四五哦，行行行行啊行，行行好嘞，好好，谢谢嗯嗯嗯嗯嗯拜拜嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720153426286.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61015/20260720153426286.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 50
+  },
+  {
+    "id": "20260720153426286_r50",
+    "sample_id": "20260720153426286_r50",
+    "audio_url": "/media/20260720153426286_r50.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0,
+        "end_time": 14.196,
+        "text": "六一零一五号话务员为您服务。您好，请问有什么可以帮您？\n呃，喂我想咨询一下那个一四注册的事，什么注册？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 14.196,
+        "end_time": 16.184,
+        "text": "喂，什么注册？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0003",
+        "start_time": 16.184,
+        "end_time": 32.367,
+        "text": "你好。\n哎，一四一四注册就是职业医师的那个注册。因为我当时就是就就这样说吧，我考了证之后就一直没有从事这个临床的呃。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0004",
+        "start_time": 32.367,
+        "end_time": 52.242,
+        "text": "情绪工作。然后现在呢因为已经快十年了吧，我想去复训一下，找个单位附近一下。因为政策上规定是两年之内可以有市内本市的这个三级医院是可以搞定的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0005",
+        "start_time": 52.242,
+        "end_time": 63.031,
+        "text": "如果超过两年的话，就得在省级单位。所以我想问一下这个具体怎么样怎么样去申请。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0006",
+        "start_time": 63.031,
+        "end_time": 75.524,
+        "text": "超过三点要去省级的。\n对对，超过两年的超过两年没有注册的话，就得去省级单位，就这个意思嗯。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0007",
+        "start_time": 75.524,
+        "end_time": 76.943,
+        "text": "稍等一下。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0008",
+        "start_time": 76.943,
+        "end_time": 86.597,
+        "text": "您是要咨询哪个部门啊，先生。\n呃，机动车机动车的专门管管这个一注册的。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0009",
+        "start_time": 86.597,
+        "end_time": 89.152,
+        "text": "你正可。\n对一正科。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0010",
+        "start_time": 89.152,
+        "end_time": 91.707,
+        "text": "查询一下有没有对。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0011",
+        "start_time": 91.707,
+        "end_time": 97.102,
+        "text": "是魏建伟那边。\n对微信委的规建委一正科。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0012",
+        "start_time": 97.102,
+        "end_time": 107.891,
+        "text": "嗯，我提供一个魏建伟的d 窗口电话，您可以跟他咨询一下。\n呃，行，您稍等一下啊。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0013",
+        "start_time": 107.891,
+        "end_time": 116.693,
+        "text": "嗯，您先稍等一下，我查询一下。\n呃，您说您说我记记一下八九幺八。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0014",
+        "start_time": 116.693,
+        "end_time": 119.248,
+        "text": "八九幺八二二幺六。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0015",
+        "start_time": 119.248,
+        "end_time": 120.668,
+        "text": "二二幺六。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0016",
+        "start_time": 120.668,
+        "end_time": 128.334,
+        "text": "对晋江卫建委窗口电话。\n呃，是哪晋江我都不对南京的是吧？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      },
+      {
+        "id": "seg_0017",
+        "start_time": 128.334,
+        "end_time": 149.06,
+        "text": "哦，那您是要加零二五一二三四五。\n哦，我刚刚打的是晋江的幺二三四五是吧，这边是晋江一二三四五哦，行行行行啊行，行行好嘞，好好，谢谢嗯嗯嗯嗯嗯拜拜嗯。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      }
+    ],
+    "source_audio_filename": "20260720153426286_r50.wav",
+    "source_audio_url": "http://172.26.193.175:18080/321/voice/20260720/02584264008/61015/20260720153426286.wav",
+    "source_transcript_file": "靖江质检asr转译-阿里asr.xls",
+    "source_sheet": "Sheet1",
+    "source_row": 51
+  }
+]

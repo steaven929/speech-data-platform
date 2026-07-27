@@ -1,0 +1,8987 @@
+"""
+Flask Routes Module
+
+This module contains all the route handlers for the Flask server.
+It defines the HTTP endpoints and their associated logic for:
+- User authentication and session management
+- Navigation between annotation phases
+- Form handling and validation
+- Annotation submission and processing
+- User registration and management
+- Admin dashboard functionality
+- API endpoints for frontend integration
+
+The routes handle the complete annotation workflow from initial login
+through completion, including consent, instructions, training, annotation,
+and post-study phases. They also provide admin functionality for monitoring
+progress and managing the annotation system.
+
+Key Features:
+- Session-based authentication with timeout management
+- Multi-phase workflow support with configurable phases
+- Annotation submission with validation and persistence
+- AI hint integration for improved annotation quality
+- Admin dashboard with comprehensive statistics
+- API endpoints for real-time frontend updates
+- Error handling and user feedback
+"""
+from __future__ import annotations
+
+import json
+import logging
+import traceback
+import datetime
+from datetime import timedelta
+from flask import Flask, session, render_template, request, redirect, url_for, jsonify, make_response
+import time
+import uuid
+
+# Import from the main flask_server.py module
+from potato.flask_server import (
+    app, config, logger,
+    get_user_state_manager, get_user_state, get_item_state_manager,
+    init_user_state, UserAuthenticator, UserPhase,
+    move_to_prev_instance, move_to_next_instance, go_to_id,
+    get_annotations_for_user_on, get_span_annotations_for_user_on,
+    _instance_meets_required_annotation_rules,
+    render_page_with_annotations, get_current_page_html,
+    validate_annotation, parse_html_span_annotation, Label, SpanAnnotation,
+    get_users, get_total_annotations, update_annotation_state,
+    get_ai_cache_manager,
+    get_users, get_total_annotations, update_annotation_state, ai_hints,
+    get_training_instances, get_training_correct_answers, get_training_explanation,
+    get_training_instance_categories, get_prolific_study, get_keyword_highlight_patterns,
+    get_keyword_highlight_settings
+)
+
+# Import admin dashboard functionality
+from potato.admin import admin_dashboard
+
+# Import span color functions
+from potato.ai.ai_help_wrapper import generate_ai_help_html
+from potato.ai.ai_prompt import get_ai_prompt
+from potato.server_utils.schemas.span import get_span_color, set_span_color, SPAN_COLOR_PALETTE
+
+# Import annotation history
+from potato.annotation_history import AnnotationHistoryManager
+from potato.logging_config import is_ui_debug_enabled, get_debug_log_settings
+
+# Import quality control
+from potato.quality_control import get_quality_control_manager
+
+# Import adjudication
+from potato.adjudication import get_adjudication_manager, AdjudicationDecision
+
+# Import diversity manager
+from potato.diversity_manager import get_diversity_manager
+
+import os
+from potato.item_state_management import Item
+from potato.flask_server import get_displayed_text
+
+
+def _label_to_chinese(label_name):
+    return {
+        "agent": "坐席",
+        "caller": "来电人",
+        "unlabeled": "未标注",
+    }.get(label_name, label_name)
+
+
+def _write_readable_audio_annotation(username, instance_id, annotations):
+    """Write a directly readable copy of audio segment annotations."""
+    if not isinstance(annotations, dict):
+        return
+
+    audio_payload = None
+    for key, value in annotations.items():
+        if not isinstance(key, str):
+            continue
+        schema_name = key.split(":::", 1)[0].split(":", 1)[0]
+        label_name = key.split(":::", 1)[1] if ":::" in key else (
+            key.split(":", 1)[1] if ":" in key else ""
+        )
+        if schema_name != "transcript_segments" or label_name != "_data":
+            continue
+        try:
+            audio_payload = json.loads(value) if isinstance(value, str) else value
+        except Exception:
+            logger.warning("Could not parse readable audio annotation for %s/%s", username, instance_id)
+            return
+        break
+
+    if not isinstance(audio_payload, dict):
+        return
+
+    segments = audio_payload.get("segments") or []
+    if not isinstance(segments, list):
+        return
+
+    readable_segments = []
+    text_lines = []
+    for idx, segment in enumerate(segments, start=1):
+        if not isinstance(segment, dict):
+            continue
+        label = segment.get("label", "")
+        annotations_data = segment.get("annotations") if isinstance(segment.get("annotations"), dict) else {}
+        text = segment.get("text", "")
+        start_time = segment.get("start_time")
+        end_time = segment.get("end_time")
+        speaker = _label_to_chinese(label)
+        is_dialect = bool(annotations_data.get("dialect"))
+
+        readable_segments.append({
+            "index": idx,
+            "segment_id": segment.get("id"),
+            "start_time": start_time,
+            "end_time": end_time,
+            "speaker": label,
+            "speaker_readable": speaker,
+            "is_dialect": is_dialect,
+            "dialect_readable": "是" if is_dialect else "否",
+            "text": text,
+        })
+        text_lines.append(
+            f"{idx}. [{speaker}] [{start_time}-{end_time}] 方言：{'是' if is_dialect else '否'}\n{text}"
+        )
+
+    if not readable_segments:
+        return
+
+    try:
+        output_annotation_dir = get_user_state_manager().config["output_annotation_dir"]
+        readable_dir = os.path.join(output_annotation_dir, username, "readable_annotations")
+        os.makedirs(readable_dir, exist_ok=True)
+
+        payload = {
+            "user_id": username,
+            "instance_id": instance_id,
+            "full_text": "\n".join(str(s.get("text", "")) for s in readable_segments if s.get("text")),
+            "segments": readable_segments,
+        }
+        json_path = os.path.join(readable_dir, f"{instance_id}.json")
+        txt_path = os.path.join(readable_dir, f"{instance_id}.txt")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(f"用户：{username}\n录音：{instance_id}\n\n")
+            f.write("\n\n".join(text_lines))
+            f.write("\n")
+    except Exception as exc:
+        logger.warning("Failed to write readable audio annotation for %s/%s: %s", username, instance_id, exc)
+
+
+def _inject_quality_control_item_if_needed(username, user_state):
+    qc_manager = get_quality_control_manager()
+    if not qc_manager:
+        return
+
+    current_instance = user_state.get_current_instance()
+    current_instance_id = current_instance.get_id() if current_instance else None
+    if current_instance_id and (
+        qc_manager.is_attention_check(current_instance_id) or qc_manager.is_gold_standard(current_instance_id)
+    ):
+        return
+
+    assigned_ids = set(user_state.get_assigned_instance_ids())
+    annotated_ids = set(user_state.get_annotated_instance_ids()) if hasattr(user_state, "get_annotated_instance_ids") else set()
+    seen_qc_ids = assigned_ids | annotated_ids
+
+    current_index = user_state.get_current_instance_index()
+    insert_index = current_index + 1 if current_index >= 0 else 0
+
+    def inject_item(item_data):
+        item_id = item_data.get("id")
+        if not item_id or item_id in seen_qc_ids:
+            return False
+
+        prepared_item = dict(item_data)
+        text_key = config.get("item_properties", {}).get("text_key", "text")
+        if "displayed_text" not in prepared_item:
+            raw_text = prepared_item.get(text_key, prepared_item.get("text", ""))
+            prepared_item["displayed_text"] = get_displayed_text(raw_text) if raw_text is not None else ""
+
+        item_manager = get_item_state_manager()
+        if item_manager.has_item(item_id):
+            existing_item = item_manager.get_item(item_id)
+            if existing_item and isinstance(existing_item.get_data(), dict):
+                existing_data = existing_item.get_data()
+                if "displayed_text" not in existing_data:
+                    existing_data["displayed_text"] = prepared_item["displayed_text"]
+            item = item_manager.get_item(item_id)
+        else:
+            item_manager.add_item(item_id, prepared_item)
+            item = item_manager.get_item(item_id)
+
+        return user_state.assign_instance_at_index(item, insert_index)
+
+    if qc_manager.should_inject_attention_check(username):
+        attention_item = qc_manager.get_attention_check_item(username)
+        if attention_item and inject_item(attention_item):
+            logger.info(f"Injected attention check {attention_item.get('id')} for user {username}")
+            return
+
+    if qc_manager.should_inject_gold_standard(username):
+        gold_item = qc_manager.get_gold_standard_item(username)
+        if gold_item and inject_item(gold_item):
+            logger.info(f"Injected gold standard {gold_item.get('id')} for user {username}")
+            return
+
+
+def _reclaim_blocked_user_assignments(username, user_state, current_instance_id=None):
+    """Release unannotated assignments after a user is blocked."""
+    item_manager = get_item_state_manager()
+    preserve_completed = item_manager.should_preserve_completed_annotations("quality_control_block")
+
+    if current_instance_id:
+        user_state.clear_instance_annotations(current_instance_id)
+
+    reclaimed = item_manager.reclaim_unannotated_assignments_for_user(
+        user_state,
+        reason="quality_control_block",
+        preserve_completed_annotations=preserve_completed,
+    )
+
+    if reclaimed:
+        logger.info(
+            "Reclaimed %d unannotated assignments from blocked user %s",
+            len(reclaimed),
+            username,
+        )
+
+    try:
+        get_user_state_manager().save_user_state(user_state)
+    except Exception as e:
+        logger.warning("Could not persist blocked-user assignment reclaim for %s: %s", username, e)
+
+    return reclaimed
+
+
+def get_debug_phase_target(debug_phase: str) -> tuple:
+    """
+    Parse the debug_phase string and find the matching phase and page.
+
+    The debug_phase can be:
+    - A phase type name like "annotation", "prestudy", "poststudy"
+    - A specific page name within a phase (e.g., "consent_page_1")
+
+    Args:
+        debug_phase: The debug phase string from config
+
+    Returns:
+        tuple: (UserPhase, page_name) or (None, None) if not found
+    """
+    if not debug_phase:
+        return None, None
+
+    usm = get_user_state_manager()
+
+    # First, try to match as a phase type (case-insensitive)
+    try:
+        phase = UserPhase.fromstr(debug_phase)
+        # Check if this phase exists in the config
+        if phase in usm.phase_type_to_name_to_page:
+            pages = list(usm.phase_type_to_name_to_page[phase].keys())
+            if pages:
+                return phase, pages[0]
+        # Special handling for ANNOTATION phase which is always available
+        if phase == UserPhase.ANNOTATION:
+            return phase, "annotation"
+        return None, None
+    except (ValueError, KeyError):
+        pass
+
+    # If not a phase type, search for it as a page name
+    for phase_type, pages_dict in usm.phase_type_to_name_to_page.items():
+        for page_name in pages_dict.keys():
+            if page_name.lower() == debug_phase.lower():
+                return phase_type, page_name
+
+    logger.warning(f"Debug phase '{debug_phase}' not found in configured phases")
+    return None, None
+
+
+def apply_debug_phase_skip(user_id: str) -> bool:
+    """
+    Apply debug phase skip if configured.
+
+    Args:
+        user_id: The user ID to apply the skip for
+
+    Returns:
+        bool: True if skip was applied, False otherwise
+    """
+    debug_phase = config.get("debug_phase")
+    if not debug_phase:
+        return False
+
+    phase, page = get_debug_phase_target(debug_phase)
+    if phase is None:
+        logger.warning(f"Could not apply debug phase skip: '{debug_phase}' not found")
+        return False
+
+    usm = get_user_state_manager()
+    user_state = usm.get_user_state(user_id)
+
+    if user_state:
+        user_state.advance_to_phase(phase, page)
+        logger.info(f"Debug: Skipped user '{user_id}' to phase '{phase.value}', page '{page}'")
+        return True
+
+    return False
+
+# Admin API key resolution — delegated to shared utility
+from potato.server_utils.admin_key import (
+    get_admin_api_key as _get_admin_api_key,
+    validate_admin_api_key as _validate_admin_api_key,
+)
+
+def get_admin_api_key():
+    """Get the admin API key. See potato.server_utils.admin_key for details."""
+    return _get_admin_api_key(config)
+
+def validate_admin_api_key(provided_key: str) -> bool:
+    """Authorize an admin request.
+
+    Backward compatible: a valid shared admin API key (or debug mode) always
+    passes. Additionally, a logged-in user holding the RBAC
+    ``view_admin_dashboard`` permission is authorized without the key, so
+    role-based admins can use the admin endpoints. This single wrapper routes
+    every inline admin guard in this module through RBAC without touching each
+    call site.
+    """
+    if _validate_admin_api_key(provided_key, config):
+        return True
+    # Consult RBAC for the current logged-in user, when in a request context.
+    try:
+        from potato.server_utils.rbac import get_rbac_manager, Permission
+        return get_rbac_manager().check(
+            Permission.VIEW_ADMIN_DASHBOARD, request, session
+        )
+    except Exception:
+        return False
+
+
+# -------------------------------------------------------------------
+# Local media file serving
+# -------------------------------------------------------------------
+
+def serve_media(filepath):
+    """Serve a local media file from the project's media directory.
+
+    Serves files from a ``media/`` directory (or custom path set via
+    ``media_directory`` in config) relative to the task directory.  This
+    lets data files reference local images, audio, and video with paths
+    like ``/media/image_01.jpg`` instead of requiring external URLs.
+    """
+    from flask import send_from_directory, abort
+
+    task_dir = config.get("task_dir", ".")
+    media_subdir = config.get("media_directory", "media")
+
+    # Resolve relative to task_dir
+    if os.path.isabs(media_subdir):
+        media_dir = media_subdir
+    else:
+        media_dir = os.path.join(task_dir, media_subdir)
+
+    media_dir = os.path.realpath(media_dir)
+
+    # Security: ensure the resolved file is inside media_dir
+    requested = os.path.realpath(os.path.join(media_dir, filepath))
+    if not requested.startswith(media_dir + os.sep) and requested != media_dir:
+        logger.warning(f"Media path traversal blocked: {filepath}")
+        abort(403)
+
+    if not os.path.isfile(requested):
+        abort(404)
+
+    return send_from_directory(media_dir, filepath)
+
+
+def serve_trace_screenshot(filepath):
+    """Serve a static agent-trace screenshot referenced by trace data.
+
+    ``web_agent_trace`` / visual trace data set ``screenshot_url`` to a path
+    relative to the example (e.g. ``screenshots/step_000.png``), which the
+    browser requests as ``/screenshots/...``.  Without this route those
+    requests 404 and every step image + filmstrip thumbnail breaks.  Files
+    resolve against ``task_dir`` (the runtime CWD) with path-traversal
+    containment, mirroring ``serve_media``.
+    """
+    from flask import send_from_directory, abort
+
+    task_dir = config.get("task_dir", ".")
+    base_dir = os.path.realpath(task_dir)
+    screenshots_root = os.path.realpath(os.path.join(base_dir, "screenshots"))
+
+    requested = os.path.realpath(os.path.join(screenshots_root, filepath))
+    if not (requested == screenshots_root
+            or requested.startswith(screenshots_root + os.sep)):
+        logger.warning(f"Screenshot path traversal blocked: {filepath}")
+        abort(403)
+
+    if not os.path.isfile(requested):
+        abort(404)
+
+    return send_from_directory(screenshots_root, filepath)
+
+
+@app.route("/", methods=["GET", "POST"])
+def home():
+    """
+    Handle requests to the home page.
+
+    This route serves as the main entry point for the annotation platform.
+    It handles session management, user authentication, and phase routing
+    based on the user's current state in the annotation workflow.
+
+    Features:
+    - Session validation and timeout management
+    - User authentication and state initialization
+    - Phase-based routing to appropriate pages
+    - Survey flow management
+    - Progress tracking and validation
+    - URL-direct login for crowdsourcing platforms (Prolific, MTurk, etc.)
+
+    Returns:
+        flask.Response: Rendered template or redirect based on user state
+
+    Side Effects:
+        - May initialize new user state
+        - May advance user phases
+        - May clear invalid sessions
+    """
+    logger.debug("Processing home page request")
+
+    # In debug mode with debug_phase, auto-login and skip to the specified phase
+    if config.get("debug") and config.get("debug_phase") and 'username' not in session:
+        debug_user = "debug_user"
+        logger.info(f"Debug mode: Auto-logging in as '{debug_user}' and skipping to phase '{config.get('debug_phase')}'")
+
+        # Auto-register the debug user if needed
+        user_authenticator = UserAuthenticator.get_instance()
+        if not user_authenticator.is_valid_username(debug_user):
+            user_authenticator.add_user(debug_user, None)
+
+        # Set session
+        session['username'] = debug_user
+        session.permanent = True
+
+        # Initialize user state and apply debug phase skip
+        usm = get_user_state_manager()
+        if not usm.has_user(debug_user):
+            usm.add_user(debug_user)
+
+        # Apply the debug phase skip
+        apply_debug_phase_skip(debug_user)
+
+        # Redirect to home to process the new session
+        return redirect(url_for("home"))
+
+    # Check if user has an active session
+    if 'username' not in session:
+        # Check for crowd-provider login (Prolific, MTurk, generic panels, etc.)
+        login_config = config.get('login', {})
+        login_type = login_config.get('type', 'standard')
+
+        from potato.crowdsourcing import get_crowd_provider
+        provider = get_crowd_provider()
+        if provider is None and login_type in ['url_direct', 'prolific']:
+            # Server started via a path that skipped init (e.g. some tests):
+            # resolve the provider on first use.
+            from potato.crowdsourcing import init_crowd_provider
+            provider = init_crowd_provider(config)
+
+        if provider is not None:
+            # Handle platform preview mode (e.g. MTurk worker hasn't accepted the HIT)
+            if provider.is_preview(request.args):
+                logger.info("Crowd platform preview mode detected - showing preview page")
+                return provider.preview_response()
+
+            identity = provider.extract_identity(request.args)
+            if identity is not None:
+                username = identity.worker_id
+                logger.info(f"URL-direct login: user={username}, "
+                            f"session_id={identity.session_id}, study_id={identity.study_id}")
+
+                # Auto-register and login the user
+                user_authenticator = UserAuthenticator.get_instance()
+
+                # Add user if not exists (passwordless for URL-direct)
+                if not user_authenticator.is_valid_username(username):
+                    result = user_authenticator.add_user(username, None,
+                                                         prolific_session_id=identity.session_id,
+                                                         prolific_study_id=identity.study_id)
+                    logger.debug(f"Auto-registered URL-direct user {username}: {result}")
+
+                # Set session
+                session['username'] = username
+                session.permanent = True
+
+                # Generalized crowd keys plus the historical prolific_*/mturk_*
+                # keys, which admin.py and older templates still read.
+                session['crowd_provider'] = provider.name
+                if identity.session_id:
+                    session['crowd_session_id'] = identity.session_id
+                    session['prolific_session_id'] = identity.session_id
+                if identity.study_id:
+                    session['crowd_study_id'] = identity.study_id
+                    session['prolific_study_id'] = identity.study_id
+                if identity.extra:
+                    session['crowd_extra'] = dict(identity.extra)
+                if identity.extra.get('assignmentId'):
+                    session['mturk_assignment_id'] = identity.extra['assignmentId']
+                if identity.extra.get('hitId'):
+                    session['mturk_hit_id'] = identity.extra['hitId']
+                if identity.extra.get('turkSubmitTo'):
+                    session['mturk_submit_to'] = identity.extra['turkSubmitTo']
+
+                # Initialize user state if needed
+                if not get_user_state_manager().has_user(username):
+                    logger.debug(f"Initializing user state for URL-direct user: {username}")
+                    init_user_state(username)
+
+                # Get the user state and set to first phase
+                usm = get_user_state_manager()
+                user_state = usm.get_user_state(username)
+
+                if user_state:
+                    # Record platform metadata with the user state so annotation
+                    # output can be joined with the platform's submission records
+                    if not hasattr(user_state, 'crowd_metadata') or user_state.crowd_metadata is None:
+                        user_state.crowd_metadata = {}
+                    user_state.crowd_metadata['provider'] = provider.name
+                    user_state.crowd_metadata['worker_id'] = username
+                    if identity.session_id:
+                        user_state.crowd_metadata['session_id'] = identity.session_id
+                    if identity.study_id:
+                        user_state.crowd_metadata['study_id'] = identity.study_id
+                    for extra_key, extra_value in identity.extra.items():
+                        user_state.crowd_metadata[extra_key] = extra_value
+
+                    # Set user to the first phase if they're in LOGIN
+                    # Use advance_phase() which properly looks up the first page
+                    # for the phase (fixes issue #113: page was None for phased workflows)
+                    if user_state.get_phase() == UserPhase.LOGIN:
+                        logger.debug(f"Advancing URL-direct user {username} past LOGIN phase")
+                        usm.advance_phase(username)
+
+                    # Assign instances if user doesn't have any
+                    if not user_state.has_assignments():
+                        logger.debug(f"Assigning instances to URL-direct user {username}")
+                        get_item_state_manager().assign_instances_to_user(user_state)
+
+                    # Platform-side arrival tracking (e.g. Prolific API session tracking)
+                    try:
+                        provider.on_arrival(identity)
+                    except Exception as e:
+                        logger.warning(f"Crowd provider arrival tracking failed: {e}")
+
+                # Redirect to home to process the now-logged-in user
+                return redirect(url_for("home"))
+
+            else:
+                # URL-direct login configured but no participant ID in URL
+                url_argument = provider.id_param()
+                logger.warning(f"URL-direct login configured but '{url_argument}' not found in URL")
+                return render_template("error.html",
+                                      message=f"Missing required URL parameter: {url_argument}. "
+                                              f"Please access this page through your crowdsourcing platform.")
+
+        logger.debug("No active session, rendering login page")
+        return render_template("home.html",
+                              title=config.get("annotation_task_name", "Annotation Platform"),
+                              require_password=config.get("require_password", True))
+
+    user_id = session['username']
+    logger.debug(f"Active session for user: {user_id}")
+
+    # Get user state and validate it exists
+    user_state = get_user_state(user_id)
+    if user_state is None:
+        logger.warning(f"User {user_id} not found in user state")
+        session.clear()
+        return render_template("home.html",
+                              title=config.get("annotation_task_name", "Annotation Platform"),
+                              require_password=config.get("require_password", True))
+
+    # Get the current phase of the user and route accordingly
+    phase = user_state.get_phase()
+    logger.debug(f"User phase: {phase}")
+
+    # Route to appropriate phase handler based on current phase
+    if phase == UserPhase.LOGIN:
+        return auth() #redirect(url_for("auth"))
+    elif phase == UserPhase.CONSENT:
+        return consent() #redirect(url_for("consent"))
+    elif phase == UserPhase.PRESTUDY:
+        return prestudy() #redirect(url_for("prestudy"))
+    elif phase == UserPhase.INSTRUCTIONS:
+        return instructions() #redirect(url_for("instructions"))
+    elif phase == UserPhase.TRAINING:
+        return training() #redirect(url_for("training"))
+    elif phase == UserPhase.ANNOTATION:
+        return annotate() # redirect(url_for("annotate"))
+    elif phase == UserPhase.POSTSTUDY:
+        return poststudy() #redirect(url_for("poststudy"))
+    elif phase == UserPhase.DONE:
+        return done() #redirect(url_for("done"))
+
+    logger.error(f"Invalid phase for user {user_id}: {phase}")
+    return render_template("error.html", message="Invalid application state")
+
+
+@app.route("/auth", methods=["GET", "POST"])
+def auth():
+    """
+    Handle authentication requests.
+
+    This route manages user authentication for the annotation platform.
+    It supports both password-based and passwordless authentication modes
+    depending on the system configuration.
+
+    Features:
+    - Session validation and management
+    - User authentication against configured backends
+    - User state initialization for new users
+    - Error handling and user feedback
+    - Redirect logic based on authentication success
+
+    Returns:
+        flask.Response: Rendered template or redirect
+
+    Side Effects:
+        - May create new user sessions
+        - May initialize new user states
+        - May clear existing sessions
+    """
+    # Check if user is already logged in
+    if 'username' in session and get_user_state_manager().has_user(session['username']):
+        logger.debug(f"User {session['username']} already logged in, redirecting to annotate")
+        return redirect(url_for("annotate"))
+
+    # Handle POST requests for user authentication
+    if request.method == "POST":
+        user_id = request.form.get("email")
+        password = request.form.get("pass")
+
+        logger.debug(f"Login attempt for user: {user_id}")
+
+        # Get require_password setting
+        require_password = config.get("require_password", True)
+
+        # Validate that user ID is provided
+        if not user_id:
+            logger.warning("Login attempt with empty user_id")
+            return render_template("home.html",
+                                  login_error="请输入用户名",
+                                  title=config.get("annotation_task_name", "Annotation Platform"),
+                                  require_password=require_password)
+
+        # In passwordless mode, auto-register new users
+        if not require_password:
+            user_authenticator = UserAuthenticator.get_instance()
+            if not user_authenticator.is_valid_username(user_id):
+                logger.info(f"Auto-registering new user in passwordless mode: {user_id}")
+                user_authenticator.add_user(user_id, None)
+
+        # Authenticate the user against the configured backend
+        if UserAuthenticator.authenticate(user_id, password):
+            session.clear()  # Clear any existing session data
+            session['username'] = user_id
+            session.permanent = True  # Make session persist longer
+            logger.info(f"Login successful for user: {user_id}")
+
+            # Initialize user state if needed
+            if not get_user_state_manager().has_user(user_id):
+                logger.debug(f"Initializing state for new user: {user_id}")
+                usm = get_user_state_manager()
+                usm.add_user(user_id)
+
+                # Check for debug phase skip
+                if config.get("debug") and config.get("debug_phase"):
+                    if apply_debug_phase_skip(user_id):
+                        return redirect(url_for("home"))
+                    else:
+                        # Fall back to normal phase advancement
+                        usm.advance_phase(user_id)
+                else:
+                    usm.advance_phase(user_id)
+                return redirect(url_for("annotate"))
+            return redirect(url_for("annotate"))
+        else:
+            logger.warning(f"Login failed for user: {user_id}")
+            error_msg = "用户名或密码错误" if require_password else "登录失败，请检查用户名"
+            return render_template("home.html",
+                                  login_error=error_msg,
+                                  login_email=user_id,
+                                  title=config.get("annotation_task_name", "Annotation Platform"),
+                                  require_password=require_password)
+
+    # GET request - show the login form
+    oauth_providers = []
+    allow_local_login = True
+    try:
+        authenticator = UserAuthenticator.get_instance()
+        oauth_providers = authenticator.get_login_providers()
+        if oauth_providers:
+            allow_local_login = authenticator.auth_config.get("allow_local_login", False)
+    except ValueError:
+        pass  # Authenticator not yet initialized
+
+    return render_template("home.html",
+                         title=config.get("annotation_task_name", "Annotation Platform"),
+                         require_password=config.get("require_password", True),
+                         oauth_providers=oauth_providers,
+                         allow_local_login=allow_local_login)
+
+
+@app.route("/passwordless-login", methods=["GET", "POST"])
+def passwordless_login():
+    """
+    Legacy route for passwordless login.
+
+    This route now redirects to the main home page, which handles
+    both password and passwordless authentication based on the
+    require_password config setting.
+
+    Kept for backwards compatibility with existing links/bookmarks.
+    """
+    logger.debug("Redirecting from legacy passwordless-login to home")
+    return redirect(url_for("home"))
+
+
+@app.route("/clerk-login", methods=["GET", "POST"])
+def clerk_login():
+    """
+    Handle Clerk SSO login process.
+
+    This route manages authentication through Clerk's single sign-on service.
+    It handles token validation and user session creation for SSO users.
+
+    Features:
+    - Clerk SSO integration
+    - Token validation and verification
+    - User session management
+    - Error handling for SSO failures
+
+    Returns:
+        flask.Response: Rendered template or redirect
+
+    Side Effects:
+        - May create new user sessions
+        - May initialize new user states
+    """
+    logger.debug("Processing Clerk SSO login request")
+
+    # Only proceed if Clerk is configured
+    auth_method = config.get("authentication", {}).get("method", "in_memory")
+    if auth_method != "clerk":
+        logger.warning("Clerk login attempted but not configured")
+        return redirect(url_for("home"))
+
+    # Get the Clerk frontend API key
+    authenticator = UserAuthenticator.get_instance()
+    clerk_frontend_api = authenticator.get_clerk_frontend_api()
+
+    if not clerk_frontend_api:
+        logger.error("Clerk frontend API key not configured")
+        return render_template("home.html",
+                             login_error="SSO configuration error",
+                             title=config.get("annotation_task_name", "Annotation Platform"))
+
+    # Handle the Clerk token verification
+    if request.method == "POST":
+        token = request.form.get("clerk_token")
+        username = request.form.get("username")
+
+        if not token or not username:
+            logger.warning("Clerk login attempt with missing token or username")
+            return render_template("clerk_login.html",
+                                 login_error="Missing authentication data",
+                                 title=config.get("annotation_task_name", "Annotation Platform"))
+
+        # Authenticate with Clerk
+        if UserAuthenticator.authenticate(username, token):
+            session['username'] = username
+            logger.info(f"Clerk SSO login successful for user: {username}")
+
+            # Initialize user state if needed
+            if not get_user_state_manager().has_user(username):
+                logger.debug(f"Initializing state for new user: {username}")
+                init_user_state(username)
+
+            return redirect(url_for("annotate"))
+        else:
+            logger.warning(f"Clerk SSO login failed for user: {username}")
+            return render_template("clerk_login.html",
+                                 login_error="Authentication failed",
+                                 title=config.get("annotation_task_name", "Annotation Platform"))
+
+    # GET request - show the Clerk login form
+    return render_template("clerk_login.html",
+                         clerk_frontend_api=clerk_frontend_api,
+                         title=config.get("annotation_task_name", "Annotation Platform"))
+
+
+# --- OAuth SSO Routes ---
+
+@app.route("/auth/login/<provider>")
+def oauth_login(provider):
+    """Redirect the user to the OAuth provider's authorization page.
+
+    Args:
+        provider: The provider key (e.g. 'google', 'github', 'oidc').
+    """
+    authenticator = UserAuthenticator.get_instance()
+    oauth_backend = authenticator.get_oauth_backend()
+
+    if not oauth_backend:
+        logger.warning("OAuth login attempted but OAuth is not configured")
+        return redirect(url_for("home"))
+
+    client = oauth_backend.get_oauth_client(provider)
+    if client is None:
+        logger.warning("Unknown OAuth provider: %s", provider)
+        return render_template("home.html",
+                             login_error=f"Unknown login provider: {provider}",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             require_password=config.get("require_password", True),
+                             oauth_providers=authenticator.get_login_providers()), 404
+
+    callback_url = url_for("oauth_callback", provider=provider, _external=True)
+    return client.authorize_redirect(callback_url)
+
+
+@app.route("/auth/callback/<provider>")
+def oauth_callback(provider):
+    """Handle the OAuth callback after user authenticates with provider.
+
+    Exchanges the authorization code for a token, fetches user profile,
+    applies restrictions, and creates a Potato session.
+    """
+    authenticator = UserAuthenticator.get_instance()
+    oauth_backend = authenticator.get_oauth_backend()
+
+    if not oauth_backend:
+        return redirect(url_for("home"))
+
+    client = oauth_backend.get_oauth_client(provider)
+    if client is None:
+        return redirect(url_for("home"))
+
+    # Check if the provider returned an error (e.g. user denied access)
+    error = request.args.get("error")
+    if error:
+        error_desc = request.args.get("error_description", error)
+        logger.warning("OAuth error from %s: %s - %s", provider, error, error_desc)
+        return render_template("home.html",
+                             login_error=f"Login cancelled: {error_desc}",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             require_password=config.get("require_password", True),
+                             oauth_providers=authenticator.get_login_providers())
+
+    try:
+        # Exchange authorization code for token
+        token = client.authorize_access_token()
+    except Exception as e:
+        logger.error("OAuth token exchange failed for %s: %s", provider, str(e))
+        return render_template("home.html",
+                             login_error="Authentication failed. Please try again.",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             require_password=config.get("require_password", True),
+                             oauth_providers=authenticator.get_login_providers())
+
+    # Get user profile
+    try:
+        if provider == "github":
+            resp = client.get("user", token=token)
+            profile = resp.json()
+            # GitHub may not include email in profile — fetch from emails API
+            if not profile.get("email"):
+                emails_resp = client.get("user/emails", token=token)
+                emails = emails_resp.json()
+                primary = next((e for e in emails if e.get("primary")), None)
+                if primary:
+                    profile["email"] = primary["email"]
+        elif hasattr(token, "get") and token.get("userinfo"):
+            profile = token["userinfo"]
+        else:
+            profile = client.userinfo()
+    except Exception as e:
+        logger.error("Failed to fetch user profile from %s: %s", provider, str(e))
+        return render_template("home.html",
+                             login_error="Failed to retrieve user profile.",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             require_password=config.get("require_password", True),
+                             oauth_providers=authenticator.get_login_providers())
+
+    # Check domain/org restrictions
+    allowed, reason = oauth_backend.check_restrictions(provider, profile)
+    if not allowed:
+        logger.warning("OAuth restriction denied user from %s: %s", provider, reason)
+        return render_template("home.html",
+                             login_error=reason,
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             require_password=config.get("require_password", True),
+                             oauth_providers=authenticator.get_login_providers())
+
+    # SSO claims captured for RBAC sso_role_mapping (e.g. "org:acme").
+    sso_claims = [f"provider:{provider}"]
+
+    # Check GitHub org restriction (requires API call)
+    allowed_org = oauth_backend.get_allowed_org(provider)
+    if allowed_org and provider == "github":
+        try:
+            orgs_resp = client.get("user/orgs", token=token)
+            orgs = orgs_resp.json()
+            user_orgs = [o.get("login", "").lower() for o in orgs]
+            sso_claims.extend(f"org:{o}" for o in user_orgs if o)
+            if allowed_org.lower() not in user_orgs:
+                reason = (
+                    f"Access restricted to members of the '{allowed_org}' "
+                    f"GitHub organization."
+                )
+                logger.warning("GitHub org check failed: %s not in %s", profile.get("login"), allowed_org)
+                return render_template("home.html",
+                                     login_error=reason,
+                                     title=config.get("annotation_task_name", "Annotation Platform"),
+                                     require_password=config.get("require_password", True),
+                                     oauth_providers=authenticator.get_login_providers())
+        except Exception as e:
+            logger.error("Failed to check GitHub org membership: %s", str(e))
+            return render_template("home.html",
+                                 login_error="Failed to verify organization membership.",
+                                 title=config.get("annotation_task_name", "Annotation Platform"),
+                                 require_password=config.get("require_password", True),
+                                 oauth_providers=authenticator.get_login_providers())
+
+    # Extract user identity
+    try:
+        user_id = oauth_backend.extract_user_id(profile, provider)
+    except ValueError as e:
+        logger.error("Cannot extract user ID from OAuth profile: %s", str(e))
+        return render_template("home.html",
+                             login_error="Could not determine your user identity.",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             require_password=config.get("require_password", True),
+                             oauth_providers=authenticator.get_login_providers())
+
+    # Check auto_register
+    if not oauth_backend.auto_register and not authenticator.is_valid_username(user_id):
+        if not authenticator.is_authorized_user(user_id):
+            logger.warning("OAuth user %s not pre-authorized (auto_register=false)", user_id)
+            return render_template("home.html",
+                                 login_error="Your account is not authorized for this task.",
+                                 title=config.get("annotation_task_name", "Annotation Platform"),
+                                 require_password=config.get("require_password", True),
+                                 oauth_providers=authenticator.get_login_providers())
+
+    # Register the user in the OAuth backend
+    authenticator.add_user(user_id, None,
+                          oauth_provider=provider,
+                          oauth_profile=profile)
+
+    # Create Flask session
+    session.clear()
+    session['username'] = user_id
+    session['sso_claims'] = sso_claims
+    session.permanent = True
+    logger.info("OAuth login successful: provider=%s, user=%s", provider, user_id)
+
+    # Initialize user state if needed
+    if not get_user_state_manager().has_user(user_id):
+        logger.debug("Initializing state for new OAuth user: %s", user_id)
+        usm = get_user_state_manager()
+        usm.add_user(user_id)
+
+        # Check for debug phase skip
+        if config.get("debug") and config.get("debug_phase"):
+            if apply_debug_phase_skip(user_id):
+                return redirect(url_for("home"))
+            else:
+                usm.advance_phase(user_id)
+        else:
+            usm.advance_phase(user_id)
+
+    return redirect(url_for("home"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """
+    Handle login requests - render the auth page directly
+
+    Returns:
+        flask.Response: Rendered auth template
+    """
+    logger.debug("Rendering auth page for /login")
+    return auth()
+
+@app.route("/logout", methods=["GET"])
+def logout_page():
+    """
+    Handle user logout requests and redirect to login page.
+
+    For url_direct/prolific login types, renders a standalone logged-out page
+    instead of redirecting to home (which requires URL parameters like PROLIFIC_PID).
+
+    Returns:
+        flask.Response: Redirect to login page or rendered logged-out template
+    """
+    logger.debug("Processing logout request")
+
+    # Check login type before clearing session (config is module-level, not session-dependent)
+    login_config = config.get('login', {})
+    login_type = login_config.get('type', 'standard')
+
+    # Clear the session
+    session.clear()
+    logger.info("User logged out successfully")
+
+    if login_type in ['url_direct', 'prolific']:
+        # Cannot redirect to home — it requires a URL parameter (e.g., PROLIFIC_PID)
+        return render_template("logged_out.html",
+                               title=config.get("annotation_task_name", "Annotation Platform"))
+
+    return redirect(url_for("home"))  # Redirect to the login page
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    """
+    Handle user logout requests.
+
+    Features:
+    - Session cleanup
+    - State persistence
+    - Progress saving
+
+    Returns:
+        flask.Response: Redirect to login page
+    """
+    logger.debug("Redirecting /logout to logout_page")
+    return logout_page()
+
+@app.route("/submit_annotation", methods=["POST"])
+def submit_annotation():
+    """
+    DEPRECATED: Handle annotation submission requests.
+
+    This route was added by Cursor and duplicates functionality from /updateinstance.
+    It only handles label annotations (not span annotations) and is used primarily
+    for saving annotations during navigation in newer templates.
+
+    TODO: This route should be deprecated and all functionality moved to /updateinstance
+    to reduce confusion and ensure consistent handling of both label and span annotations.
+
+    Features:
+    - Validation checking
+    - Progress tracking
+    - State updates
+    - AI integration
+    - Data persistence
+
+    Args (from form or JSON):
+        instance_id: ID of annotated instance
+        annotations: annotation data (either JSON string or dict) - LABEL ANNOTATIONS ONLY
+        user_id: user ID (optional, defaults to session)
+
+    Returns:
+        flask.Response: JSON response with submission result
+    """
+    logger.debug("=== SUBMIT ANNOTATION ROUTE START ===")
+    logger.debug(f"Session: {dict(session)}")
+    logger.debug(f"Session username: {session.get('username', 'NOT_SET')}")
+    logger.debug(f"Request content type: {request.content_type}")
+    logger.debug(f"Request is JSON: {request.is_json}")
+    logger.debug(f"Request headers: {dict(request.headers)}")
+    logger.debug(f"Debug mode: {config.get('debug', False)}")
+
+
+    if 'username' not in session:
+        logger.warning("Annotation submission without active session")
+        return jsonify({"status": "error", "message": "No active session"})
+
+    user_id = session['username']
+    logger.debug(f"Using user_id: {user_id}")
+    logger.debug(f"All users in state manager: {get_user_state_manager().get_user_ids()}")
+    logger.debug(f"User state manager has user '{user_id}': {get_user_state_manager().has_user(user_id)}")
+
+    # Handle both form data and JSON data
+    if request.is_json:
+        data = request.get_json()
+        instance_id = data.get("instance_id")
+        annotations = data.get("annotations", {})
+        logger.debug(f"Received JSON data: {data}")
+    else:
+        instance_id = request.form.get("instance_id")
+        annotation_data = request.form.get("annotation_data")
+        logger.debug(f"Received form data: {dict(request.form)}")
+        if annotation_data:
+            annotations = json.loads(annotation_data)
+            logger.debug(f"Parsed annotation_data: {annotations}")
+        else:
+            annotations = {}
+            logger.debug("No annotation_data found in form")
+
+    logger.debug(f"Instance ID: {instance_id}")
+    logger.debug(f"Annotations: {annotations}")
+
+    if not instance_id:
+        logger.warning("Missing instance_id")
+        return jsonify({"status": "error", "message": "Missing instance_id"})
+
+    try:
+        logger.debug(f"Getting user state for user_id: {user_id}")
+        user_state = get_user_state(user_id)
+        logger.debug(f"Retrieved user state: {user_state}")
+        logger.debug(f"User state phase: {user_state.get_phase() if user_state else 'No user state'}")
+
+
+        # Process the annotations
+        annotations_processed = 0
+        for schema_name, label_data in annotations.items():
+            logger.debug(f"Processing schema: {schema_name}, label_data: {label_data}, type: {type(label_data)}")
+
+            if isinstance(label_data, dict):
+                # Nested structure: {'schema': {'label': 'value'}}
+                for label_name, value in label_data.items():
+                    label = Label(schema_name, label_name)
+                    logger.debug(f"Adding annotation: {schema_name}:{label_name} = {value}")
+                    user_state.add_label_annotation(instance_id, label, value)
+                    annotations_processed += 1
+            elif isinstance(label_data, str):
+                # Direct string value for text annotations: {'schema': 'value'}
+                # For text annotations, we need to create a label with a default name
+                label = Label(schema_name, "text_box")
+                logger.debug(f"Adding text annotation: {schema_name}:text_box = {label_data}")
+                user_state.add_label_annotation(instance_id, label, label_data)
+                annotations_processed += 1
+            else:
+                logger.warning(f"Unexpected label_data type: {type(label_data)} for schema {schema_name}")
+
+        logger.debug(f"Processed {annotations_processed} annotations")
+
+        # Register the annotator for this instance
+        logger.debug(f"Registering annotator {user_id} for instance {instance_id}")
+        get_item_state_manager().register_annotator(instance_id, user_id)
+
+        # Save the user state
+        logger.debug(f"Saving user state for {user_id}")
+        get_user_state_manager().save_user_state(user_state)
+        logger.debug(f"User state saved successfully")
+
+        # Check if this was an ICL verification task and record the result
+        _maybe_record_icl_verification(user_state, instance_id, annotations)
+
+        # Notify diversity manager of annotation completion (for async embedding)
+        _notify_diversity_manager_annotation(user_state, instance_id)
+
+        # Log the saved annotations
+        all_annotations = user_state.get_all_annotations()
+        logger.debug(f"All annotations after save: {all_annotations}")
+        logger.debug(f"Annotations for instance {instance_id}: {all_annotations.get(instance_id, 'Not found')}")
+
+
+        logger.info(f"Successfully saved annotation for {instance_id} from {user_id}")
+        logger.debug("=== SUBMIT ANNOTATION ROUTE END ===")
+        return jsonify({"status": "success", "message": "Annotation saved successfully", "annotations_processed": annotations_processed})
+
+    except Exception as e:
+        logger.error(f"Error saving annotation: {type(e).__name__}: {str(e)}", exc_info=True)
+        return jsonify({"status": "error", "message": "Failed to save annotation"})
+
+@app.route("/register", methods=["POST"])
+def register():
+    """
+    Register a new user and initialize their user state.
+
+    Args:
+        username: The username to initialize state for
+    """
+    logger.debug("=== REGISTER ROUTE START ===")
+    logger.debug(f"Session before registration: {dict(session)}")
+    logger.debug(f"Request form data: {dict(request.form)}")
+    logger.debug(f"Request headers: {dict(request.headers)}")
+
+    if 'username' in session:
+        logger.warning(f"User already logged in with username: {session['username']}, redirecting to annotate")
+        return home()
+
+    username = request.form.get("email")
+    password = request.form.get("pass")
+
+    logger.debug(f"Registration attempt for username: {username}")
+
+    if not username or not password:
+        logger.warning("Missing username or password")
+        return render_template("home.html",
+                                login_error="Username and password are required")
+
+    # Register the user with the authenticator
+    logger.debug("Adding user to authenticator...")
+    user_authenticator = UserAuthenticator.get_instance()
+    result = user_authenticator.add_user(username, password)
+
+    if result != "Success":
+        logger.warning(f"Registration failed for '{username}': {result}")
+        return render_template("home.html", login_error=result)
+
+    # Persist user config if explicitly configured
+    user_authenticator.save_user_config()
+
+    logger.debug("Setting session variables...")
+    session['username'] = username
+    session.permanent = True
+
+    logger.debug(f"Session after registration: {dict(session)}")
+    logger.debug(f"Session ID: {session.sid if hasattr(session, 'sid') else 'No session ID'}")
+    logger.debug(f"User state manager has user '{username}': {get_user_state_manager().has_user(username)}")
+    logger.debug(f"All users in state manager: {get_user_state_manager().get_user_ids()}")
+
+    # Initialize user state if needed
+    if not get_user_state_manager().has_user(username):
+        logger.debug(f"Initializing user state for new user: {username}")
+        init_user_state(username)
+        logger.debug(f"User state initialized. User exists: {get_user_state_manager().has_user(username)}")
+        logger.debug(f"All users in state manager after init: {get_user_state_manager().get_user_ids()}")
+
+    # Ensure user is in the correct starting phase
+    usm = get_user_state_manager()
+    user_state = usm.get_user_state(username)
+    logger.debug(f"Retrieved user state for '{username}': {user_state}")
+    logger.debug(f"User state phase: {user_state.get_phase() if user_state else 'No user state'}")
+
+    # Determine the first phase from config
+    phases_config = config.get('phases', {})
+    phases_order = phases_config.get('order', ['annotation'])
+    first_phase_name = phases_order[0] if phases_order else 'annotation'
+    # Get the phase type from the config (phase name may differ from type, e.g., 'prescreen' has type 'prestudy')
+    first_phase_config = phases_config.get(first_phase_name, {})
+    first_phase_type = first_phase_config.get('type', first_phase_name)
+    first_phase = UserPhase.fromstr(first_phase_type)
+    logger.debug(f"First phase from config: {first_phase_name} (type={first_phase_type}) -> {first_phase}")
+
+    # Set user to the first phase if they're in LOGIN
+    if user_state and user_state.get_phase() == UserPhase.LOGIN:
+        logger.debug(f"Advancing user {username} to first phase: {first_phase}")
+        # Use first_phase_name as the page since that's the key in the phase config
+        user_state.advance_to_phase(first_phase, first_phase_name)
+        logger.debug(f"User state phase after advancement: {user_state.get_phase()}")
+
+    # Assign instances if user doesn't have any
+    if user_state and not user_state.has_assignments():
+        logger.debug(f"Assigning instances to user {username}")
+        get_item_state_manager().assign_instances_to_user(user_state)
+        logger.debug(f"User has assignments after assignment: {user_state.has_assignments()}")
+
+    logger.debug("=== REGISTER ROUTE END - Redirecting to home ===")
+    # Redirect to home which will route to the appropriate phase
+    return redirect(url_for("home"))
+
+@app.route("/consent", methods=["GET", "POST"])
+def consent():
+    """
+    Handle the consent phase of the annotation process.
+
+    Returns:
+        flask.Response: Rendered template or redirect
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+    logger.debug(f'CONSENT: user_state: {user_state}')
+    logger.debug(f'CONSENT: user_state.get_phase(): {user_state.get_phase()}')
+
+    # Check that the user is still in the consent phase
+    if user_state.get_phase() != UserPhase.CONSENT:
+        # If not in the consent phase, redirect
+        return home()
+
+    # If the user is returning information from the page
+    if request.method == 'POST':
+        # The form should require that the user consent to the study
+        logger.debug(f'POST -> CONSENT: {request.form}')
+
+        # Now that the user has consented, advance the state
+        # and have the home page redirect to the appropriate next phase
+        usm = get_user_state_manager()
+        usm.advance_phase(session['username'])
+
+        # Redirect to force a clean GET request (fixes POST leakage, issue #124)
+        return redirect(url_for("home"))
+    # Show the current consent form
+    else:
+        logger.debug("GET <- CONSENT")
+        return get_current_page_html(config, username)
+
+@app.route("/instructions", methods=["GET", "POST"])
+def instructions():
+    """
+    Handle the instructions phase of the annotation process.
+
+    Returns:
+        flask.Response: Rendered template or redirect
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    # Check that the user is in the instructions phase
+    if user_state.get_phase() != UserPhase.INSTRUCTIONS:
+        # If not in the instructions phase, redirect
+        return home()
+
+    # If the user is returning information from the page
+    if request.method == 'POST':
+        logger.debug(f'POST -> INSTRUCTIONS: {request.form}')
+
+        # Now that the user has read the instructions, advance the state
+        # and have the home page redirect to the appropriate next phase
+        usm = get_user_state_manager()
+        usm.advance_phase(session['username'])
+
+        # Redirect to force a clean GET request (fixes POST leakage, issue #124)
+        return redirect(url_for("home"))
+
+    # Show the current set of instructions
+    else:
+        logger.debug(f'GET <-- INSTRUCTIONS')
+        return get_current_page_html(config, username)
+
+@app.route("/training", methods=["GET", "POST"])
+def training():
+    """
+    Handle the training phase of the annotation process.
+
+    This route manages the training phase where users practice annotation
+    with feedback on their performance. It supports:
+    - Displaying training instances with correct answers
+    - Processing user annotations and providing feedback
+    - Tracking training progress and performance
+    - Advancing users based on training performance criteria
+    - Allowing retries for failed attempts
+    - Kicking out users who exceed max_mistakes threshold
+
+    Training Configuration Options:
+    - min_correct: Minimum correct answers needed to pass
+    - require_all_correct: Whether all questions must be correct
+    - max_mistakes: Maximum total mistakes before failure (kicked out)
+    - max_mistakes_per_question: Maximum mistakes per question before failure
+    - allow_retry: Whether to allow retrying incorrect answers
+    - failure_action: "move_to_done" (kick out) or "repeat_training"
+
+    Returns:
+        flask.Response: Rendered template or redirect
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    # Check that the user is in the training phase
+    if user_state.get_phase() != UserPhase.TRAINING:
+        logger.debug(f'User {username} not in training phase, redirecting')
+        return home()
+
+    # Check if training is enabled in config
+    training_config = config.get('training', {})
+    if not training_config.get('enabled', False):
+        logger.debug('Training not enabled, advancing to next phase')
+        usm = get_user_state_manager()
+        usm.advance_phase(username)
+        return redirect(url_for("home"))
+
+    # Get training state and initialize max_mistakes from config if not set
+    training_state = user_state.get_training_state()
+    passing_criteria = training_config.get('passing_criteria', {})
+
+    # Initialize training instances if not already done
+    if not training_state.training_instances:
+        training_instances = get_training_instances()
+        training_state.set_training_instances([item.get_id() for item in training_instances])
+
+    # Set max_mistakes from config
+    if training_state.max_mistakes == -1 and 'max_mistakes' in passing_criteria:
+        training_state.set_max_mistakes(passing_criteria.get('max_mistakes', -1))
+    if training_state.max_mistakes_per_question == -1 and 'max_mistakes_per_question' in passing_criteria:
+        training_state.set_max_mistakes_per_question(passing_criteria.get('max_mistakes_per_question', -1))
+
+    # Check if user has already failed due to too many mistakes
+    if training_state.is_failed() or training_state.should_fail_due_to_mistakes():
+        training_state.set_failed(True)
+        logger.info(f'User {username} has failed training due to too many mistakes')
+        # Move to DONE phase (kick out)
+        user_state.set_current_phase_and_page((UserPhase.DONE, None))
+        return render_template("training_failed.html",
+                             message="You have exceeded the maximum number of allowed mistakes and cannot continue.",
+                             total_mistakes=training_state.get_total_mistakes(),
+                             max_mistakes=training_state.max_mistakes,
+                             annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                             username=username)
+
+    # Get progress info
+    total_questions = len(training_state.training_instances)
+    current_question_num = training_state.get_current_question_index() + 1
+
+    # Handle POST requests (annotation submission)
+    if request.method == 'POST':
+        logger.debug(f'POST -> TRAINING: {request.form}')
+
+        # Get the current training instance
+        current_instance = user_state.get_current_training_instance()
+        if not current_instance:
+            logger.error(f'No training instance available for user {username}')
+            return render_template("error.html", message="No training instance available")
+
+        instance_id = current_instance.get_id()
+        instance_text = current_instance.get_data().get('displayed_text', current_instance.get_data().get('text', ''))
+
+        # Process the annotation
+        if request.is_json:
+            annotation_data = request.get_json()
+        else:
+            annotation_data = dict(request.form)
+
+        # Get correct answers for this training instance
+        correct_answers = get_training_correct_answers(instance_id)
+        if not correct_answers:
+            logger.error(f'No correct answers found for training instance {instance_id}')
+            return render_template("error.html", message="Training data error")
+
+        # Validate and process the annotation
+        try:
+            # Update user's training answer
+            user_state.update_training_answer(instance_id, annotation_data)
+
+            # Check if the answer is correct
+            is_correct = check_training_answer(annotation_data, correct_answers)
+
+            # Track category performance for category-based assignment
+            instance_categories = get_training_instance_categories(instance_id)
+            if instance_categories:
+                training_state.record_category_answer(instance_categories, is_correct)
+
+            if is_correct:
+                logger.info(f'User {username} answered training question {instance_id} correctly')
+                # Record correct answer
+                training_state.add_answer(instance_id, True, training_state.get_mistakes_for_question(instance_id) + 1)
+                training_state.clear_feedback()
+
+                # Check if user has passed based on min_correct
+                min_correct = passing_criteria.get('min_correct', len(training_state.training_instances))
+                if training_state.get_correct_answer_count() >= min_correct:
+                    # User has passed training
+                    training_state.set_passed(True)
+                    logger.info(f'User {username} passed training with {training_state.get_correct_answer_count()} correct answers')
+
+                    # Calculate category qualifications based on training performance
+                    cat_config = config.get('category_assignment', {})
+                    if cat_config.get('enabled', False):
+                        qual_config = cat_config.get('qualification', {})
+                        threshold = qual_config.get('threshold', 0.7)
+                        min_questions = qual_config.get('min_questions', 1)
+                        qualified = user_state.calculate_and_set_qualifications(threshold, min_questions)
+                        if qualified:
+                            logger.info(f'User {username} qualified for categories: {qualified}')
+
+                    usm = get_user_state_manager()
+                    usm.advance_phase(username)
+                    return redirect(url_for("home"))
+
+                # Move to next training question or complete training
+                if user_state.advance_training_question():
+                    # More questions available
+                    training_state.set_feedback(True, "Correct! Moving to next question.", False)
+                    # Get next instance for display
+                    next_instance = user_state.get_current_training_instance()
+                    next_instance_text = next_instance.get_data().get('displayed_text', next_instance.get_data().get('text', ''))
+                    return render_template("training.html",
+                                         instance_text=next_instance_text,
+                                         instance_id=next_instance.get_id(),
+                                         feedback="Correct! Moving to next question.",
+                                         feedback_type="success",
+                                         show_feedback=True,
+                                         allow_retry=False,
+                                         current_question=current_question_num + 1,
+                                         total_questions=total_questions,
+                                         correct_count=training_state.get_correct_answer_count(),
+                                         mistake_count=training_state.get_total_mistakes(),
+                                         annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                         username=username)
+                else:
+                    # All questions completed
+                    require_all = passing_criteria.get('require_all_correct', False)
+                    if require_all and training_state.get_correct_answer_count() < total_questions:
+                        # User didn't get all correct
+                        training_state.set_failed(True)
+                        user_state.set_current_phase_and_page((UserPhase.DONE, None))
+                        return render_template("training_failed.html",
+                                             message="You did not answer all training questions correctly.",
+                                             correct_count=training_state.get_correct_answer_count(),
+                                             total_questions=total_questions,
+                                             annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                             username=username)
+                    else:
+                        # Training completed successfully
+                        training_state.set_passed(True)
+                        logger.info(f'User {username} completed training successfully')
+
+                        # Calculate category qualifications based on training performance
+                        cat_config = config.get('category_assignment', {})
+                        if cat_config.get('enabled', False):
+                            qual_config = cat_config.get('qualification', {})
+                            threshold = qual_config.get('threshold', 0.7)
+                            min_questions = qual_config.get('min_questions', 1)
+                            qualified = user_state.calculate_and_set_qualifications(threshold, min_questions)
+                            if qualified:
+                                logger.info(f'User {username} qualified for categories: {qualified}')
+
+                        usm = get_user_state_manager()
+                        usm.advance_phase(username)
+                        return redirect(url_for("home"))
+            else:
+                logger.info(f'User {username} answered training question {instance_id} incorrectly')
+                # Record the mistake
+                training_state.record_mistake(instance_id)
+
+                # Check if user should fail due to too many mistakes
+                if training_state.should_fail_due_to_mistakes():
+                    training_state.set_failed(True)
+                    logger.info(f'User {username} failed training - exceeded max_mistakes ({training_state.max_mistakes})')
+                    user_state.set_current_phase_and_page((UserPhase.DONE, None))
+                    return render_template("training_failed.html",
+                                         message="You have exceeded the maximum number of allowed mistakes.",
+                                         total_mistakes=training_state.get_total_mistakes(),
+                                         max_mistakes=training_state.max_mistakes,
+                                         annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                         username=username)
+
+                # Check if user should fail due to too many mistakes on this question
+                if training_state.should_fail_question_due_to_mistakes(instance_id):
+                    training_state.set_failed(True)
+                    logger.info(f'User {username} failed training - exceeded max_mistakes_per_question on {instance_id}')
+                    user_state.set_current_phase_and_page((UserPhase.DONE, None))
+                    return render_template("training_failed.html",
+                                         message="You have made too many mistakes on a single question.",
+                                         question_mistakes=training_state.get_mistakes_for_question(instance_id),
+                                         max_mistakes_per_question=training_state.max_mistakes_per_question,
+                                         annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                         username=username)
+
+                # Get explanation for incorrect answer
+                explanation = get_training_explanation(instance_id)
+
+                # Check if user should be allowed to retry
+                allow_retry = training_config.get('allow_retry', True)
+
+                if allow_retry:
+                    training_state.set_feedback(True, f"Incorrect. {explanation}", True)
+                    return render_template("training.html",
+                                         instance_text=instance_text,
+                                         instance_id=instance_id,
+                                         feedback=f"Incorrect. {explanation}",
+                                         feedback_type="error",
+                                         show_feedback=True,
+                                         allow_retry=True,
+                                         current_question=current_question_num,
+                                         total_questions=total_questions,
+                                         correct_count=training_state.get_correct_answer_count(),
+                                         mistake_count=training_state.get_total_mistakes(),
+                                         annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                         username=username)
+                else:
+                    # No retry allowed - check failure action
+                    failure_action = training_config.get('failure_action', 'move_to_done')
+                    if failure_action == 'move_to_done':
+                        training_state.set_failed(True)
+                        logger.info(f'User {username} failed training - no retry allowed')
+                        user_state.set_current_phase_and_page((UserPhase.DONE, None))
+                        return render_template("training_failed.html",
+                                             message="You answered incorrectly and retries are not allowed.",
+                                             explanation=explanation,
+                                             annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                             username=username)
+                    else:
+                        # Advance to next question even though wrong
+                        if user_state.advance_training_question():
+                            next_instance = user_state.get_current_training_instance()
+                            next_instance_text = next_instance.get_data().get('displayed_text', next_instance.get_data().get('text', ''))
+                            training_state.set_feedback(True, f"Incorrect. {explanation} Moving to next question.", False)
+                            return render_template("training.html",
+                                                 instance_text=next_instance_text,
+                                                 instance_id=next_instance.get_id(),
+                                                 feedback=f"Previous answer was incorrect: {explanation}",
+                                                 feedback_type="warning",
+                                                 show_feedback=True,
+                                                 allow_retry=False,
+                                                 current_question=current_question_num + 1,
+                                                 total_questions=total_questions,
+                                                 correct_count=training_state.get_correct_answer_count(),
+                                                 mistake_count=training_state.get_total_mistakes(),
+                                                 annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                                 username=username)
+                        else:
+                            # No more questions - check if passed
+                            min_correct = passing_criteria.get('min_correct', total_questions)
+                            if training_state.get_correct_answer_count() >= min_correct:
+                                training_state.set_passed(True)
+                                usm = get_user_state_manager()
+                                usm.advance_phase(username)
+                                return redirect(url_for("home"))
+                            else:
+                                training_state.set_failed(True)
+                                user_state.set_current_phase_and_page((UserPhase.DONE, None))
+                                return render_template("training_failed.html",
+                                                     message="You did not meet the minimum correct answers requirement.",
+                                                     correct_count=training_state.get_correct_answer_count(),
+                                                     min_correct=min_correct,
+                                                     annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                                                     username=username)
+
+        except Exception as e:
+            logger.error(f'Error processing training annotation: {e}')
+            import traceback
+            traceback.print_exc()
+            return render_template("error.html", message="Error processing training annotation")
+
+    # Handle GET requests (display training question)
+    else:
+        logger.debug(f'GET <-- TRAINING for user {username}')
+
+        # Get the current training instance
+        current_instance = user_state.get_current_training_instance()
+        if not current_instance:
+            logger.error(f'No training instance available for user {username}')
+            return render_template("error.html", message="No training instance available")
+
+        instance_text = current_instance.get_data().get('displayed_text', current_instance.get_data().get('text', ''))
+
+        # Check if we should show feedback from previous attempt
+        show_feedback = training_state.show_feedback if training_state else False
+        feedback_message = training_state.feedback_message if training_state else ""
+        allow_retry = training_state.allow_retry if training_state else False
+
+        return render_template("training.html",
+                             instance_text=instance_text,
+                             instance_id=current_instance.get_id(),
+                             feedback=feedback_message,
+                             feedback_type="error" if allow_retry else "info",
+                             show_feedback=show_feedback,
+                             allow_retry=allow_retry,
+                             current_question=current_question_num,
+                             total_questions=total_questions,
+                             correct_count=training_state.get_correct_answer_count(),
+                             mistake_count=training_state.get_total_mistakes(),
+                             annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                             username=username)
+
+
+def check_training_answer(user_answer: dict, correct_answers: dict) -> bool:
+    """
+    Check if the user's answer matches the correct answers.
+
+    Handles different annotation types:
+    - Radio/single select: string comparison
+    - Multiselect/checkbox: set comparison (order-independent)
+    - Likert/number: numeric comparison
+    - Text: exact or fuzzy string match
+
+    Args:
+        user_answer: Dictionary of user's answers by schema name
+        correct_answers: Dictionary of correct answers by schema name
+
+    Returns:
+        True if all answers are correct, False otherwise
+    """
+    for schema_name, correct_value in correct_answers.items():
+        if schema_name not in user_answer:
+            return False
+
+        user_value = user_answer[schema_name]
+
+        # Handle multiselect/checkbox (list comparison)
+        if isinstance(correct_value, list):
+            if isinstance(user_value, list):
+                if set(user_value) != set(correct_value):
+                    return False
+            elif isinstance(user_value, str):
+                # Single value submitted, check if it's the only correct answer
+                if len(correct_value) != 1 or user_value not in correct_value:
+                    return False
+            else:
+                return False
+        # Handle numeric values
+        elif isinstance(correct_value, (int, float)):
+            try:
+                if float(user_value) != float(correct_value):
+                    return False
+            except (ValueError, TypeError):
+                return False
+        # Handle string comparison (radio, text)
+        else:
+            if str(user_value).strip().lower() != str(correct_value).strip().lower():
+                return False
+
+    return True
+
+@app.route("/prestudy", methods=["GET", "POST"])
+def prestudy():
+    """
+    Handle the prestudy phase of the annotation process.
+
+    Returns:
+        flask.Response: Rendered template or redirect
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    # Check that the user is in the prestudy phase
+    if user_state.get_phase() != UserPhase.PRESTUDY:
+        logger.debug('NOT IN PRESTUDY PHASE')
+        return home()
+
+    # If the user is returning information from the page
+    if request.method == 'POST':
+        logger.debug(f'POST -> PRESTUDY: {request.form}')
+
+        # Advance the state and redirect to the appropriate next phase
+        usm = get_user_state_manager()
+        usm.advance_phase(session['username'])
+
+        # Redirect to force a clean GET request (fixes POST leakage, issue #124)
+        return redirect(url_for("home"))
+
+    # Show the current prestudy page
+    else:
+        logger.debug("GET <-- PRESTUDY")
+        return get_current_page_html(config, username)
+
+def _check_required_or_block(user_state, instance_id: str):
+    """Check required annotations and return a 400 response if not met, or None if OK."""
+    unsatisfied = _instance_meets_required_annotation_rules(user_state, instance_id)
+    if unsatisfied:
+        msg = f"Required annotation(s) not completed: {', '.join(unsatisfied)}"
+        logger.info(f"Blocking navigation: {msg} for instance {instance_id}")
+        if request.is_json:
+            return jsonify({"status": "validation_error", "message": msg, "unsatisfied_schemas": unsatisfied}), 400
+        # For form POSTs, fall through to render the page with existing annotations
+        return None
+    return None
+
+
+def _ibws_check_and_advance(user_state) -> bool:
+    """Check if IBWS round is complete and advance to next round if so.
+
+    Returns True if new tuples were added and the user was reassigned.
+    """
+    from potato.ibws_manager import get_ibws_manager
+
+    ibws_mgr = get_ibws_manager()
+    if not ibws_mgr or ibws_mgr.is_completed():
+        return False
+
+    ism = get_item_state_manager()
+    usm = get_user_state_manager()
+
+    # Find the BWS schema name
+    bws_schema_name = None
+    for scheme in config.get("annotation_schemes", []):
+        if scheme.get("annotation_type") == "bws":
+            bws_schema_name = scheme["name"]
+            break
+
+    if not bws_schema_name:
+        return False
+
+    if not ibws_mgr.check_round_complete(ism, bws_schema_name):
+        return False
+
+    # Round is complete — advance to next round
+    logger.info(f"IBWS: Round {ibws_mgr.current_round} complete, advancing")
+    new_tuples = ibws_mgr.advance_round(ism, usm, bws_schema_name)
+
+    if not new_tuples:
+        logger.info("IBWS: No more rounds needed, annotation complete")
+        return False
+
+    # Add new tuples to ISM
+    id_key = config["item_properties"]["id_key"]
+    for t in new_tuples:
+        ism.add_item(str(t[id_key]), t)
+
+    # Re-render displayed text for new items
+    from potato.flask_server import _render_displayed_text  # noqa: cross-import
+    text_key = config["item_properties"]["text_key"]
+    _render_displayed_text(text_key)
+
+    # Reassign instances to all active users
+    for us in usm.get_all_users():
+        ism.assign_instances_to_user(us)
+
+    logger.info(f"IBWS: Added {len(new_tuples)} new tuples for round {ibws_mgr.current_round}")
+    return True
+
+
+@app.route("/annotate", methods=["GET", "POST"])
+def annotate():
+    """
+    Handle annotation page requests.
+    """
+    logger.debug("=== ANNOTATE ROUTE START ===")
+    logger.debug(f"Session: {dict(session)}")
+    logger.debug(f"Session username: {session.get('username', 'NOT_SET')}")
+    logger.debug(f"Debug mode: {config.get('debug', False)}")
+    logger.debug(f"Request method: {request.method}")
+    logger.debug(f"Request headers: {dict(request.headers)}")
+    logger.debug(f"Request content type: {request.content_type}")
+    logger.debug(f"Request is JSON: {request.is_json}")
+
+    # Check if user is logged in
+    if 'username' not in session:
+        logger.warning("Unauthorized access attempt to annotate page")
+        return redirect(url_for("home"))
+
+    username = session['username']
+    logger.debug(f"Using username: {username}")
+    logger.debug(f"All users in state manager: {get_user_state_manager().get_user_ids()}")
+
+    # Ensure user state exists
+    if not get_user_state_manager().has_user(username):
+        logger.info(f"Creating missing user state for {username}")
+        init_user_state(username)
+        logger.debug(f"User state created. User exists: {get_user_state_manager().has_user(username)}")
+
+    logger.debug("Handling annotation request")
+
+    user_state = get_user_state(username)
+    logger.debug(f"Retrieved state for user: {username}")
+    logger.debug(f"User state: {user_state}")
+    logger.debug(f"User state phase: {user_state.get_phase() if user_state else 'No user state'}")
+
+    # Check user phase — guard against leaked nav button POSTs from non-annotation pages
+    if not user_state or user_state.get_phase() != UserPhase.ANNOTATION:
+        cur_phase = user_state.get_phase() if user_state else None
+        logger.info(f"User {username} not in annotation phase (phase={cur_phase}), redirecting.")
+
+        # If a nav POST arrived from a non-annotation page, handle it gracefully
+        if request.method == 'POST':
+            action = None
+            if request.is_json and request.json:
+                action = request.json.get('action')
+            elif request.form:
+                action = request.form.get('action')
+
+            if action == 'next_instance':
+                # Treat as "submit current phase page" - advance to next phase
+                logger.info(f"Leaked next_instance from phase {cur_phase}, advancing phase")
+                get_user_state_manager().advance_phase(username)
+                return redirect(url_for("home"))
+            elif action == 'prev_instance':
+                if get_user_state_manager().retreat_phase(username):
+                    logger.info(f"Leaked prev_instance from phase {cur_phase}, moved to previous page/phase")
+                else:
+                    logger.info(f"Leaked prev_instance from phase {cur_phase}, back navigation not allowed")
+                return redirect(url_for("home"))
+
+        # For non-nav POSTs (phase form submissions) and GETs, delegate to home()
+        # so POST data is preserved for phase processing
+        return home()
+
+    # Device routing: phones/tablets get the touch surface (/pocket) when the
+    # task supports it; either way, record the device class so admins can see
+    # who annotates from mobile. ?desktop=1 is the sticky opt-out ("Desktop
+    # site"); opening /pocket clears it again. Tracking/redirect failures must
+    # never take down the annotation page.
+    if request.method == "GET":
+        try:
+            from potato.pocket.devices import get_device_tracker, is_touch_device
+            from potato.pocket.routes import pocket_routing_state
+
+            user_agent = request.headers.get("User-Agent", "")
+            get_device_tracker().record(username, user_agent, "annotate")
+            if request.args.get("desktop") == "1":
+                session["force_desktop"] = True
+            if (is_touch_device(user_agent)
+                    and not session.get("force_desktop")
+                    and pocket_routing_state()["available"]):
+                logger.info(f"Touch device detected for {username}; routing to /pocket")
+                return redirect("/pocket")
+        except Exception:
+            logger.debug("Device routing check failed", exc_info=True)
+
+    # If the user hasn't yet been assigned anything to annotate, do so now
+    if not user_state.has_assignments():
+        logger.debug(f"User {username} has no assignments, assigning instances")
+        get_item_state_manager().assign_instances_to_user(user_state)
+        logger.debug(f"User has assignments after assignment: {user_state.has_assignments()}")
+
+        # If assignment produced nothing and user is an adjudicator,
+        # redirect them to the adjudication page
+        if not user_state.has_assignments():
+            adj_mgr = get_adjudication_manager()
+            if adj_mgr and adj_mgr.is_adjudicator(username):
+                logger.info(f"Adjudicator {username} has no annotation items, redirecting to /adjudicate")
+                return redirect(url_for("adjudicate"))
+
+    # IBWS: Check if round is complete and advance if needed
+    if config.get("ibws_config"):
+        _ibws_check_and_advance(user_state)
+
+    # See if this user has finished annotating all of their assigned instances
+    if not user_state.has_remaining_assignments():
+        # For IBWS, don't advance phase if more rounds are possible
+        if config.get("ibws_config"):
+            from potato.ibws_manager import get_ibws_manager
+            ibws_mgr = get_ibws_manager()
+            if ibws_mgr and not ibws_mgr.is_completed():
+                # Still waiting for other annotators to finish the round
+                pass
+            else:
+                logger.debug(f"User {username} has no remaining assignments (IBWS complete), advancing phase")
+                get_user_state_manager().advance_phase(username)
+                return redirect(url_for("home"))
+        else:
+            logger.debug(f"User {username} has no remaining assignments, advancing phase")
+            get_user_state_manager().advance_phase(username)
+            return redirect(url_for("home"))
+
+    _inject_quality_control_item_if_needed(username, user_state)
+
+    # Handle POST requests
+    if request.method == 'POST':
+        logger.debug(f"POST request to annotate")
+        if request.is_json:
+            logger.debug(f"POST JSON data: {request.get_json()}")
+        else:
+            logger.debug(f"POST form data: {dict(request.form)}")
+
+    if request.is_json and request.json and 'action' in request.json:
+       logger.debug(f"Action from JSON: {request.json['action']}")
+       action = request.json['action']
+    else:
+       logger.debug(f"Action from form: {request.form.get('action', 'init')}")
+       action = request.form['action'] if 'action' in request.form else "init"
+
+    logger.debug(f"Processing action: {action}")
+
+    # NOTE: Annotations are saved in real-time via /updateinstance endpoint when users
+    # click checkboxes, radio buttons, etc. This ensures proper timing tracking for
+    # behavioral data. We do NOT save annotations during navigation - they should
+    # already be saved by the time the user navigates.
+
+    if action == "prev_instance":
+        logger.debug(f"Moving to previous instance for user: {username}")
+        moved_back = move_to_prev_instance(username)
+        if not moved_back and user_state.get_current_instance_index() <= 0:
+            if get_user_state_manager().retreat_phase(username):
+                logger.debug(f"User {username} at first annotation instance, moved back to previous phase/page")
+                return redirect(url_for("home"))
+            else:
+                logger.debug(f"User {username} at first annotation instance, back navigation not allowed")
+        acm = get_ai_cache_manager()
+        if acm:
+            acm.start_prefetch(user_state.current_instance_index,
+                               getattr(acm, "prefetch_page_count_on_prev", 0) )
+    elif action == "next_instance":
+        logger.debug(f"Moving to next instance for user: {username}")
+        # Check required annotations before allowing forward navigation
+        current_id = user_state.get_current_instance_id()
+        block_response = _check_required_or_block(user_state, current_id)
+        if block_response is not None:
+            return block_response
+
+        moved_forward = move_to_next_instance(username)
+        if not moved_forward and user_state.is_at_end_index():
+            logger.debug(f"User {username} reached the end of assigned instances")
+            if not user_state.has_remaining_assignments():
+                # IBWS: try to advance round before giving up
+                if config.get("ibws_config"):
+                    advanced = _ibws_check_and_advance(user_state)
+                    if advanced:
+                        # New tuples were added — reassign and continue
+                        pass
+                    else:
+                        from potato.ibws_manager import get_ibws_manager
+                        ibws_mgr = get_ibws_manager()
+                        if ibws_mgr and ibws_mgr.is_completed():
+                            logger.debug(f"User {username} completed all IBWS rounds")
+                            get_user_state_manager().advance_phase(username)
+                            return redirect(url_for("home"))
+                else:
+                    logger.debug(f"User {username} completed all assignments at end-of-list")
+                    get_user_state_manager().advance_phase(username)
+                    return redirect(url_for("home"))
+        acm = get_ai_cache_manager()
+        if acm:
+            acm.start_prefetch(user_state.current_instance_index, getattr(acm,"prefetch_page_count_on_next", 0))
+
+    elif action == "go_to":
+        # Try to get go_to from JSON first, then form
+        go_to_value = None
+        if request.is_json and request.json.get("go_to") is not None:
+            go_to_value = request.json.get("go_to")
+        elif request.form.get("go_to") is not None:
+            go_to_value = request.form.get("go_to")
+
+        logger.debug(f"go_to action with value: {go_to_value}")
+        if go_to_value is not None:
+            # Block forward go_to if required annotations aren't met
+            target_index = int(go_to_value)
+            if target_index > user_state.current_instance_index:
+                current_id = user_state.get_current_instance_id()
+                block_response = _check_required_or_block(user_state, current_id)
+                if block_response is not None:
+                    return block_response
+
+            go_to_id(username, go_to_value)
+            acm = get_ai_cache_manager()
+            if acm:
+                acm.start_prefetch(user_state.current_instance_index, 1)
+                acm.start_prefetch(user_state.current_instance_index, -1)
+
+        else:
+            logger.warning('go_to action requested but no go_to value provided')
+    elif action == "jump_to_unannotated":
+        # Check required annotations before jumping forward
+        current_id = user_state.get_current_instance_id()
+        block_response = _check_required_or_block(user_state, current_id)
+        if block_response is not None:
+            return block_response
+
+        # Find the next unannotated instance and jump to it
+        next_idx = user_state.find_next_unannotated_index()
+        if next_idx is not None:
+            logger.debug(f"Jumping to next unannotated instance at index {next_idx}")
+            user_state.go_to_index(next_idx)
+        else:
+            logger.debug(f"No unannotated instances found for user {username}")
+            # Return a JSON response indicating no unannotated items
+            if request.is_json:
+                return jsonify({"status": "no_unannotated", "message": "All items have been annotated"})
+    elif action == "jump_to_unannotated_prev":
+        # Find the previous unannotated instance and jump to it
+        prev_idx = user_state.find_prev_unannotated_index()
+        if prev_idx is not None:
+            logger.debug(f"Jumping to previous unannotated instance at index {prev_idx}")
+            user_state.go_to_index(prev_idx)
+        else:
+            logger.debug(f"No unannotated instances found for user {username}")
+            # Return a JSON response indicating no unannotated items
+            if request.is_json:
+                return jsonify({"status": "no_unannotated", "message": "All items have been annotated"})
+    else:
+        logger.debug(f'Action "{action}" - no specific handling')
+
+    # After processing the action, check again if user has completed all assignments
+    # This handles the case where the user just finished their last item
+    if not user_state.has_remaining_assignments():
+        if config.get("ibws_config"):
+            from potato.ibws_manager import get_ibws_manager
+            ibws_mgr = get_ibws_manager()
+            if ibws_mgr and not ibws_mgr.is_completed():
+                # IBWS still running — don't advance phase, try to get more tuples
+                _ibws_check_and_advance(user_state)
+            else:
+                logger.debug(f"User {username} has completed all IBWS assignments, advancing phase")
+                get_user_state_manager().advance_phase(username)
+                return redirect(url_for("home"))
+        else:
+            logger.debug(f"User {username} has completed all assignments, advancing phase")
+            get_user_state_manager().advance_phase(username)
+            # Use redirect to ensure next phase handler gets a GET request (fixes issue #115)
+            return redirect(url_for("home"))
+
+    # Handle GET requests with instance_id query parameter
+    if request.method == 'GET' and request.args.get('instance_id'):
+        instance_id = request.args.get('instance_id')
+        logger.debug(f"GET request with instance_id parameter: {instance_id}")
+
+        # Find the index of this instance in the user's assigned instances
+        try:
+            instance_index = user_state.instance_id_to_order.get(instance_id)
+            if instance_index is None:
+                instance_index = user_state.instance_id_ordering.index(instance_id)
+                user_state.instance_id_to_order[instance_id] = instance_index
+            logger.debug(f"Found instance {instance_id} at index {instance_index}")
+
+            # Update the user's current instance to match the URL parameter
+            if instance_index != user_state.current_instance_index:
+                logger.debug(f"Updating user's current instance from index {user_state.current_instance_index} to {instance_index}")
+                user_state.current_instance_index = instance_index
+            else:
+                logger.debug(f"User already on instance {instance_id} at index {instance_index}")
+        except ValueError:
+            logger.warning(f"Instance {instance_id} not found in user's assigned instances")
+            # Don't change the current instance if the requested one isn't assigned to this user
+
+    logger.debug("=== ANNOTATE ROUTE END ===")
+    # Render the page with any existing annotations
+    # Prevent browser caching so window.location.reload() always gets fresh content
+    # (browsers may serve stale cached GET responses after JS-triggered reloads)
+    response = make_response(render_page_with_annotations(username))
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return response
+
+@app.route('/get_ai_suggestion', methods=['GET'])
+def get_ai_suggestion():
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+    ais = get_ai_cache_manager()
+
+    if ais is None:
+        return jsonify({"error": "AI support not enabled"}), 400
+
+    try:
+        annotation_id = int(request.args.get('annotationId'))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid annotationId"}), 400
+
+    # Validate annotation_id is within range
+    num_schemes = len(config.get("annotation_schemes", []))
+    if annotation_id < 0 or annotation_id >= num_schemes:
+        return jsonify({"error": "annotationId out of range"}), 400
+
+    ai_assistant = request.args.get('aiAssistant')
+
+    instance_id = user_state.get_current_instance_index()
+
+    res = ais.get_ai_help(instance_id, annotation_id, ai_assistant)
+    logger.debug(f"AI suggestion result: {res}")
+
+    # Ensure proper JSON response with correct content-type
+    if isinstance(res, dict):
+        return jsonify(res)
+    elif isinstance(res, str):
+        # If it's an error message string, wrap it
+        return jsonify({"error": res})
+    else:
+        return jsonify(res)
+
+
+# Per-(instance, schema) cache of LLM step pre-labels so repeated clicks on the
+# "AI pre-label" button don't re-query the model. Keyed by (instance_id, schema).
+_PRM_PRELABEL_CACHE: dict = {}
+
+
+@app.route('/api/prm/prelabel', methods=['GET'])
+def prm_prelabel():
+    """Return LLM-suggested per-step process rewards for one process_reward schema.
+
+    Query params: ``instance_id`` and ``schema`` (the process_reward scheme
+    name). Response: ``{"steps": [{index, reward, reasoning, confidence}],
+    "cached": bool}``. The human verifies each suggestion in the UI.
+    """
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    instance_id = request.args.get('instance_id')
+    schema_name = request.args.get('schema')
+    if not instance_id or not schema_name:
+        return jsonify({"error": "instance_id and schema are required"}), 400
+
+    # Resolve the process_reward scheme by name.
+    scheme = None
+    for s in config.get("annotation_schemes", []):
+        if s.get("name") == schema_name:
+            scheme = s
+            break
+    if scheme is None or scheme.get("annotation_type") != "process_reward":
+        return jsonify({"error": f"No process_reward schema named '{schema_name}'"}), 404
+    if not scheme.get("ai_prelabel"):
+        return jsonify({"error": "AI pre-labeling is not enabled for this schema"}), 400
+
+    ism = get_item_state_manager()
+    if not ism.has_item(str(instance_id)):
+        return jsonify({"error": f"Unknown instance '{instance_id}'"}), 404
+    item = ism.get_item(str(instance_id))
+    data = item.get_data()
+    steps_key = scheme.get("steps_key", "steps")
+    steps = data.get(steps_key) if isinstance(data, dict) else None
+    if not isinstance(steps, list) or not steps:
+        return jsonify({"steps": [], "error": f"No steps found under '{steps_key}'"}), 200
+
+    cache_key = (str(instance_id), schema_name)
+    cached = _PRM_PRELABEL_CACHE.get(cache_key)
+    if cached is not None:
+        return jsonify({"steps": cached, "cached": True})
+
+    try:
+        from potato.ai.judge import JudgeService
+        suggestions = JudgeService(config).judge_steps(str(instance_id), scheme, steps)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("PRM prelabel failed for %s/%s: %s", instance_id, schema_name, exc)
+        return jsonify({"error": "AI pre-labeling failed"}), 500
+
+    if suggestions is None:
+        return jsonify({
+            "error": "AI judge unavailable — check ai_support / judge_alignment config"
+        }), 503
+
+    _PRM_PRELABEL_CACHE[cache_key] = suggestions
+    return jsonify({"steps": suggestions, "cached": False})
+
+
+@app.route('/api/option_highlights/<int:annotation_id>', methods=['GET'])
+def get_option_highlights(annotation_id):
+    """Get AI-suggested option highlights for a specific annotation.
+
+    Returns the top-k most likely correct options for dimming non-highlighted options.
+
+    Args:
+        annotation_id: The annotation scheme index
+
+    Returns:
+        JSON with highlighted options and configuration:
+        {
+            "highlighted": ["option1", "option2"],
+            "top_k": 3,
+            "confidence": 0.85,
+            "config": {...}
+        }
+    """
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    user_state = get_user_state(username)
+    ais = get_ai_cache_manager()
+
+    if ais is None:
+        return jsonify({"error": "AI support not enabled"}), 400
+
+    instance_id = user_state.get_current_instance_index()
+
+    # Get option highlights
+    result = ais.get_option_highlights(instance_id, annotation_id)
+
+    # Add only frontend-needed configuration info (exclude internal schema details)
+    full_config = ais.get_option_highlighting_config()
+    result["config"] = {
+        "enabled": full_config.get("enabled", False),
+        "top_k": full_config.get("top_k", 3),
+        "dim_opacity": full_config.get("dim_opacity", 0.3),
+        "auto_apply": full_config.get("auto_apply", False),
+    }
+
+    return jsonify(result)
+
+
+@app.route('/api/option_highlights/config', methods=['GET'])
+def get_option_highlighting_config():
+    """Get the option highlighting configuration.
+
+    Returns:
+        JSON with option highlighting configuration:
+        {
+            "enabled": true,
+            "top_k": 3,
+            "dim_opacity": 0.4,
+            "auto_apply": true,
+            "schemas": null,
+            "prefetch_count": 20
+        }
+    """
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    ais = get_ai_cache_manager()
+
+    if ais is None:
+        return jsonify({
+            "enabled": False,
+            "top_k": 3,
+            "dim_opacity": 0.4,
+            "auto_apply": True,
+            "schemas": None,
+            "prefetch_count": 20
+        })
+
+    return jsonify(ais.get_option_highlighting_config())
+
+
+@app.route('/api/option_highlights/prefetch', methods=['POST'])
+def trigger_option_highlight_prefetch():
+    """Trigger prefetching of option highlights for upcoming items.
+
+    Request body (optional):
+        {
+            "count": 20  // Number of items to prefetch (uses config default if not provided)
+        }
+
+    Returns:
+        JSON with prefetch status
+    """
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    user_state = get_user_state(username)
+    ais = get_ai_cache_manager()
+
+    if ais is None:
+        return jsonify({"error": "AI support not enabled"}), 400
+
+    if not ais.option_highlighting_enabled:
+        return jsonify({"error": "Option highlighting not enabled"}), 400
+
+    # Get prefetch count from request or use default
+    prefetch_count = None
+    if request.is_json and request.json:
+        prefetch_count = request.json.get("count")
+
+    instance_id = user_state.get_current_instance_index()
+    ais.start_option_highlight_prefetch(instance_id, prefetch_count)
+
+    return jsonify({"status": "prefetch_started", "from_instance": instance_id})
+
+
+# Admin routes for system inspection (read-only)
+@app.route("/admin/health", methods=["GET"])
+def admin_health():
+    """
+    Health check endpoint for administrators.
+
+    Returns:
+        flask.Response: JSON response with server status
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({
+            "error": "Health check only available in debug mode or with valid API key"
+        }), 403
+
+    try:
+        # Check if core managers are accessible
+        usm = get_user_state_manager()
+        ism = get_item_state_manager()
+
+        return jsonify({
+            "status": "healthy",
+            "timestamp": str(datetime.datetime.now()),
+            "managers": {
+                "user_state_manager": "available",
+                "item_state_manager": "available"
+            },
+            "config": {
+                "debug_mode": config.get("debug", False),
+                "annotation_task_name": config.get("annotation_task_name", "Unknown")
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": str(datetime.datetime.now())
+        }), 500
+
+
+@app.route("/admin/system_state", methods=["GET"])
+def admin_system_state():
+    """
+    Get overall system state including user and item statistics.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with system state
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({
+            "error": "System state only available in debug mode or with valid API key"
+        }), 403
+
+    try:
+        usm = get_user_state_manager()
+        ism = get_item_state_manager()
+
+        # Get all users
+        users = get_users()
+        user_stats = {}
+        total_annotations = 0
+
+        for username in users:
+            user_state = usm.get_user_state(username)
+            if user_state:
+                user_annotations = len(user_state.get_all_annotations())
+                total_annotations += user_annotations
+                user_stats[username] = {
+                    "phase": str(user_state.get_phase()),
+                    "annotations_count": user_annotations,
+                    "has_assignments": user_state.has_assignments(),
+                    "remaining_assignments": user_state.has_remaining_assignments()
+                }
+
+        # Get item statistics
+        items = ism.items()
+        item_stats = {
+            "total_items": len(items),
+            "items_with_annotations": 0,
+            "items_by_annotator_count": {}
+        }
+
+        for item in items:
+            item_id = item.get_id()
+            annotators = ism.get_annotators_for_item(item_id)
+            if annotators:
+                item_stats["items_with_annotations"] += 1
+                annotator_count = len(annotators)
+                item_stats["items_by_annotator_count"][annotator_count] = item_stats["items_by_annotator_count"].get(annotator_count, 0) + 1
+
+        return jsonify({
+            "system_state": {
+                "total_users": len(users),
+                "total_items": item_stats["total_items"],
+                "total_annotations": total_annotations,
+                "items_with_annotations": item_stats["items_with_annotations"],
+                "items_by_annotator_count": item_stats["items_by_annotator_count"]
+            },
+            "users": user_stats,
+            "config": {
+                "debug_mode": config.get("debug", False),
+                "annotation_task_name": config.get("annotation_task_name", "Unknown"),
+                "max_annotations_per_user": config.get("max_annotations_per_user", "Unlimited"),
+                "annotation_schemes": config.get("annotation_schemes", []),
+                "ui": config.get("ui", {})
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to get system state: {str(e)}"
+        }), 500
+
+
+@app.route("/admin/all_instances", methods=["GET"])
+def admin_all_instances():
+    """
+    Get all available instances for navigation purposes.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with all instances
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({
+            "error": "All instances only available in debug mode or with valid API key"
+        }), 403
+
+    try:
+        ism = get_item_state_manager()
+        items = ism.items()
+
+        all_instances = []
+        for item in items:
+            all_instances.append({
+                "id": item.get_id(),
+                "text": item.get_text(),
+                "displayed_text": item.get_displayed_text()
+            })
+
+        return jsonify({
+            "total_items": len(all_instances),
+            "items": all_instances
+        })
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to get all instances: {str(e)}"
+        }), 500
+
+
+
+
+
+@app.route("/admin/user_state/<user_id>", methods=["GET"])
+def admin_user_state(user_id):
+    """
+    Get detailed state for a specific user.
+    Admin-only endpoint requiring API key.
+
+    Args:
+        user_id: The user ID to get state for
+
+    Returns:
+        flask.Response: JSON response with user state
+    """
+    logger.debug("=== ADMIN USER STATE ROUTE START ===")
+    logger.debug(f"Requested user_id: {user_id}")
+    logger.debug(f"Request headers: {dict(request.headers)}")
+    logger.debug(f"Debug mode: {config.get('debug', False)}")
+
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        logger.warning("Access denied to admin endpoint - invalid API key")
+        return jsonify({
+            "error": "User state only available in debug mode or with valid API key"
+        }), 403
+    try:
+        logger.debug(f"Getting user state manager")
+        usm = get_user_state_manager()
+        logger.debug(f"All users in state manager: {usm.get_user_ids()}")
+        logger.debug(f"Looking for user: {user_id}")
+        logger.debug(f"User exists: {usm.has_user(user_id)}")
+
+        user_state = usm.get_user_state(user_id)
+        logger.debug(f"Retrieved user state: {user_state}")
+
+        if not user_state:
+            logger.warning(f"User '{user_id}' not found in state manager")
+            return jsonify({
+                "error": f"User '{user_id}' not found"
+            }), 404
+
+        # Get current instance
+        current_instance = user_state.get_current_instance()
+        current_instance_data = None
+        if current_instance:
+            # Get the base text
+            base_text = current_instance.get_text()
+
+            # Get span annotations for this instance and user
+            span_annotations = get_span_annotations_for_user_on(user_id, current_instance.get_id())
+
+            # Render the text with span annotations
+            from potato.server_utils.schemas.span import render_span_annotations
+            displayed_text = render_span_annotations(base_text, span_annotations)
+
+
+            current_instance_data = {
+                "id": current_instance.get_id(),
+                "text": base_text,
+                "displayed_text": displayed_text
+            }
+
+        # Helper to recursively convert all dict keys to strings
+        def stringify_keys(obj):
+            if isinstance(obj, dict):
+                return {str(k): stringify_keys(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [stringify_keys(i) for i in obj]
+            else:
+                return obj
+
+        # Get all annotations
+        all_annotations = user_state.get_all_annotations()
+
+        # Convert all keys to strings for JSON serialization
+        serializable_annotations = {}
+        for instance_id, annotations in all_annotations.items():
+            instance_id_str = str(instance_id)
+            serializable_annotations[instance_id_str] = {}
+
+            # Process labels
+            if "labels" in annotations:
+                for label, value in annotations["labels"].items():
+                    if hasattr(label, 'schema_name') and hasattr(label, 'label_name'):
+                        label_str = f"{label.schema_name}:{label.label_name}"
+                    else:
+                        label_str = str(label)
+                    serializable_annotations[instance_id_str][label_str] = value
+
+            # Process spans
+            if "spans" in annotations:
+                for span, value in annotations["spans"].items():
+                    span_str = str(span)
+                    serializable_annotations[instance_id_str][span_str] = value
+
+        serializable_annotations = stringify_keys(serializable_annotations)
+
+        # Get assignments
+        assignments = []
+        if user_state.has_assignments():
+            for instance_id in user_state.get_assigned_instance_ids():
+                instance = get_item_state_manager().get_item(instance_id)
+                if instance:
+                    assignments.append({
+                        "id": instance.get_id(),
+                        "text": instance.get_text(),
+                        "displayed_text": instance.get_displayed_text(),
+                        "has_annotation": instance_id in all_annotations
+                    })
+
+        return jsonify({
+            "user_id": user_id,
+            "phase": str(user_state.get_phase()),
+            "current_instance": current_instance_data,
+            "max_assignments": user_state.get_max_assignments(),
+            "assignments": {
+                "total": len(assignments),
+                "annotated": len([a for a in assignments if a["has_annotation"]]),
+                "remaining": len([a for a in assignments if not a["has_annotation"]]),
+                "items": assignments
+            },
+            "annotations": {
+                "total_count": len(all_annotations),
+                "by_instance": serializable_annotations
+            },
+            "hints": {
+                "cached_hints": list(user_state.get_cached_hints().keys()) if hasattr(user_state, 'get_cached_hints') else []
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to get user state for '{user_id}': {str(e)}"
+        }), 500
+
+
+@app.route("/admin/item_state", methods=["GET"])
+def admin_item_state():
+    """
+    Get state for all items in the system.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with item state
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({
+            "error": "Item state only available in debug mode or with valid API key"
+        }), 403
+
+    try:
+        ism = get_item_state_manager()
+        items = ism.items()
+
+        item_states = []
+        for item in items:
+            item_id = item.get_id()
+            annotators = ism.get_annotators_for_item(item_id)
+
+            item_states.append({
+                "id": item_id,
+                "text": item.get_text(),
+                "displayed_text": item.get_displayed_text(),
+                "annotators": list(annotators) if annotators else [],
+                "annotation_count": len(annotators) if annotators else 0
+            })
+
+        # Sort by annotation count for easier analysis
+        item_states.sort(key=lambda x: x["annotation_count"], reverse=True)
+
+        return jsonify({
+            "total_items": len(item_states),
+            "items": item_states,
+            "summary": {
+                "items_with_annotations": len([i for i in item_states if i["annotation_count"] > 0]),
+                "items_without_annotations": len([i for i in item_states if i["annotation_count"] == 0]),
+                "average_annotations_per_item": sum(i["annotation_count"] for i in item_states) / len(item_states) if item_states else 0
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to get item state: {str(e)}"
+        }), 500
+
+
+@app.route("/admin/item_state/<item_id>", methods=["GET"])
+def admin_item_state_detail(item_id):
+    """
+    Get detailed state for a specific item.
+    Admin-only endpoint requiring API key.
+
+    Args:
+        item_id: The item ID to get state for
+
+    Returns:
+        flask.Response: JSON response with item state
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({
+            "error": "Item state detail only available in debug mode or with valid API key"
+        }), 403
+    try:
+        ism = get_item_state_manager()
+        item = ism.get_item(item_id)
+
+        if not item:
+            return jsonify({
+                "error": f"Item '{item_id}' not found"
+            }), 404
+
+        annotators = ism.get_annotators_for_item(item_id)
+
+        # Get annotations from all users for this item
+        usm = get_user_state_manager()
+        item_annotations = {}
+
+        for username in get_users():
+            user_state = usm.get_user_state(username)
+            if user_state:
+                user_annotations = user_state.get_all_annotations()
+                if item_id in user_annotations:
+                    item_annotations[username] = user_annotations[item_id]
+
+        return jsonify({
+            "item_id": item_id,
+            "text": item.get_text(),
+            "displayed_text": item.get_displayed_text(),
+            "annotators": list(annotators) if annotators else [],
+            "annotation_count": len(annotators) if annotators else 0,
+            "annotations": item_annotations
+        })
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to get item state for '{item_id}': {str(e)}"
+        }), 500
+
+
+# Test Support Endpoints (only available in debug mode)
+
+@app.route("/admin/api/test/reset_state", methods=["POST"])
+def admin_api_test_reset_state():
+    """
+    Reset server state for testing purposes.
+    Only available in debug mode.
+
+    This endpoint clears user state and reloads data, allowing tests
+    to start with a fresh state without restarting the server.
+
+    Returns:
+        flask.Response: JSON response with reset status
+    """
+    if not config.get('debug', False):
+        return jsonify({'error': 'This endpoint is only available in debug mode'}), 403
+
+    try:
+        from potato.user_state_management import clear_user_state_manager, init_user_state_manager
+        from potato.item_state_management import clear_item_state_manager, init_item_state_manager
+        from potato.flask_server import load_all_data  # noqa: cross-import
+        from potato.authentication import UserAuthenticator
+
+        # Clear existing state
+        clear_user_state_manager()
+        clear_item_state_manager()
+
+        # Clear ICL labeler if it exists
+        try:
+            from potato.ai.icl_labeler import clear_icl_labeler
+            clear_icl_labeler()
+        except ImportError:
+            pass
+
+        # Reinitialize state
+        UserAuthenticator.init_from_config(config)
+        init_user_state_manager(config)
+        init_item_state_manager(config)
+        load_all_data(config)
+
+        logger.info("Server state reset successfully for testing")
+        return jsonify({
+            'status': 'success',
+            'message': 'Server state reset successfully'
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to reset server state: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to reset state: {str(e)}'
+        }), 500
+
+
+# New Admin Dashboard API Endpoints
+
+@app.route("/admin/api/overview", methods=["GET"])
+def admin_api_overview():
+    """
+    Get dashboard overview data.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with overview statistics
+    """
+    result = admin_dashboard.get_dashboard_overview()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/annotators", methods=["GET"])
+def admin_api_annotators():
+    """
+    Get detailed annotator data including timing information.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with annotator data
+    """
+    result = admin_dashboard.get_annotators_data()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/instances", methods=["GET"])
+def admin_api_instances():
+    """
+    Get paginated instances data with sorting and filtering.
+    Admin-only endpoint requiring API key.
+
+    Query Parameters:
+        page: Page number (default: 1)
+        page_size: Items per page (default: 25)
+        sort_by: Sort field (annotation_count, completion_percentage, disagreement, id, average_time)
+        sort_order: Sort order (asc, desc)
+        filter_completion: Filter by completion (completed, incomplete, all)
+
+    Returns:
+        flask.Response: JSON response with paginated instances data
+    """
+    # Get query parameters
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('page_size', 25))
+    sort_by = request.args.get('sort_by', 'annotation_count')
+    sort_order = request.args.get('sort_order', 'desc')
+    filter_completion = request.args.get('filter_completion')
+
+    result = admin_dashboard.get_instances_data(
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        filter_completion=filter_completion
+    )
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/config", methods=["GET", "POST"])
+def admin_api_config():
+    """
+    Get or update system configuration.
+    Admin-only endpoint requiring API key.
+
+    GET: Returns current configuration
+    POST: Updates configuration with provided data
+
+    Returns:
+        flask.Response: JSON response with configuration data or update result
+    """
+    if request.method == "GET":
+        # Return current configuration
+        response_data = {
+            "max_annotations_per_user": config.get("max_annotations_per_user", -1),
+            "max_annotations_per_item": config.get("max_annotations_per_item", -1),
+            "assignment_strategy": config.get("assignment_strategy", "fixed_order"),
+            "annotation_task_name": config.get("annotation_task_name", "Unknown"),
+            "debug_mode": config.get("debug", False)
+        }
+
+        # Add training configuration if present
+        if "training" in config:
+            response_data["training"] = config["training"]
+
+        return jsonify(response_data)
+
+    elif request.method == "POST":
+        # Update configuration
+        config_updates = request.get_json()
+        if not config_updates:
+            return jsonify({"error": "No configuration updates provided"}), 400
+
+        result = admin_dashboard.update_config(config_updates)
+        if isinstance(result, tuple):
+            return jsonify(result[0]), result[1]
+        return jsonify(result)
+
+
+@app.route("/admin/api/user/<username>/set_instances", methods=["POST"])
+def admin_api_set_user_instances(username):
+    """
+    Set the maximum number of instances for a specific user.
+    Admin-only endpoint requiring API key.
+
+    JSON Body:
+        max_instances (int): New max instance count. Use -1 for unlimited.
+
+    Returns:
+        flask.Response: JSON response with updated user info
+    """
+    data = request.get_json()
+    if not data or 'max_instances' not in data:
+        return jsonify({"error": "max_instances is required"}), 400
+
+    max_instances = int(data['max_instances'])
+
+    usm = get_user_state_manager()
+    user_state = usm.get_user_state(username)
+    if not user_state:
+        return jsonify({"error": f"User '{username}' not found"}), 404
+
+    # Don't allow setting below current annotation count (can't un-annotate)
+    current_count = user_state.get_annotation_count()
+    if max_instances >= 0 and max_instances < current_count:
+        max_instances = current_count
+
+    user_state.set_max_assignments(max_instances)
+
+    return jsonify({
+        "success": True,
+        "username": username,
+        "max_instances": max_instances,
+        "current_annotations": current_count
+    })
+
+
+@app.route("/admin/api/stale_assignments", methods=["GET"])
+def admin_api_stale_assignments():
+    """
+    Get a list of stale instance assignments (assigned but not annotated past timeout).
+
+    Returns:
+        flask.Response: JSON with stale assignment info
+    """
+    import time
+    ism = get_item_state_manager()
+    usm = get_user_state_manager()
+    timeout_hours = ism.reclaim_timeout_hours
+    cutoff = time.time() - (timeout_hours * 3600)
+    stale = []
+
+    for iid, user_timestamps in ism.assignment_timestamps.items():
+        for username, timestamp in user_timestamps.items():
+            user_state = usm.get_user_state(username)
+            if user_state and user_state.has_annotated(iid):
+                continue
+            hours_ago = (time.time() - timestamp) / 3600
+            stale.append({
+                'instance_id': iid,
+                'username': username,
+                'assigned_hours_ago': round(hours_ago, 1),
+                'is_stale': timestamp < cutoff
+            })
+
+    stale.sort(key=lambda x: x['assigned_hours_ago'], reverse=True)
+    return jsonify({
+        'stale_assignments': stale,
+        'timeout_hours': timeout_hours,
+        'reclaim_enabled': ism.reclaim_enabled
+    })
+
+
+@app.route("/admin/api/reclaim_instance", methods=["POST"])
+def admin_api_reclaim_instance():
+    """
+    Manually reclaim a specific instance assignment from a user.
+
+    JSON Body:
+        instance_id (str): The instance to reclaim
+        username (str): The user to reclaim from
+    """
+    data = request.get_json()
+    if not data or 'instance_id' not in data or 'username' not in data:
+        return jsonify({"error": "instance_id and username are required"}), 400
+
+    iid = data['instance_id']
+    username = data['username']
+
+    ism = get_item_state_manager()
+    usm = get_user_state_manager()
+    user_state = usm.get_user_state(username)
+
+    if not user_state:
+        return jsonify({"error": f"User '{username}' not found"}), 404
+
+    if user_state.has_annotated(iid):
+        return jsonify({"error": "Cannot reclaim: user has already annotated this instance"}), 400
+
+    reclaimed = ism._reclaim_unannotated_assignment(
+        user_state,
+        iid,
+        reason="manual_admin_reclaim",
+    )
+    if not reclaimed:
+        return jsonify({"error": "Instance is not assigned to this user"}), 400
+
+    get_user_state_manager().save_user_state(user_state)
+
+    return jsonify({"success": True, "instance_id": iid, "username": username})
+
+
+@app.route("/admin/api/questions", methods=["GET"])
+def admin_api_questions():
+    """
+    Get aggregate analysis data for all annotation schemas/questions.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with questions data and visualizations
+    """
+    result = admin_dashboard.get_questions_data()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/annotation_history", methods=["GET"])
+def admin_api_annotation_history():
+    """
+    Get detailed annotation history data with filtering options.
+    Admin-only endpoint requiring API key.
+
+    Query Parameters:
+        user_id: Optional user ID to filter by
+        instance_id: Optional instance ID to filter by
+        minutes: Optional time window in minutes
+
+    Returns:
+        flask.Response: JSON response with annotation history data
+    """
+    user_id = request.args.get('user_id')
+    instance_id = request.args.get('instance_id')
+    minutes = request.args.get('minutes')
+
+    if minutes:
+        try:
+            minutes = int(minutes)
+        except ValueError:
+            return jsonify({"error": "Invalid minutes parameter"}), 400
+
+    result = admin_dashboard.get_annotation_history_data(
+        user_id=user_id,
+        instance_id=instance_id,
+        minutes=minutes
+    )
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/suspicious_activity", methods=["GET"])
+def admin_api_suspicious_activity():
+    """
+    Get comprehensive suspicious activity analysis.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with suspicious activity data
+    """
+    result = admin_dashboard.get_suspicious_activity_data()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/crowdsourcing", methods=["GET"])
+def admin_api_crowdsourcing():
+    """
+    Get crowdsourcing platform statistics (MTurk, Prolific).
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with crowdsourcing data including:
+        - summary: Overall worker counts by platform
+        - prolific: Prolific-specific statistics and worker list
+        - mturk: MTurk-specific statistics and worker list
+        - other: Non-crowdsourcing workers
+    """
+    result = admin_dashboard.get_crowdsourcing_data()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/agreement", methods=["GET"])
+def admin_api_agreement():
+    """
+    Get inter-annotator agreement metrics.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with agreement metrics including:
+        - overall: Average Krippendorff's alpha across schemas
+        - by_schema: Per-schema agreement metrics
+        - interpretation: Human-readable interpretation
+    """
+    result = admin_dashboard.get_agreement_metrics()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/agent_rollup", methods=["GET"])
+def admin_api_agent_rollup():
+    """
+    Per-agent aggregation of turn-level annotations across the dataset.
+
+    For every turn-level scheme (``turn_level: true``), rolls up annotated
+    turns by the ``agent_id`` snapshot stored with each value: counts,
+    numeric means (likert/slider/number), and categorical value counts
+    (radio/multiselect/select). Admin-only endpoint requiring API key.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+
+    try:
+        from potato.server_utils.turn_annotations import compute_agent_rollup
+        report = compute_agent_rollup(
+            get_item_state_manager(), get_user_state_manager(), config,
+        )
+    except Exception as exc:
+        logger.exception("Failed to compute agent rollup")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(report)
+
+
+@app.route("/admin/iaa", methods=["GET"])
+def admin_iaa():
+    """
+    Inter-annotator agreement over the overlap-sample items.
+
+    Computes a schema-appropriate set of metrics (nominal: Cohen/Fleiss kappa,
+    Krippendorff alpha; ordinal: weighted kappa, Spearman rho; continuous:
+    Pearson, ICC; span: token kappa, span F1, alpha_U, gamma; etc.).
+    Restricted to items whose per-item annotator cap is >= 2 and that have
+    reached that cap.
+
+    Pass ``?format=html`` for a rendered table (default: JSON).
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+
+    try:
+        from potato.server_utils.iaa import compute_overlap_iaa
+        report = compute_overlap_iaa(
+            get_item_state_manager(), get_user_state_manager(), config,
+        )
+    except Exception as exc:
+        logger.exception("Failed to compute overlap IAA")
+        return jsonify({"error": str(exc)}), 500
+
+    if (request.args.get("format") or "json").lower() == "html":
+        try:
+            return render_template("admin/iaa.html", report=report)
+        except Exception:
+            # Template optional; fall back to JSON if missing.
+            pass
+    return jsonify(report)
+
+
+def _record_judge_comparison_if_enabled(username, instance_id):
+    """On human save, log the human↔judge comparison if inline mode is on."""
+    ja = config.get("judge_alignment", {}) or {}
+    if not (ja.get("inline", {}) or {}).get("enabled"):
+        return
+    try:
+        from potato.server_utils import judge_alignment as ja_mod
+        schemas = ja_mod.judge_scoped_schemas(config)
+        allow = set((ja.get("inline", {}) or {}).get("schemas", []) or [])
+        if allow:
+            schemas = [s for s in schemas if s.get("name") in allow]
+        preds = ja_mod.load_predictions(config)
+        version = ja_mod.latest_prompt_version(config)
+        version_preds = preds.get(version, {}) if version else {}
+        for schema_info in schemas:
+            schema_name = schema_info.get("name")
+            pred = version_preds.get(f"{instance_id}::{schema_name}")
+            if not pred:
+                continue
+            human_label = ja_mod.human_label_for(instance_id, schema_name, username)
+            if human_label is None:
+                continue
+            ja_mod.record_comparison(
+                config, instance_id, schema_name, human_label,
+                pred.get("predicted_label"), version or "",
+            )
+    except Exception as e:
+        logger.warning(f"Judge comparison recording failed for {instance_id}: {e}")
+
+
+@app.route("/admin/judge-alignment", methods=["GET"])
+def admin_judge_alignment():
+    """LLM-judge ↔ human alignment report: Cohen's κ, confusion, disagreements.
+
+    Mirrors /admin/iaa. Pass ?format=html for the rendered page (default JSON),
+    and ?prompt_version=<v> to view a specific judge prompt version.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+
+    try:
+        from potato.server_utils.judge_alignment import (
+            compute_judge_alignment, gather_pairs, judge_scoped_schemas, latest_prompt_version)
+        users = get_users()
+        pv = request.args.get("prompt_version")
+        report = compute_judge_alignment(config, users, prompt_version=pv)
+        # E4: judge bias + robustness eval cards (the axis beyond κ).
+        try:
+            from potato.server_utils.judge_bias import eval_cards_from_pairs
+
+            def _text_len(iid):
+                from potato.item_state_management import get_item_state_manager
+                ism = get_item_state_manager()
+                try:
+                    return len(str(ism.get_item(iid).get_data())) if ism else 0
+                except Exception:
+                    return 0
+            schemas = [s.get("name") for s in judge_scoped_schemas(config)]
+            pairs = gather_pairs(config, users, schemas, pv or latest_prompt_version(config))
+            report["eval_cards"] = eval_cards_from_pairs(
+                pairs, report.get("per_schema", {}), _text_len,
+                prompt_version=report.get("prompt_version") or "")
+        except Exception:
+            logger.exception("eval-card computation failed (non-fatal)")
+    except Exception as exc:
+        logger.exception("Failed to compute judge alignment")
+        return jsonify({"error": str(exc)}), 500
+
+    if (request.args.get("format") or "json").lower() == "html":
+        try:
+            return render_template("admin/judge_alignment.html", report=report)
+        except Exception:
+            pass
+    return jsonify(report)
+
+
+@app.route("/admin/api/judge-alignment/run", methods=["POST"])
+def admin_judge_alignment_run():
+    """Run/re-run the judge over human-annotated instances.
+
+    Optional JSON body: {"rubrics": {schema_name: rubric}, "max_per_schema": N}.
+    Editing a rubric creates a new prompt version so κ can be tracked across
+    calibration rounds. Returns a run summary.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+
+    body = request.get_json(silent=True) or {}
+    try:
+        from potato.server_utils.judge_alignment import run_judge_batch
+        summary = run_judge_batch(
+            config, get_users(),
+            rubric_overrides=body.get("rubrics"),
+            max_per_schema=body.get("max_per_schema"),
+        )
+    except Exception as exc:
+        logger.exception("Failed to run judge batch")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(summary)
+
+
+@app.route("/admin/api/judge-alignment/autocalibrate", methods=["POST"])
+def admin_judge_alignment_autocalibrate():
+    """Auto-calibrate the judge: re-run with human corrections injected as
+    few-shot examples, creating a new prompt version, and report base vs new κ.
+
+    Optional JSON body: {"max_corrections": N, "max_per_schema": N}.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+
+    body = request.get_json(silent=True) or {}
+    try:
+        from potato.server_utils.judge_autocalibrate import autocalibrate
+        report = autocalibrate(
+            config, get_users(),
+            max_corrections=int(body.get("max_corrections", 5)),
+            max_per_schema=body.get("max_per_schema"),
+        )
+    except Exception as exc:
+        logger.exception("Failed to auto-calibrate judge")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(report)
+
+
+def _build_annotation_observations(users, schemas):
+    """(worker, item::schema, label) observations from stored annotations (E2)."""
+    from potato.server_utils.judge_alignment import human_label_for
+    from potato.item_state_management import get_item_state_manager
+    ism = get_item_state_manager()
+    if ism is None:
+        return []
+    obs = []
+    for iid in ism.get_instance_ids():
+        for schema in schemas:
+            key = f"{iid}::{schema}"
+            for u in users:
+                lab = human_label_for(str(iid), schema, u)
+                if lab is not None:
+                    obs.append((u, key, lab))
+    return obs
+
+
+@app.route("/admin/annotation-integrity", methods=["GET"])
+def admin_annotation_integrity():
+    """Per-annotator LLM-cheating / low-effort detection (E2), no ground truth.
+
+    ?format=html for the dashboard. Uses the judge to supply reference LLM labels
+    when available (for the LLM-echo signal); otherwise Correlated-Agreement only.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+    try:
+        from potato.server_utils.cheating_detection import detect_llm_cheating
+        from potato.server_utils.judge_alignment import judge_scoped_schemas, run_judge_batch
+        # schemas: prefer judge-scoped (categorical) schemes; fall back to all radio/multiselect names
+        schemas = [s.get("name") for s in judge_scoped_schemas(config)]
+        if not schemas:
+            schemas = [s.get("name") for s in (config.get("annotation_schemes") or [])
+                       if s.get("annotation_type") in ("radio", "multiselect", "multiple_choice")]
+        users = get_users()
+        obs = _build_annotation_observations(users, schemas)
+        # Optional reference LLM labels from cached judge predictions (best-effort).
+        llm_labels = None
+        try:
+            from potato.server_utils.judge_alignment import load_predictions, latest_prompt_version
+            preds = load_predictions(config).get(latest_prompt_version(config) or "", {})
+            llm_labels = {f"{k.split('::')[0]}::{k.split('::')[1]}": v.get("predicted_label")
+                          for k, v in preds.items()
+                          if isinstance(v, dict) and v.get("predicted_label") and "::" in k}
+            llm_labels = llm_labels or None
+        except Exception:
+            llm_labels = None
+        reports = [r.to_dict() for r in detect_llm_cheating(obs, llm_labels=llm_labels)]
+    except Exception as exc:
+        logger.exception("Failed to compute annotation integrity")
+        return jsonify({"error": str(exc)}), 500
+
+    payload = {"reports": reports, "n_annotators": len(reports),
+               "used_llm_labels": bool(llm_labels)}
+    if (request.args.get("format") or "json").lower() == "html":
+        try:
+            return render_template("admin/annotation_integrity.html", **payload)
+        except Exception:
+            pass
+    return jsonify(payload)
+
+
+@app.route("/admin/api/perspectivist", methods=["GET"])
+def admin_perspectivist_export():
+    """Soft-label / perspectivist export (E3): per-item label distributions,
+    ambiguity flags, and per-annotator perspectives — preserves disagreement
+    instead of collapsing to one answer. ?schema=<name> to restrict; default all.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+    try:
+        from potato.server_utils.perspectivist import perspectivist_export, annotator_perspectives
+        from potato.server_utils.judge_alignment import judge_scoped_schemas
+        wanted = request.args.get("schema")
+        schemas = ([wanted] if wanted else
+                   [s.get("name") for s in (config.get("annotation_schemes") or [])
+                    if s.get("annotation_type") in ("radio", "multiselect", "multiple_choice")]
+                   or [s.get("name") for s in judge_scoped_schemas(config)])
+        obs = _build_annotation_observations(get_users(), schemas)
+        try:
+            thr = float(request.args.get("ambiguity_threshold", 0.5))
+        except (TypeError, ValueError):
+            thr = 0.5
+        items = perspectivist_export(obs, ambiguity_threshold=thr)
+        ambiguous = sum(1 for it in items if it["ambiguous"])
+        return jsonify({"items": items, "n_items": len(items),
+                        "n_ambiguous": ambiguous,
+                        "perspectives": annotator_perspectives(obs)})
+    except Exception as exc:
+        logger.exception("Failed to build perspectivist export")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/admin/api/induce-metrics", methods=["GET"])
+def admin_induce_metrics():
+    """Agent-metric induction (E11): mine recurring evaluation metrics from the
+    free-text annotations on a scheme, for a human to confirm into a rubric.
+
+    ?schema=<free-text scheme name> (required), ?min_support=N (default 2).
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+    schema = request.args.get("schema")
+    if not schema:
+        return jsonify({"error": "schema query param is required"}), 400
+    try:
+        from potato.server_utils.metric_induction import induce_metrics
+        from potato.ai.judge import JudgeService
+        from potato.item_state_management import get_item_state_manager
+        ism = get_item_state_manager()
+        comments = []
+        if ism is not None:
+            for iid in ism.get_instance_ids():
+                for u in get_users():
+                    anns = get_annotations_for_user_on(u, str(iid)) or {}
+                    val = anns.get(schema)
+                    text = None
+                    if isinstance(val, dict):
+                        text = val.get("text") or (next(iter(val.keys())) if val else None)
+                    elif isinstance(val, str):
+                        text = val
+                    if text and len(str(text).strip()) > 3:
+                        comments.append(str(text).strip())
+        llm = JudgeService(config)._get_endpoint()
+        if llm is None:
+            return jsonify({"error": "no LLM endpoint configured for induction"}), 400
+        min_support = int(request.args.get("min_support", 2))
+        cands = [c.to_dict() for c in induce_metrics(comments, llm, min_support=min_support)]
+    except Exception as exc:
+        logger.exception("Failed to induce metrics")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"schema": schema, "n_comments": len(comments),
+                    "candidate_metrics": cands})
+
+
+@app.route("/admin/triage-queue", methods=["GET"])
+def admin_triage_queue():
+    """Signal-based triage queue: items ranked by their quality signal.
+
+    Shows the remaining (incomplete) items ordered by the triage priority that
+    was assigned at load/ingestion time (errors / thumbs-down / low score
+    first), with the reason that flagged each one. Pass ?format=html for the
+    rendered page (default JSON).
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin API key required"}), 403
+
+    try:
+        from potato.server_utils.triage import compute_triage_queue
+        report = compute_triage_queue(config)
+    except Exception as exc:
+        logger.exception("Failed to compute triage queue")
+        return jsonify({"error": str(exc)}), 500
+
+    if (request.args.get("format") or "json").lower() == "html":
+        try:
+            return render_template("admin/triage_queue.html", report=report)
+        except Exception:
+            pass
+    return jsonify(report)
+
+
+@app.route("/admin/api/code_cooccurrence", methods=["GET"])
+def admin_api_code_cooccurrence():
+    """
+    Get pairwise code co-occurrence across instances.
+
+    Query params:
+        schema (optional): Restrict to a single schema name.
+        min_count (optional): Minimum co-occurrence count to include (default 1).
+
+    Returns:
+        JSON with codes, pairs ({code_a, code_b, count}), n_instances.
+    """
+    schema = request.args.get("schema")
+    try:
+        min_count = int(request.args.get("min_count", "1"))
+    except ValueError:
+        min_count = 1
+    result = admin_dashboard.get_code_cooccurrence_matrix(
+        schema_filter=schema, min_count=min_count
+    )
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/code_crosstab", methods=["GET"])
+def admin_api_code_crosstab():
+    """
+    Get a codes-by-instance-attribute crosstab.
+
+    Query params:
+        attribute (required): The instance metadata field to pivot on
+            (e.g. "site", "condition", "language").
+        schema (optional): Restrict to a single schema name.
+
+    Returns:
+        JSON with codes, values, cells ({code, value, count}), n_instances.
+    """
+    attribute = request.args.get("attribute")
+    if not attribute:
+        return jsonify({"error": "attribute query param is required"}), 400
+    schema = request.args.get("schema")
+    result = admin_dashboard.get_code_crosstab(
+        attribute_key=attribute, schema_filter=schema
+    )
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/step_agreement", methods=["GET"])
+def admin_api_step_agreement():
+    """
+    Get step-level inter-annotator agreement metrics for agent traces.
+    Admin-only endpoint.
+
+    Query params:
+        scheme: Annotation scheme name (required)
+        metric: "krippendorff_alpha" or "cohens_kappa" (default: krippendorff_alpha)
+
+    Returns:
+        JSON with overall, per_step, and per_instance agreement.
+    """
+    try:
+        from potato.step_agreement import compute_step_agreement
+        from potato.item_state_management import get_item_state_manager
+
+        scheme_name = request.args.get("scheme", "")
+        metric = request.args.get("metric", "krippendorff_alpha")
+
+        if not scheme_name:
+            return jsonify({"error": "scheme parameter is required"}), 400
+
+        ism = get_item_state_manager()
+        # Collect step-level annotations from all instances
+        annotations = {}
+        for instance_id, item in ism.instance_id_to_instance.items():
+            annotator_data = {}
+            for annotator_id, ann in item.get_annotations().items():
+                if scheme_name in ann:
+                    annotator_data[annotator_id] = ann
+            if annotator_data:
+                annotations[instance_id] = annotator_data
+
+        if not annotations:
+            return jsonify({
+                "error": "No step-level annotations found",
+                "scheme": scheme_name,
+            }), 404
+
+        result = compute_step_agreement(
+            annotations, scheme_name=scheme_name, metric=metric
+        )
+        return jsonify(result)
+
+    except ImportError as e:
+        return jsonify({"error": f"Missing dependency: {e}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/api/step_quality", methods=["GET"])
+def admin_api_step_quality():
+    """
+    Get step-level quality control metrics.
+    Admin-only endpoint.
+
+    Returns:
+        JSON with gold standard results and attention check stats.
+    """
+    try:
+        step_qc_config = config.get("quality_control", {}).get("step_level", {})
+        if not step_qc_config.get("enabled", False):
+            return jsonify({"enabled": False, "message": "Step-level QC not configured"})
+
+        from potato.step_quality_control import StepQualityControlManager
+        task_dir = config.get("task_dir", ".")
+        manager = StepQualityControlManager(step_qc_config, task_dir)
+        return jsonify(manager.get_quality_summary())
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/api/quality_control", methods=["GET"])
+def admin_api_quality_control():
+    """
+    Get quality control metrics (attention checks, gold standards).
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with quality control data including:
+        - attention_checks: Statistics on attention check pass/fail rates
+        - gold_standards: Statistics on gold standard accuracy
+        - by_user: Per-user quality metrics
+    """
+    result = admin_dashboard.get_quality_control_data()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+@app.route("/admin/api/behavioral_analytics", methods=["GET"])
+def admin_api_behavioral_analytics():
+    """
+    Get behavioral analytics data for all annotators.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        flask.Response: JSON response with behavioral analytics including:
+        - aggregate_stats: Overall statistics (total users, instances, avg time)
+        - ai_usage: AI assistance usage statistics
+        - quality_summary: Quality indicators and suspicious activity flags
+        - interaction_types: Breakdown of interaction types
+        - change_sources: Sources of annotation changes
+        - users: Per-user behavioral metrics sorted by suspicion score
+    """
+    result = admin_dashboard.get_behavioral_analytics_data()
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+
+# === ICL Verification Helper ===
+
+def _maybe_record_icl_verification(user_state, instance_id: str, annotations: dict) -> bool:
+    """
+    Check if an annotation was for an ICL verification task and record the result.
+
+    This is called after a user submits an annotation. If the instance was assigned
+    as a verification task (blind labeling), we compare their label to the LLM's
+    prediction and record the verification result.
+
+    Args:
+        user_state: The user's state object
+        instance_id: The annotated instance ID
+        annotations: The user's annotation data
+
+    Returns:
+        True if verification was recorded, False otherwise
+    """
+    # Check if this instance is a verification task
+    if not hasattr(user_state, 'is_verification_task'):
+        return False
+
+    if not user_state.is_verification_task(instance_id):
+        return False
+
+    try:
+        from potato.ai.icl_labeler import get_icl_labeler
+
+        icl_labeler = get_icl_labeler()
+        if icl_labeler is None:
+            return False
+
+        # Get the schema being verified
+        schema_name = user_state.get_verification_schema(instance_id)
+        if not schema_name:
+            return False
+
+        # Extract the human's label for this schema
+        human_label = None
+        if schema_name in annotations:
+            label_data = annotations[schema_name]
+            if isinstance(label_data, dict):
+                # For radio/multiselect, find the selected value
+                for label_name, value in label_data.items():
+                    if value == 'true' or value is True:
+                        human_label = label_name
+                        break
+                    elif isinstance(value, str) and value not in ('false', ''):
+                        human_label = value
+                        break
+            elif isinstance(label_data, str):
+                human_label = label_data
+
+        if human_label is None:
+            logger.warning(f"Could not extract human label for verification of {instance_id}")
+            return False
+
+        # Record the verification
+        user_id = user_state.get_user_id()
+        success = icl_labeler.record_verification(
+            instance_id=instance_id,
+            schema_name=schema_name,
+            human_label=human_label,
+            verified_by=user_id
+        )
+
+        if success:
+            # Remove from user's verification task tracking
+            user_state.complete_verification_task(instance_id)
+            logger.info(f"Recorded ICL verification for {instance_id} by {user_id}: {human_label}")
+
+        return success
+
+    except ImportError:
+        # ICL labeler module not available
+        return False
+    except Exception as e:
+        logger.warning(f"Error recording ICL verification: {e}")
+        return False
+
+
+# === Diversity Manager Helper ===
+
+def _notify_diversity_manager_annotation(user_state, instance_id: str) -> None:
+    """
+    Notify the diversity manager that an annotation was completed.
+
+    This triggers async embedding computation if needed and checks if
+    reclustering should occur. Also triggers AI prefetch after reordering.
+
+    Args:
+        user_state: The user's state object
+        instance_id: The annotated instance ID
+    """
+    dm = get_diversity_manager()
+    if not dm or not dm.enabled:
+        return
+
+    try:
+        user_id = getattr(user_state, 'user_id', 'anonymous')
+
+        # Get the item text for embedding
+        ism = get_item_state_manager()
+        item = ism.get_item(instance_id)
+        if not item:
+            return
+
+        text_key = config.get("item_properties", {}).get("text_key", "text")
+        item_data = item.get_data()
+        text = item_data.get(text_key, item.get_text())
+
+        # Notify diversity manager (triggers async embedding if needed)
+        dm.on_annotation_complete(user_id, instance_id, text)
+
+        # Check if reclustering is needed
+        if dm.should_recluster(user_id):
+            dm.trigger_recluster(user_id)
+
+            # Trigger AI prefetch for reordered items
+            if dm.config.trigger_ai_prefetch:
+                _trigger_ai_prefetch_after_reorder(user_state)
+
+    except Exception as e:
+        logger.warning(f"Error notifying diversity manager: {e}")
+
+
+def _trigger_ai_prefetch_after_reorder(user_state) -> None:
+    """
+    Trigger AI cache prefetch after diversity reordering.
+
+    Args:
+        user_state: The user's state object
+    """
+    try:
+        acm = get_ai_cache_manager()
+        if acm is None:
+            return
+
+        # Get current instance index
+        current_index = getattr(user_state, 'current_instance_index', 0)
+
+        # Prefetch count from AI cache config
+        prefetch_count = getattr(acm, 'prefetch_page_count_on_next', 5)
+
+        acm.start_prefetch(current_index, prefetch_count)
+        logger.debug(f"Triggered AI prefetch after diversity reorder from index {current_index}")
+
+    except Exception as e:
+        logger.warning(f"Error triggering AI prefetch after reorder: {e}")
+
+
+# === ICL Labeling Admin API ===
+
+@app.route("/admin/api/icl/status", methods=["GET"])
+def admin_api_icl_status():
+    """
+    Get ICL labeler status and statistics.
+    Admin-only endpoint.
+
+    Returns:
+        JSON with ICL labeler status including:
+        - enabled: Whether ICL labeling is enabled
+        - total_examples: Number of high-confidence examples
+        - total_predictions: Number of LLM predictions made
+        - accuracy_metrics: Verification-based accuracy
+        - labeling_paused: Whether labeling is currently paused
+    """
+    try:
+        from potato.ai.icl_labeler import get_icl_labeler
+        icl_labeler = get_icl_labeler()
+
+        if icl_labeler is None:
+            return jsonify({
+                'enabled': False,
+                'message': 'ICL labeling not initialized'
+            })
+
+        return jsonify(icl_labeler.get_status())
+
+    except Exception as e:
+        logger.error(f"Error getting ICL status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/admin/api/icl/examples", methods=["GET"])
+def admin_api_icl_examples():
+    """
+    Get current high-confidence examples.
+
+    Query params:
+        schema: Optional schema name to filter by
+
+    Returns:
+        JSON with examples grouped by schema
+    """
+    try:
+        from potato.ai.icl_labeler import get_icl_labeler
+        icl_labeler = get_icl_labeler()
+
+        if icl_labeler is None:
+            # Return empty results when ICL is not initialized (graceful degradation)
+            schema_filter = request.args.get('schema')
+            return jsonify({
+                'examples': {},
+                'total_count': 0,
+                'schema': schema_filter
+            })
+
+        schema_filter = request.args.get('schema')
+
+        examples = {}
+        for schema_name, schema_examples in icl_labeler.schema_to_examples.items():
+            if schema_filter and schema_name != schema_filter:
+                continue
+            examples[schema_name] = [ex.to_dict() for ex in schema_examples]
+
+        response_data = {
+            'examples': examples,
+            'total_count': sum(len(ex) for ex in examples.values())
+        }
+        if schema_filter:
+            response_data['schema'] = schema_filter
+        return jsonify(response_data)
+
+    except Exception as e:
+        logger.error(f"Error getting ICL examples: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/admin/api/icl/predictions", methods=["GET"])
+def admin_api_icl_predictions():
+    """
+    Get LLM predictions with filtering.
+
+    Query params:
+        schema: Optional schema name to filter by
+        status: Optional verification status filter
+        limit: Maximum number of predictions to return (default 100)
+
+    Returns:
+        JSON with predictions list
+    """
+    try:
+        from potato.ai.icl_labeler import get_icl_labeler
+        icl_labeler = get_icl_labeler()
+
+        if icl_labeler is None:
+            # Return empty results when ICL is not initialized (graceful degradation)
+            return jsonify({
+                'predictions': [],
+                'total_count': 0
+            })
+
+        schema_filter = request.args.get('schema')
+        status_filter = request.args.get('status')
+        limit = int(request.args.get('limit', 100))
+
+        predictions_list = []
+        for inst_id, schemas in icl_labeler.predictions.items():
+            for schema_name, prediction in schemas.items():
+                if schema_filter and schema_name != schema_filter:
+                    continue
+                if status_filter and prediction.verification_status != status_filter:
+                    continue
+
+                predictions_list.append(prediction.to_dict())
+
+                if len(predictions_list) >= limit:
+                    break
+            if len(predictions_list) >= limit:
+                break
+
+        # Sort by timestamp descending
+        predictions_list.sort(key=lambda x: x['timestamp'], reverse=True)
+
+        return jsonify({
+            'predictions': predictions_list[:limit],
+            'total_count': len(predictions_list)
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting ICL predictions: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/admin/api/icl/accuracy", methods=["GET"])
+def admin_api_icl_accuracy():
+    """
+    Get accuracy metrics.
+
+    Query params:
+        schema: Optional schema name to filter by
+
+    Returns:
+        JSON with accuracy metrics
+    """
+    try:
+        from potato.ai.icl_labeler import get_icl_labeler
+        icl_labeler = get_icl_labeler()
+
+        if icl_labeler is None:
+            # Return empty metrics when ICL is not initialized (graceful degradation)
+            schema_filter = request.args.get('schema')
+            return jsonify({
+                'total_predictions': 0,
+                'total_verified': 0,
+                'verified_correct': 0,
+                'verified_incorrect': 0,
+                'pending_verification': 0,
+                'accuracy': 0.0,
+                'schema_name': schema_filter
+            })
+
+        schema_filter = request.args.get('schema')
+        metrics = icl_labeler.get_accuracy_metrics(schema_filter)
+
+        return jsonify(metrics)
+
+    except Exception as e:
+        logger.error(f"Error getting ICL accuracy: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/admin/api/icl/trigger", methods=["POST"])
+def admin_api_icl_trigger():
+    """
+    Manually trigger ICL operations.
+
+    JSON body:
+        action: "refresh_examples" | "batch_label" | "save_state"
+        schema: Optional schema name for batch_label
+
+    Returns:
+        JSON with operation result
+    """
+    try:
+        from potato.ai.icl_labeler import get_icl_labeler
+        icl_labeler = get_icl_labeler()
+
+        if icl_labeler is None:
+            return jsonify({'error': 'ICL labeling not initialized'}), 400
+
+        data = request.get_json() or {}
+        action = data.get('action', '')
+
+        # Support shorthand: if schema_name is provided without action, default to batch_label
+        if not action and data.get('schema_name'):
+            action = 'batch_label'
+            # Use schema_name as the schema for backwards compatibility
+            if 'schema' not in data:
+                data['schema'] = data['schema_name']
+
+        if action == 'refresh_examples':
+            examples = icl_labeler.refresh_high_confidence_examples()
+            return jsonify({
+                'action': 'refresh_examples',
+                'success': True,
+                'example_counts': {k: len(v) for k, v in examples.items()}
+            })
+
+        elif action == 'batch_label':
+            schema = data.get('schema')
+            if not schema:
+                return jsonify({'error': 'schema required for batch_label'}), 400
+
+            predictions = icl_labeler.batch_label_instances(schema)
+            icl_labeler.save_state()
+
+            return jsonify({
+                'action': 'batch_label',
+                'success': True,
+                'predictions_count': len(predictions),
+                'schema': schema,
+                'message': f'Labeled {len(predictions)} instances for schema {schema}'
+            })
+
+        elif action == 'save_state':
+            icl_labeler.save_state()
+            return jsonify({
+                'action': 'save_state',
+                'success': True
+            })
+
+        else:
+            return jsonify({'error': f'Unknown action: {action}'}), 400
+
+    except Exception as e:
+        logger.error(f"Error triggering ICL action: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/api/icl/record_verification", methods=["POST"])
+def api_icl_record_verification():
+    """
+    Record human verification of an LLM prediction.
+
+    This is called when an annotator completes labeling an instance
+    that was selected for verification.
+
+    JSON body:
+        instance_id: The instance ID
+        schema_name: The schema name
+        human_label: The human's label
+
+    Returns:
+        JSON with verification result
+    """
+    try:
+        if 'username' not in session:
+            return jsonify({'error': 'Not authenticated'}), 401
+
+        from potato.ai.icl_labeler import get_icl_labeler
+        icl_labeler = get_icl_labeler()
+
+        if icl_labeler is None:
+            return jsonify({'error': 'ICL labeling not initialized'}), 400
+
+        data = request.get_json() or {}
+        instance_id = data.get('instance_id')
+        schema_name = data.get('schema_name')
+        human_label = data.get('human_label')
+
+        if not all([instance_id, schema_name, human_label]):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        username = session['username']
+        success = icl_labeler.record_verification(
+            instance_id, schema_name, human_label, username
+        )
+
+        if success:
+            icl_labeler.save_state()
+            return jsonify({'success': True, 'message': 'Verification recorded'})
+        else:
+            return jsonify({'success': False, 'message': 'No prediction found to verify'})
+
+    except Exception as e:
+        logger.error("Error recording verification: %s", traceback.format_exc())
+        return jsonify({'error': 'An internal error occurred'}), 500
+
+
+########################################################################
+# Agent Chat Routes
+########################################################################
+
+def _get_agent_sandbox():
+    """Get the safety sandbox for agent interactions."""
+    from potato.agent_proxy import SafetySandbox
+    agent_config = config.get("agent_proxy", {})
+    return SafetySandbox(agent_config)
+
+
+def _get_or_create_agent_session(username, instance_id):
+    """Get an existing agent session or create a new one."""
+    from potato.agent_proxy import (
+        get_agent_session_manager, AgentProxyFactory
+    )
+    mgr = get_agent_session_manager()
+    session_obj = mgr.get_session(username, instance_id)
+    if session_obj:
+        return session_obj
+
+    # Create a new session
+    proxy = AgentProxyFactory.create(config)
+    item = get_item_state_manager().get_item(instance_id)
+    task_desc = ""
+    if item:
+        data = item.get_data()
+        # Look for task_description in item data
+        task_desc = data.get("task_description", data.get("text", ""))
+        if isinstance(task_desc, list):
+            task_desc = " ".join(str(t) for t in task_desc)
+
+    return mgr.create_session(username, instance_id, proxy, str(task_desc))
+
+
+@app.route("/agent_chat/send", methods=["POST"])
+def agent_chat_send():
+    """Send a message to the agent and get a response."""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    if user_state.get_phase() != UserPhase.ANNOTATION:
+        return jsonify({"error": "Not in annotation phase"}), 400
+
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "Empty message"}), 400
+
+    item = user_state.get_current_instance()
+    instance_id = item.get_id()
+
+    try:
+        sandbox = _get_agent_sandbox()
+
+        # Get or create session
+        agent_session = _get_or_create_agent_session(username, instance_id)
+
+        if agent_session.finished:
+            return jsonify({"error": "Chat session already finished"}), 400
+
+        # Safety checks
+        sandbox.check_step_limit(agent_session.step_count)
+        sandbox.check_session_timeout(agent_session.started_at)
+        sandbox.check_rate_limit(username)
+
+        # Record user message
+        from potato.agent_proxy import AgentMessage
+        user_msg = AgentMessage(role="user", content=message)
+        agent_session.messages.append(user_msg)
+
+        # Send to agent (blocking)
+        response = agent_session.proxy.send_message(
+            message, agent_session.proxy_context
+        )
+        agent_session.messages.append(response.message)
+        agent_session.step_count += 1
+
+        return jsonify({
+            "content": response.message.content,
+            "role": response.message.role,
+            "step_count": agent_session.step_count,
+            "max_steps": sandbox.max_steps,
+            "error": response.error,
+        })
+
+    except Exception as e:
+        # Surface sandbox violations (step limit, timeout, rate limit) directly
+        from potato.agent_proxy.sandbox import SandboxViolation
+        if isinstance(e, SandboxViolation):
+            return jsonify({"error": str(e)}), 400
+        logger.error("Agent chat send error: %s", traceback.format_exc())
+        return jsonify({"error": "An internal error occurred"}), 400
+
+
+@app.route("/agent_chat/finish", methods=["POST"])
+def agent_chat_finish():
+    """Finish the chat and write conversation data to the item."""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    if user_state.get_phase() != UserPhase.ANNOTATION:
+        return jsonify({"error": "Not in annotation phase"}), 400
+
+    item = user_state.get_current_instance()
+    instance_id = item.get_id()
+
+    try:
+        from potato.agent_proxy import get_agent_session_manager
+        mgr = get_agent_session_manager()
+        agent_session = mgr.get_session(username, instance_id)
+
+        if not agent_session:
+            return jsonify({"error": "No active chat session"}), 400
+
+        if agent_session.finished:
+            return jsonify({"error": "Chat session already finished"}), 400
+
+        # Convert messages to conversation data (agent_trace format)
+        conversation = []
+        for msg in agent_session.messages:
+            speaker = "User" if msg.role == "user" else "Agent"
+            if msg.role == "error":
+                speaker = "System (Error)"
+            conversation.append({
+                "speaker": speaker,
+                "text": msg.content,
+                "timestamp": msg.timestamp,
+            })
+
+        # Write conversation into item data
+        item_data = item.get_data()
+        # Find the conversation field key from instance_display config
+        conv_key = "conversation"
+        display_fields = config.get("instance_display", {}).get("fields", [])
+        for field in display_fields:
+            if field.get("type") == "interactive_chat":
+                conv_key = field.get("key", "conversation")
+                break
+
+        item_data[conv_key] = conversation
+
+        # Mark session as finished
+        agent_session.finished = True
+
+        logger.info(
+            f"Agent chat finished for user={username}, instance={instance_id}, "
+            f"steps={agent_session.step_count}, messages={len(conversation)}"
+        )
+
+        return jsonify({"success": True, "message_count": len(conversation)})
+
+    except Exception as e:
+        logger.error("Agent chat finish error: %s", traceback.format_exc())
+        return jsonify({"error": "An internal error occurred"}), 500
+
+
+@app.route("/agent_chat/status", methods=["GET"])
+def agent_chat_status():
+    """Get the current agent chat session status (for page refresh recovery)."""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    if user_state.get_phase() != UserPhase.ANNOTATION:
+        return jsonify({"active": False})
+
+    item = user_state.get_current_instance()
+    instance_id = item.get_id()
+
+    try:
+        from potato.agent_proxy import get_agent_session_manager
+        mgr = get_agent_session_manager()
+        agent_session = mgr.get_session(username, instance_id)
+
+        if not agent_session or agent_session.finished:
+            return jsonify({"active": False})
+
+        sandbox = _get_agent_sandbox()
+
+        messages = [
+            {"role": msg.role, "content": msg.content}
+            for msg in agent_session.messages
+        ]
+
+        return jsonify({
+            "active": True,
+            "messages": messages,
+            "step_count": agent_session.step_count,
+            "max_steps": sandbox.max_steps,
+        })
+
+    except Exception:
+        return jsonify({"active": False})
+
+
+@app.route("/go_to", methods=["GET", "POST"])
+def go_to():
+    """
+    Handle requests to go to a specific instance.
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    # Check that the user is in the annotation phase
+    if user_state.get_phase() != UserPhase.ANNOTATION:
+        # If not in the annotation phase, redirect
+        return home()
+
+    if request.method == 'POST':
+        logger.debug(f'POST -> GO_TO: {request.form}')
+        go_to_id(username, request.form.get("go_to"))
+
+    # Prevent browser caching so window.location.reload() always gets fresh content
+    response = make_response(render_page_with_annotations(username))
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return response
+
+@app.route('/get_annotations', methods=['GET'])
+def get_annotations():
+    """Get annotations for the current user and instance."""
+    try:
+        # Get user from session
+        if 'username' not in session:
+            return jsonify({"error": "No user session"}), 401
+
+        username = session['username']
+
+        # Get instance ID from query parameters
+        instance_id = request.args.get('instance_id')
+        if not instance_id:
+            return jsonify({"error": "No instance_id provided"}), 400
+
+        # Get user state
+        user_state = get_user_state_manager().get_user_state(username)
+        if not user_state:
+            return jsonify({"error": "User not found"}), 404
+
+        # Get annotations for the instance
+        label_annotations = user_state.get_label_annotations(instance_id)
+        span_annotations = user_state.get_span_annotations(instance_id)
+
+        # label_annotations is keyed by Label objects (schema, name) ->
+        # value; that is not JSON-serializable. Flatten to
+        # {schema: [selected label names]} (skip falsy/unset values).
+        serializable_label_annotations = {}
+        for lbl, value in (label_annotations or {}).items():
+            if value in (False, None, "", 0):
+                continue
+            schema = getattr(lbl, "schema", None)
+            name = getattr(lbl, "name", None)
+            if schema is None or name is None:
+                # Already-serialized or unexpected shape; keep as-is.
+                serializable_label_annotations.setdefault(
+                    str(lbl), value)
+                continue
+            serializable_label_annotations.setdefault(
+                schema, []).append(name)
+
+        # Convert span annotations to serializable format
+        serializable_span_annotations = {}
+        for span, value in span_annotations.items():
+            serializable_span_annotations[str(span)] = value
+
+        # Combine annotations
+        annotations = {
+            "label_annotations": serializable_label_annotations,
+            "span_annotations": serializable_span_annotations
+        }
+
+        return jsonify(annotations)
+
+    except Exception as e:
+        logger.error(f"Error getting annotations: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route("/api/current_instance", methods=["GET"])
+def get_current_instance():
+    """Get the current instance information for the current user."""
+    logger.debug(f"=== GET_CURRENT_INSTANCE START ===")
+
+    if 'username' not in session:
+        logger.warning("Get current instance without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Guard: only return instance data during annotation phase
+        if user_state.get_phase() != UserPhase.ANNOTATION:
+            logger.debug(f"User {username} not in annotation phase, no current instance")
+            return jsonify({"error": "Not in annotation phase"}), 404
+
+        current_instance = user_state.get_current_instance()
+        if not current_instance:
+            logger.error(f"No current instance for user: {username}")
+            return jsonify({"error": "No current instance"}), 404
+
+        instance_id = current_instance.get_id()
+        logger.debug(f"Current instance ID: {instance_id}")
+
+        # Include raw data for schemas that need access to media URLs
+        raw_data = current_instance.get_data()
+
+        return jsonify({
+            "instance_id": instance_id,
+            "current_index": user_state.get_current_instance_index(),
+            "total_instances": len(user_state.instance_id_ordering),
+            "data": raw_data  # Include full instance data
+        })
+
+    except Exception as e:
+        logger.error("Error getting current instance: %s", traceback.format_exc())
+        return jsonify({"error": "An internal error occurred"}), 500
+
+
+@app.route("/api/instance_data", methods=["GET"])
+def get_instance_data():
+    """Get the full raw data for the current instance.
+
+    Returns all fields from the original data file (e.g., audio_url, video_url, etc.)
+    This is used by annotation schemas that need access to media URLs.
+    """
+    logger.debug(f"=== GET_INSTANCE_DATA START ===")
+
+    if 'username' not in session:
+        logger.warning("Get instance data without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Guard: only return instance data during annotation phase
+        if user_state.get_phase() != UserPhase.ANNOTATION:
+            logger.debug(f"User {username} not in annotation phase, no instance data")
+            return jsonify({"error": "Not in annotation phase"}), 404
+
+        current_instance = user_state.get_current_instance()
+        if not current_instance:
+            logger.error(f"No current instance for user: {username}")
+            return jsonify({"error": "No current instance"}), 404
+
+        # Get the raw data from the instance
+        raw_data = current_instance.get_data()
+        logger.debug(f"Returning instance data with keys: {list(raw_data.keys())}")
+
+        return jsonify(raw_data)
+
+    except Exception as e:
+        logger.error("Error getting instance data: %s", traceback.format_exc())
+        return jsonify({"error": "An internal error occurred"}), 500
+
+
+@app.route("/api/spans/<instance_id>")
+def get_span_data(instance_id):
+    """
+    Get span annotations as structured data for frontend rendering.
+
+    Returns:
+        JSON with instance text and span annotations in a format
+        suitable for frontend DOM manipulation.
+    """
+    logger.debug(f"=== GET_SPAN_DATA START ===")
+    logger.debug(f"Instance ID: {instance_id}")
+
+    # Add debugging for URL decoding
+    import urllib.parse
+    decoded_instance_id = urllib.parse.unquote(instance_id)
+    logger.debug(f"Decoded Instance ID: {decoded_instance_id}")
+    logger.debug(f"Instance ID length: {len(instance_id)}")
+    logger.debug(f"Decoded Instance ID length: {len(decoded_instance_id)}")
+
+    if 'username' not in session:
+        logger.warning("Get span data without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    # Get the original text for this instance
+    try:
+        # Get the text from the item state manager
+        item_state_manager = get_item_state_manager()
+
+        # Try with original instance_id first
+        instance = item_state_manager.get_item(instance_id)
+        if not instance:
+            logger.debug(f"Instance not found with original ID, trying decoded ID")
+            # Try with decoded instance_id
+            instance = item_state_manager.get_item(decoded_instance_id)
+            if instance:
+                logger.debug(f"Instance found with decoded ID")
+                instance_id = decoded_instance_id  # Use decoded ID for rest of function
+            else:
+                logger.error(f"Instance not found with either original or decoded ID")
+                # Debug: list all available instance IDs
+                all_instance_ids = list(item_state_manager.instance_id_to_instance.keys())
+                logger.debug(f"Available instance IDs: {all_instance_ids[:5]}...")  # Show first 5
+                logger.debug(f"Total available instances: {len(all_instance_ids)}")
+                return jsonify({"error": "Instance not found"}), 404
+        else:
+            logger.debug(f"Instance found with original ID")
+
+        # Use configured text_key to get the right field, not generic get_text()
+        text_key = config.get("item_properties", {}).get("text_key", "text")
+        item_data = instance.get_data()
+        original_text = item_data.get(text_key, instance.get_text()) if isinstance(item_data, dict) else instance.get_text()
+        logger.debug(f"Original text (raw, text_key={text_key}): {str(original_text)[:100]}...")
+
+        # IMPORTANT: Normalize text the same way as flask_server.py template rendering
+        # This ensures span offsets calculated on normalized text match the API response
+        # 1. Strip HTML tags
+        import re as re_module
+        original_text = str(original_text)
+        normalized_text = re_module.sub(r'<[^>]+>', '', original_text)
+        # 2. Normalize whitespace (multiple spaces/newlines -> single space)
+        normalized_text = re_module.sub(r'\s+', ' ', normalized_text).strip()
+        logger.debug(f"Normalized text: {normalized_text[:100]}...")
+    except Exception as e:
+        logger.error(f"Error getting instance text: {e}")
+        return jsonify({"error": f"Instance not found: {instance_id}"}), 404
+
+    # Get span annotations (returns a list of SpanAnnotation objects)
+    spans = get_span_annotations_for_user_on(username, instance_id)
+    logger.debug(f"Found {len(spans)} spans")
+
+    # Convert to frontend-friendly format
+    span_data = []
+    for span in spans:
+        # span is a SpanAnnotation object
+        span_schema = span.get_schema() if hasattr(span, 'get_schema') else span.schema
+        span_name = span.get_name() if hasattr(span, 'get_name') else span.name
+        span_title = span.get_title() if hasattr(span, 'get_title') else getattr(span, 'title', span_name)
+        span_start = span.get_start() if hasattr(span, 'get_start') else span.start
+        span_end = span.get_end() if hasattr(span, 'get_end') else span.end
+        span_id = span.get_id() if hasattr(span, 'get_id') else getattr(span, 'id', None)
+
+        color = get_span_color(span_schema, span_name)
+        hex_color = None
+        if color:
+            if isinstance(color, str) and color.startswith("(") and color.endswith(")"):
+                try:
+                    rgb_parts = color.strip("()").split(", ")
+                    if len(rgb_parts) == 3:
+                        r, g, b = int(rgb_parts[0]), int(rgb_parts[1]), int(rgb_parts[2])
+                        hex_color = f"#{r:02x}{g:02x}{b:02x}"
+                except (ValueError, IndexError):
+                    hex_color = "#f0f0f0"
+            else:
+                hex_color = color
+
+        span_target_field = span.get_target_field() if hasattr(span, 'get_target_field') else getattr(span, 'target_field', None)
+
+        # Use the correct field text for extracting span text
+        # In multi-field mode, each span's offsets are relative to its target field's text
+        span_source_text = normalized_text  # default: text_key field
+        if span_target_field and isinstance(item_data, dict) and span_target_field in item_data:
+            field_data = item_data[span_target_field]
+
+            # Check if this field is a dialogue display (offsets are DOM-based)
+            from potato.server_utils.displays.base import (
+                concatenate_dialogue_text,
+                reconstruct_dialogue_dom_text,
+            )
+            display_fields = config.get("instance_display", {}).get("fields", [])
+            field_cfg = next(
+                (f for f in display_fields if f.get("key") == span_target_field),
+                None,
+            )
+            is_dialogue = field_cfg and field_cfg.get("type") == "dialogue"
+
+            if is_dialogue and isinstance(field_data, list):
+                opts = field_cfg.get("display_options", {})
+                field_text = reconstruct_dialogue_dom_text(
+                    field_data,
+                    speaker_key=opts.get("speaker_key", "speaker"),
+                    text_key=opts.get("text_key", "text"),
+                    show_turn_numbers=opts.get("show_turn_numbers", False),
+                )
+            elif isinstance(field_data, list):
+                field_text = concatenate_dialogue_text(field_data)
+                field_text = re_module.sub(r'<[^>]+>', '', field_text)
+                field_text = re_module.sub(r'\s+', ' ', field_text).strip()
+            else:
+                field_text = str(field_data)
+                field_text = re_module.sub(r'<[^>]+>', '', field_text)
+                field_text = re_module.sub(r'\s+', ' ', field_text).strip()
+            span_source_text = field_text
+
+        span_entry = {
+            'id': span_id,
+            'schema': span_schema,
+            'label': span_name,
+            'title': span_title,
+            'start': span_start,
+            'end': span_end,
+            'text': span_source_text[span_start:span_end] if span_start < len(span_source_text) and span_end <= len(span_source_text) else "",
+            'color': hex_color
+        }
+        if span_target_field:
+            span_entry['target_field'] = span_target_field
+
+        # Include additional_parts for discontinuous spans
+        additional_parts = span.get_additional_parts() if hasattr(span, 'get_additional_parts') else getattr(span, 'additional_parts', [])
+        if additional_parts:
+            span_entry['additional_parts'] = additional_parts
+
+        # Include entity linking data if present
+        kb_id = span.get_kb_id() if hasattr(span, 'get_kb_id') else getattr(span, 'kb_id', None)
+        kb_source = span.get_kb_source() if hasattr(span, 'get_kb_source') else getattr(span, 'kb_source', None)
+        kb_label = span.get_kb_label() if hasattr(span, 'get_kb_label') else getattr(span, 'kb_label', None)
+        if kb_id and kb_source:
+            span_entry['kb_id'] = kb_id
+            span_entry['kb_source'] = kb_source
+            if kb_label:
+                span_entry['kb_label'] = kb_label
+
+        # Include format-specific coordinates (PDF page/bbox/anchor_kind) so the
+        # client can rebuild PDF anchors (text highlights + region boxes) on load.
+        format_coords = span.get_format_coords() if hasattr(span, 'get_format_coords') else getattr(span, 'format_coords', None)
+        if format_coords:
+            span_entry['format_coords'] = format_coords
+
+        span_data.append(span_entry)
+
+    response_data = {
+        'instance_id': instance_id,
+        'text': normalized_text,  # Use normalized text matching template rendering
+        'spans': span_data
+    }
+
+    logger.debug(f"=== GET_SPAN_DATA END ===", response_data)
+    return jsonify(response_data)
+
+
+@app.route("/updateinstance", methods=["POST"])
+def update_instance():
+    """
+    PRIMARY ANNOTATION ENDPOINT: Handle all annotation updates for instances.
+    This endpoint only updates backend state for spans and labels. It does not generate or return any HTML.
+
+    Supports two formats:
+    1. Frontend format: {"instance_id": "...", "annotations": {...}, "span_annotations": [...]}
+    2. Backend format: {"instance_id": "...", "schema": "...", "state": [...], "type": "..."}
+    """
+    import time
+    import datetime
+    from potato.annotation_history import AnnotationHistoryManager
+
+    start_time = time.time()
+
+    logger.debug("=== UPDATEINSTANCE ROUTE START ===")
+    logger.debug(f"Session: {dict(session)}")
+    logger.debug(f"Session username: {session.get('username', 'NOT_SET')}")
+    logger.debug(f"Request content type: {request.content_type}")
+    logger.debug(f"Request is JSON: {request.is_json}")
+    logger.debug(f"Debug mode: {config.get('debug', False)}")
+
+    if 'username' not in session:
+        logger.warning("Update instance without active session")
+        return jsonify({"status": "error", "message": "No active session"})
+
+    if request.is_json:
+        logger.debug(f"Received JSON data: {request.json}")
+        raw_instance_id = request.json.get("instance_id")
+        if raw_instance_id is None or str(raw_instance_id).strip() == "":
+            logger.warning(f"Received update with null/empty instance_id from user {session.get('username')}")
+            return jsonify({"status": "error", "message": "Missing instance_id"})
+        instance_id = str(raw_instance_id)  # Normalize to string
+        username = session['username']
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"status": "error", "message": "User state not found"})
+
+        # Synthetic phase-page saves use a sentinel instance ID from annotation.js.
+        # They should be routed by the current user phase instead of assignment checks.
+        is_phase_page_update = instance_id == "__phase_page__"
+
+        # Guard: reject updates for instances not assigned to this user.
+        # Skip this for synthetic phase-page updates so non-annotation page autosaves
+        # do not get treated like dataset item writes.
+        if user_state.get_phase() == UserPhase.ANNOTATION and not is_phase_page_update:
+            assigned_ids = user_state.get_assigned_instance_ids()
+            if assigned_ids and instance_id not in assigned_ids:
+                logger.warning(f"User {username} tried to update unassigned instance {instance_id}")
+                return jsonify({"status": "error", "message": "Instance not assigned to user"})
+
+        # If a synthetic phase-page save arrives while the backend still thinks the user
+        # is in annotation, acknowledge it without writing item state. This avoids a
+        # noisy warning/error path during end-of-annotation transitions.
+        if user_state.get_phase() == UserPhase.ANNOTATION and is_phase_page_update:
+            logger.info(
+                f"Ignoring synthetic phase-page update for user {username} while still in annotation phase"
+            )
+            return jsonify({"status": "ok", "message": "Ignored synthetic phase-page update"})
+
+        # Debug: Log user phase for debugging annotation storage issues
+        logger.debug(f"User '{username}' phase: {user_state.get_phase()}, current_phase_and_page: {user_state.current_phase_and_page}")
+
+        # Track session
+        if not user_state.session_start_time:
+            user_state.start_session(session.get('session_id', str(uuid.uuid4())))
+
+        # Get client timestamp if provided
+        client_timestamp = None
+        if request.json.get("client_timestamp"):
+            try:
+                client_timestamp = datetime.datetime.fromisoformat(request.json["client_timestamp"])
+            except ValueError:
+                logger.warning(f"Invalid client timestamp format: {request.json['client_timestamp']}")
+
+        # Prepare metadata
+        metadata = {
+            "request_id": request.json.get("request_id"),
+            "user_agent": request.headers.get("User-Agent"),
+            "ip_address": request.remote_addr,
+            "content_type": request.content_type,
+            "request_size": len(request.get_data()) if request.get_data() else 0
+        }
+
+        # Capture whether this instance already had annotations BEFORE we mutate
+        # state, so the webhook below can correctly distinguish annotation.created
+        # from annotation.updated. F-032.
+        _had_prior_annotation = bool(
+            getattr(user_state, "instance_id_to_label_to_value", {}).get(instance_id)
+        )
+
+        # Check if this is the frontend format (annotations, span_annotations, link_annotations, event_annotations)
+        if "annotations" in request.json or "span_annotations" in request.json or "link_annotations" in request.json or "event_annotations" in request.json:
+            logger.debug("Processing frontend format (annotations, span_annotations)")
+
+            # Handle label annotations from frontend format
+            annotations = request.json.get("annotations", {})
+
+            # Guard against malformed payloads: `annotations` must be a mapping.
+            # A non-dict (e.g. a JSON string or list) would crash the .items()
+            # loop below with AttributeError → an unhandled HTTP 500 (F-046).
+            # Reject cleanly instead.
+            if not isinstance(annotations, dict):
+                logger.warning(
+                    f"Rejected /updateinstance from {username}: 'annotations' is "
+                    f"{type(annotations).__name__}, expected object")
+                return jsonify({"status": "error",
+                                "message": "'annotations' must be an object"})
+
+            # Pre-clear stale labels for radio/multiselect schemas.
+            # The client always sends the COMPLETE current state, so any label
+            # not in the incoming set should be removed. Without this, deselected
+            # radio options or unchecked checkboxes persist as stale data.
+            _exclusive_types = {'radio', 'multiselect'}
+            _schema_type_cache = {}
+            # Resolve the user's cohort schemes so exclusive-label clearing keys
+            # off the schemes this user actually sees (falls back to global).
+            try:
+                from potato.server_utils.cohort_schemes import get_cohort_scheme_resolver
+                _user_schemes = get_cohort_scheme_resolver().get_schemes_for_user(username)
+            except Exception:
+                _user_schemes = config.get('annotation_schemes', [])
+            for scheme in _user_schemes:
+                _schema_type_cache[scheme.get('name')] = scheme.get('annotation_type')
+
+            # Collect which schemas appear in the incoming annotations
+            _incoming_schemas = set()
+            for key in annotations:
+                sep = ":::" if ":::" in key else (":" if ":" in key else None)
+                if sep:
+                    _incoming_schemas.add(key.split(sep, 1)[0])
+
+            # For each exclusive schema, remove all existing labels
+            if instance_id in user_state.instance_id_to_label_to_value:
+                for schema_name_to_clear in _incoming_schemas:
+                    if _schema_type_cache.get(schema_name_to_clear) in _exclusive_types:
+                        labels_to_remove = [
+                            lbl for lbl in user_state.instance_id_to_label_to_value[instance_id]
+                            if isinstance(lbl, Label) and lbl.get_schema() == schema_name_to_clear
+                        ]
+                        for lbl in labels_to_remove:
+                            del user_state.instance_id_to_label_to_value[instance_id][lbl]
+
+            for key, value in annotations.items():
+                if ":::" in key:
+                    # Use ::: separator for image/audio/video annotation data
+                    # e.g., "video_segments:::_data" -> schema="video_segments", label="_data"
+                    schema_name, label_name = key.split(":::", 1)
+                    label = Label(schema_name, label_name)
+                elif ":" in key:
+                    # Legacy format with single colon
+                    schema_name, label_name = key.split(":", 1)
+                    label = Label(schema_name, label_name)
+                else:
+                    logger.warning(f"Skipping annotation with no separator: {key}")
+                    continue
+
+                # Get old value for comparison
+                old_value = None
+                if instance_id in user_state.instance_id_to_label_to_value:
+                    old_value = user_state.instance_id_to_label_to_value[instance_id].get(label)
+
+                # Determine action type
+                action_type = "add_label" if old_value is None else "update_label"
+
+                # Create annotation action
+                action = AnnotationHistoryManager.create_action(
+                    user_id=username,
+                    instance_id=instance_id,
+                    action_type=action_type,
+                    schema_name=schema_name,
+                    label_name=label_name,
+                    old_value=old_value,
+                    new_value=value,
+                    session_id=user_state.current_session_id,
+                    client_timestamp=client_timestamp,
+                    metadata=metadata
+                )
+
+                # Add to history
+                user_state.add_annotation_action(action)
+
+                # Update annotation
+                user_state.add_label_annotation(instance_id, label, value)
+                logger.debug(f"Added label annotation: {schema_name}:{label_name} = {value[:100]}..." if len(str(value)) > 100 else f"Added label annotation: {schema_name}:{label_name} = {value}")
+
+            # Record human↔judge comparison for the alignment loop (inline mode).
+            _record_judge_comparison_if_enabled(username, instance_id)
+
+            # Handle span annotations from frontend format
+            span_annotations = request.json.get("span_annotations", [])
+            for span_data in span_annotations:
+                if isinstance(span_data, dict) and "schema" in span_data:
+                    # Format-specific coordinates (PDF page/bbox, spreadsheet cell,
+                    # etc). Previously dropped here, so PDF anchor geometry never
+                    # persisted. anchor_kind/page are folded into the deterministic
+                    # ID so a text span and a region anchor at the same char offsets
+                    # (start==end==0 for regions) don't collide.
+                    fc = span_data.get("format_coords") or {}
+                    span_id = span_data.get("id") or span_data.get("span_id") or \
+                              (f"{span_data['schema']}_{span_data['name']}_"
+                               f"{fc.get('anchor_kind', '')}_{fc.get('page', '')}_"
+                               f"{span_data['start']}_{span_data['end']}")
+
+                    span = SpanAnnotation(
+                        span_data["schema"],
+                        span_data["name"],
+                        span_data.get("title", span_data["name"]),
+                        int(span_data["start"]),
+                        int(span_data["end"]),
+                        id=span_id,
+                        target_field=span_data.get("target_field"),
+                        format_coords=span_data.get("format_coords"),
+                    )
+                    value = span_data.get("value")
+
+                    if value is not None:
+                        # Get old value for comparison
+                        old_value = None
+                        if instance_id in user_state.instance_id_to_span_to_value:
+                            old_value = user_state.instance_id_to_span_to_value[instance_id].get(span)
+
+                        # Determine action type
+                        action_type = "add_span" if old_value is None else "update_span"
+
+                        # Create annotation action
+                        action = AnnotationHistoryManager.create_action(
+                            user_id=username,
+                            instance_id=instance_id,
+                            action_type=action_type,
+                            schema_name=span_data["schema"],
+                            label_name=span_data["name"],
+                            old_value=old_value,
+                            new_value=value,
+                            span_data={
+                                "start": span_data["start"],
+                                "end": span_data["end"],
+                                "title": span_data.get("title", span_data["name"])
+                            },
+                            session_id=user_state.current_session_id,
+                            client_timestamp=client_timestamp,
+                            metadata=metadata
+                        )
+
+                        # Add to history
+                        user_state.add_annotation_action(action)
+
+                        # Update annotation
+                        user_state.add_span_annotation(instance_id, span, value)
+                        logger.debug(f"Added span annotation: {span_data}")
+                    else:
+                        # value is None -> delete this span BY ID. PDF region
+                        # anchors are zero-length (start==end==0), so matching on
+                        # schema/name/offsets (as the nested-annotations path does)
+                        # would delete the wrong anchor. Match on the exact id and
+                        # cascade orphaned links/events, mirroring that path.
+                        spans_by_id = user_state.instance_id_to_span_to_value.get(instance_id, {})
+                        to_delete = [s for s in spans_by_id.keys() if s.get_id() == span_id]
+                        for s in to_delete:
+                            del user_state.instance_id_to_span_to_value[instance_id][s]
+                            if instance_id in user_state.instance_id_to_link_to_value:
+                                orphaned = [
+                                    lid for lid, link in user_state.instance_id_to_link_to_value[instance_id].items()
+                                    if span_id in link.get_span_ids()
+                                ]
+                                for lid in orphaned:
+                                    del user_state.instance_id_to_link_to_value[instance_id][lid]
+                            logger.debug(f"Deleted span annotation by id: {span_id}")
+
+            # Handle link annotations from frontend format
+            link_annotations = request.json.get("link_annotations", [])
+            for link_data in link_annotations:
+                if isinstance(link_data, dict) and "schema" in link_data and "link_type" in link_data:
+                    from potato.item_state_management import SpanLink
+                    link = SpanLink(
+                        schema=link_data["schema"],
+                        link_type=link_data["link_type"],
+                        span_ids=link_data.get("span_ids", []),
+                        direction=link_data.get("direction", "undirected"),
+                        id=link_data.get("id"),
+                        properties=link_data.get("properties", {})
+                    )
+
+                    # Add or update the link annotation
+                    user_state.add_link_annotation(instance_id, link)
+                    logger.debug(f"Added link annotation: {link}")
+
+            # Handle event annotations from frontend format
+            event_annotations = request.json.get("event_annotations", [])
+            logger.debug(f"Processing {len(event_annotations)} event annotations")
+            for event_data in event_annotations:
+                logger.debug(f"Processing event data: {event_data}")
+                if isinstance(event_data, dict) and "schema" in event_data and "event_type" in event_data:
+                    from potato.item_state_management import EventAnnotation
+
+                    # Log the incoming ID
+                    incoming_id = event_data.get("id")
+                    logger.debug(f"Incoming event ID: {incoming_id}")
+
+                    event = EventAnnotation(
+                        schema=event_data["schema"],
+                        event_type=event_data["event_type"],
+                        trigger_span_id=event_data.get("trigger_span_id", ""),
+                        arguments=event_data.get("arguments", []),
+                        id=incoming_id,
+                        properties=event_data.get("properties", {})
+                    )
+
+                    # Log the actual ID assigned
+                    logger.debug(f"Event object ID after creation: {event.get_id()}")
+
+                    # Add or update the event annotation
+                    user_state.add_event_annotation(instance_id, event)
+
+                    # Log current events count
+                    current_events = user_state.get_event_annotations(instance_id)
+                    logger.debug(f"Added event annotation. Total events for instance: {len(current_events)}")
+                    logger.debug(f"Current event IDs: {list(current_events.keys())}")
+
+        # Check if this is the backend format (schema, state, type)
+        elif "schema" in request.json and "state" in request.json and "type" in request.json:
+            logger.debug("Processing backend format (schema, state, type)")
+
+            schema_name = request.json.get("schema")
+            schema_state = request.json.get("state")
+            annotation_type = request.json.get("type")
+
+            if annotation_type == "span":
+                logger.debug(f"Processing span annotation state: {schema_state}")
+                for sv in schema_state:
+                    # Validate and correct negative offsets
+                    start_offset = int(sv["start"])
+                    end_offset = int(sv["end"])
+
+                    # Correct negative offsets to 0
+                    if start_offset < 0:
+                        start_offset = 0
+                        logger.warning(f"Corrected negative start offset {sv['start']} to 0")
+                    if end_offset < 0:
+                        end_offset = 0
+                        logger.warning(f"Corrected negative end offset {sv['end']} to 0")
+
+                    # Ensure end is not less than start
+                    if end_offset < start_offset:
+                        end_offset = start_offset
+                        logger.warning(f"Corrected end offset {sv['end']} to match start offset {start_offset}")
+
+                    # Get span_id or generate one if not provided
+                    span_id = sv.get("span_id") or sv.get("id") or f"{schema_name}_{sv['name']}_{start_offset}_{end_offset}"
+
+                    # Get additional_parts for discontinuous spans
+                    additional_parts = sv.get("additional_parts", [])
+
+                    span = SpanAnnotation(
+                        schema_name,
+                        sv["name"],
+                        sv.get("title", sv["name"]),
+                        start_offset,
+                        end_offset,
+                        span_id,
+                        target_field=sv.get("target_field"),
+                        additional_parts=additional_parts
+                    )
+
+                    value = sv.get("value")
+
+                    # Get old value for comparison
+                    old_value = None
+                    if instance_id in user_state.instance_id_to_span_to_value:
+                        old_value = user_state.instance_id_to_span_to_value[instance_id].get(span)
+
+                    # Determine action type
+                    if value is None:
+                        action_type = "delete_span"
+                    else:
+                        action_type = "add_span" if old_value is None else "update_span"
+
+                    # Create annotation action
+                    action = AnnotationHistoryManager.create_action(
+                        user_id=username,
+                        instance_id=instance_id,
+                        action_type=action_type,
+                        schema_name=schema_name,
+                        label_name=sv["name"],
+                        old_value=old_value,
+                        new_value=value,
+                        span_data={
+                            "start": start_offset,
+                            "end": end_offset,
+                            "title": sv.get("title", sv["name"])
+                        },
+                        session_id=user_state.current_session_id,
+                        client_timestamp=client_timestamp,
+                        metadata=metadata
+                    )
+
+                    # Add to history
+                    user_state.add_annotation_action(action)
+
+                    # Handle span deletion vs creation/update
+                    if value is None:
+                        # Delete the span - find and remove the matching span
+                        if instance_id in user_state.instance_id_to_span_to_value:
+                            # Find the span to delete by matching properties
+                            spans_to_delete = []
+                            for existing_span in user_state.instance_id_to_span_to_value[instance_id].keys():
+                                if (existing_span.get_schema() == span.get_schema() and
+                                    existing_span.get_name() == span.get_name() and
+                                    existing_span.get_start() == span.get_start() and
+                                    existing_span.get_end() == span.get_end()):
+                                    spans_to_delete.append(existing_span)
+
+                            for span_to_delete in spans_to_delete:
+                                del user_state.instance_id_to_span_to_value[instance_id][span_to_delete]
+                                logger.debug(f"Deleted span annotation: {span_to_delete}")
+
+                                # Clean up orphaned links and events referencing this span
+                                deleted_span_id = span_to_delete.get_id()
+                                if instance_id in user_state.instance_id_to_link_to_value:
+                                    orphaned_links = [
+                                        link_id for link_id, link in user_state.instance_id_to_link_to_value[instance_id].items()
+                                        if deleted_span_id in link.get_span_ids()
+                                    ]
+                                    for link_id in orphaned_links:
+                                        del user_state.instance_id_to_link_to_value[instance_id][link_id]
+                                        logger.debug(f"Removed orphaned link {link_id} referencing deleted span {deleted_span_id}")
+                                if instance_id in user_state.instance_id_to_event_to_value:
+                                    orphaned_events = [
+                                        evt_id for evt_id, evt in user_state.instance_id_to_event_to_value[instance_id].items()
+                                        if deleted_span_id in evt.get_all_span_ids()
+                                    ]
+                                    for evt_id in orphaned_events:
+                                        del user_state.instance_id_to_event_to_value[instance_id][evt_id]
+                                        logger.debug(f"Removed orphaned event {evt_id} referencing deleted span {deleted_span_id}")
+                    else:
+                        # Add or update the span annotation
+                        user_state.add_span_annotation(instance_id, span, value)
+                        logger.debug(f"Added span annotation: {span} with value: {value}")
+            elif annotation_type == "label":
+                for sv in schema_state:
+                    label = Label(schema_name, sv["name"])
+                    value = sv["value"]
+
+                    # Get old value for comparison
+                    old_value = None
+                    if instance_id in user_state.instance_id_to_label_to_value:
+                        old_value = user_state.instance_id_to_label_to_value[instance_id].get(label)
+
+                    # Determine action type
+                    action_type = "add_label" if old_value is None else "update_label"
+                
+                   
+                    # Create annotation action
+                    action = AnnotationHistoryManager.create_action(
+                        user_id=username,
+                        instance_id=instance_id,
+                        action_type=action_type,
+                        schema_name=schema_name,
+                        label_name=sv["name"],
+                        old_value=old_value,
+                        new_value=value,
+                        session_id=user_state.current_session_id,
+                        client_timestamp=client_timestamp,
+                        metadata=metadata
+                    )
+
+                    # Add to history
+                    user_state.add_annotation_action(action)
+
+                    # Update annotation
+                    user_state.add_label_annotation(instance_id, label, value)
+        else:
+            logger.warning("Unknown data format in /updateinstance")
+            return jsonify({"status": "error", "message": "Unknown data format"})
+
+        # Collect all annotations for this instance. Used by both QC validation
+        # and the webhook payload below — must be defined unconditionally, since
+        # webhooks can be enabled without quality control (otherwise the webhook
+        # emit block raises UnboundLocalError and every save 500s). F-030.
+        all_annotations = {}
+        if "annotations" in request.json:
+            for key, value in request.json.get("annotations", {}).items():
+                # Parse schema:label format
+                if ":" in key:
+                    schema_name, label_name = key.split(":", 1)
+                    all_annotations[schema_name] = value
+                else:
+                    all_annotations[key] = value
+        elif "schema" in request.json:
+            schema_name = request.json.get("schema")
+            schema_state = request.json.get("state", [])
+            # Convert state list to dict for validation
+            for sv in schema_state:
+                if "value" in sv:
+                    all_annotations[schema_name] = sv.get("value")
+
+        # Quality control validation (attention checks and gold standards)
+        qc_manager = get_quality_control_manager()
+        qc_result = None
+
+        if qc_manager:
+            # Calculate response time
+            response_time = None
+            if client_timestamp:
+                response_time = (datetime.datetime.now() - client_timestamp).total_seconds()
+
+            # Check if this is an attention check
+            attention_result = qc_manager.validate_attention_response(
+                username, instance_id, all_annotations, response_time
+            )
+
+            if attention_result is not None:
+                qc_result = {"type": "attention_check", **attention_result}
+
+                # Handle blocking
+                if attention_result.get("blocked"):
+                    logger.warning(f"User {username} blocked by attention check")
+                    reclaimed = _reclaim_blocked_user_assignments(
+                        username,
+                        user_state,
+                        current_instance_id=instance_id,
+                    )
+
+                    # Emit webhook for attention check failure
+                    from potato.webhooks import get_webhook_emitter
+                    from potato.webhooks.events import (
+                        build_attention_check_failed_payload,
+                        QUALITY_ATTENTION_CHECK_FAILED,
+                    )
+                    _wh = get_webhook_emitter()
+                    if _wh:
+                        _wh.emit(
+                            QUALITY_ATTENTION_CHECK_FAILED,
+                            build_attention_check_failed_payload(
+                                user_id=username,
+                                instance_id=instance_id,
+                                message=attention_result.get("message"),
+                                blocked=True,
+                            ),
+                        )
+
+                    return jsonify({
+                        "status": "blocked",
+                        "message": attention_result.get("message", "You have been blocked."),
+                        "qc_result": qc_result,
+                        "reclaimed_assignments": reclaimed,
+                    })
+            else:
+                # Check if this is a gold standard
+                gold_result = qc_manager.validate_gold_response(
+                    username, instance_id, all_annotations
+                )
+
+                if gold_result is not None:
+                    qc_result = {"type": "gold_standard", **gold_result}
+
+            # Record regular item for attention check frequency tracking
+            if not qc_manager.is_attention_check(instance_id) and not qc_manager.is_gold_standard(instance_id):
+                qc_manager.record_regular_item(username)
+
+                # Track for gold standard auto-promotion
+                promotion_result = qc_manager.record_item_annotation(
+                    instance_id, username, all_annotations
+                )
+                if promotion_result and promotion_result.get("promoted"):
+                    logger.info(f"Item {instance_id} auto-promoted to gold standard")
+
+        # Calculate processing time
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        # Update the last action's processing time
+        if user_state.annotation_history:
+            user_state.annotation_history[-1].server_processing_time_ms = processing_time_ms
+
+        # Register annotator with item state manager for tracking
+        get_item_state_manager().register_annotator(instance_id, username)
+
+        # Save state
+        get_user_state_manager().save_user_state(user_state)
+        if "annotations" in request.json:
+            _write_readable_audio_annotation(username, instance_id, request.json.get("annotations", {}))
+        logger.debug(f"User state saved for {username}")
+
+        # Emit webhook events for annotation save
+        from potato.webhooks import get_webhook_emitter
+        from potato.webhooks.events import (
+            ANNOTATION_CREATED, ANNOTATION_UPDATED,
+            ITEM_FULLY_ANNOTATED,
+            build_annotation_payload, build_item_fully_annotated_payload,
+        )
+        _wh = get_webhook_emitter()
+        if _wh:
+            _evt = ANNOTATION_UPDATED if _had_prior_annotation else ANNOTATION_CREATED
+            _wh.emit(
+                _evt,
+                build_annotation_payload(
+                    event_type=_evt,
+                    user_id=username,
+                    instance_id=instance_id,
+                    annotations=all_annotations,
+                ),
+            )
+
+            # Check if item is now fully annotated. Use the canonical resolver
+            # for num_annotators_per_item (int or dict.default form); the prior
+            # code read annotation_task_name (a string) and always fell back to
+            # 3, ignoring the configured annotator count. F-031.
+            ism = get_item_state_manager()
+            annotators = ism.get_annotators_for_item(instance_id)
+            try:
+                from potato.server_utils.config_module import resolve_num_annotators_per_item
+                num_annotators = resolve_num_annotators_per_item(config)
+            except Exception:
+                num_annotators = config.get("num_annotators_per_item", 3)
+            if not isinstance(num_annotators, int) or num_annotators < 1:
+                num_annotators = 3
+            if len(annotators) >= num_annotators:
+                _wh.emit(
+                    ITEM_FULLY_ANNOTATED,
+                    build_item_fully_annotated_payload(
+                        instance_id=instance_id,
+                        annotator_count=len(annotators),
+                        required_count=num_annotators,
+                    ),
+                )
+
+            # Emit task.completed once, when this save annotates the user's LAST
+            # remaining assigned item. The documented event had a payload builder
+            # but zero emit sites. Fire-once is guarded by _had_prior_annotation:
+            # a re-save of an already-annotated item won't re-trigger it. F-033.
+            try:
+                assigned = set(user_state.get_assigned_instance_ids() or [])
+                if assigned and not _had_prior_annotation:
+                    annotated = (
+                        set(getattr(user_state, "instance_id_to_label_to_value", {}).keys())
+                        | set(getattr(user_state, "instance_id_to_span_to_value", {}).keys())
+                    ) & assigned
+                    if assigned.issubset(annotated):
+                        from potato.webhooks.events import (
+                            TASK_COMPLETED, build_task_completed_payload,
+                        )
+                        _wh.emit(
+                            TASK_COMPLETED,
+                            build_task_completed_payload(
+                                user_id=username,
+                                total_annotations=len(annotated),
+                            ),
+                        )
+            except Exception as _e:
+                logger.debug(f"task.completed webhook check skipped: {_e}")
+
+        # Trigger MACE competence estimation check
+        from potato.mace_manager import get_mace_manager
+        mace_mgr = get_mace_manager()
+        if mace_mgr and mace_mgr.mace_config.enabled:
+            total = mace_mgr.count_total_annotations()
+            mace_mgr.check_and_run(total)
+
+        # Trigger active-learning retraining check. When enough new annotations
+        # have accumulated, this queues a background train + reorder of the
+        # unlabeled pool; never allowed to break the save.
+        try:
+            from potato.active_learning_manager import get_active_learning_manager
+            al_mgr = get_active_learning_manager()
+            if al_mgr and al_mgr.config.enabled:
+                al_mgr.check_and_trigger_training()
+        except Exception as e:
+            logger.debug("Active learning trigger skipped: %s", e)
+
+        # Stamp this annotation with the codebook revision in effect so
+        # an instance labeled before later code additions can be softly
+        # flagged for review. No-op unless the project uses a codebook;
+        # never allowed to break the save.
+        try:
+            if not is_phase_page_update:
+                from potato.codebook.api import codebook_enabled
+                if codebook_enabled(config):
+                    from potato.codebook import record_annotation
+                    record_annotation(
+                        config.get("task_dir", "."),
+                        config.get("annotation_task_name") or "default",
+                        instance_id, username)
+        except Exception as e:
+            logger.warning(f"Codebook provenance stamp skipped: {e}")
+
+        # Get performance metrics for response
+        performance_metrics = user_state.get_performance_metrics()
+
+        response_data = {
+            "status": "success",
+            "processing_time_ms": processing_time_ms,
+            "performance_metrics": performance_metrics
+        }
+
+        # Include quality control result if present
+        if qc_result:
+            response_data["qc_result"] = qc_result
+
+            # Add warning message if needed
+            if qc_result.get("warning"):
+                response_data["warning"] = True
+                response_data["warning_message"] = qc_result.get("message")
+
+        return jsonify(response_data)
+    else:
+        logger.warning("Update instance called without JSON data")
+        return jsonify({"status": "error", "message": "JSON data required"})
+
+@app.route("/poststudy", methods=["GET", "POST"])
+def poststudy():
+    """
+    Handle the poststudy phase of the annotation process.
+
+    Returns:
+        flask.Response: Rendered template or redirect
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    # Check that the user is in the poststudy phase
+    if user_state.get_phase() != UserPhase.POSTSTUDY:
+        # If not in the poststudy phase, redirect
+        return home()
+
+    # If the user is returning information from the page
+    if request.method == 'POST':
+        logger.debug(f'POSTSTUDY: POST: {request.form}')
+
+        # Advance the state and move to the appropriate next phase
+        usm = get_user_state_manager()
+        usm.advance_phase(session['username'])
+
+        # Redirect to force a clean GET request (fixes POST leakage, issue #124)
+        return redirect(url_for("home"))
+
+    # Show the current poststudy page
+    else:
+        logger.debug("GET <-- POSTSTUDY")
+        return get_current_page_html(config, username)
+
+@app.route("/done", methods=["GET", "POST"])
+def done():
+    """
+    Handle the done phase of the annotation process.
+
+    This route displays the completion page with:
+    - A thank you message
+    - The completion code (if configured)
+    - A redirect link to Prolific (if configured)
+
+    Returns:
+        flask.Response: Rendered template or redirect
+    """
+    if 'username' not in session:
+        return home()
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    # Check that the user is in the done phase
+    if user_state.get_phase() != UserPhase.DONE:
+        # If not in the done phase, redirect
+        return home()
+
+    # Get completion code from config
+    completion_code = config.get("completion_code", "")
+
+    login_config = config.get('login', {})
+    login_type = login_config.get('type', 'standard')
+
+    from potato.crowdsourcing import CompletionOutcome, ParticipantIdentity, get_crowd_provider
+    provider = get_crowd_provider()
+    if provider is None and login_type in ['url_direct', 'prolific']:
+        from potato.crowdsourcing import init_crowd_provider
+        provider = init_crowd_provider(config)
+
+    # Legacy template variables are still passed alongside `action` so that
+    # customized done.html templates keep working for one release.
+    action = None
+    prolific_redirect_url = None
+    mturk_submit_url = None
+    mturk_assignment_id = None
+    auto_redirect = config.get('auto_redirect_on_completion', False)
+    auto_redirect_delay = config.get('auto_redirect_delay', 5000)  # milliseconds
+
+    if provider is not None:
+        extra = dict(session.get('crowd_extra') or {})
+        if session.get('mturk_assignment_id'):
+            extra.setdefault('assignmentId', session['mturk_assignment_id'])
+        if session.get('mturk_submit_to'):
+            extra.setdefault('turkSubmitTo', session['mturk_submit_to'])
+        identity = ParticipantIdentity(
+            worker_id=username,
+            session_id=session.get('crowd_session_id') or session.get('prolific_session_id'),
+            study_id=session.get('crowd_study_id') or session.get('prolific_study_id'),
+            extra=extra,
+        )
+
+        # Participants blocked by attention checks get the provider's
+        # failure/screen-out completion code instead of the success code
+        outcome = CompletionOutcome.COMPLETED
+        try:
+            from potato.quality_control import get_quality_control_manager
+            qc_manager = get_quality_control_manager()
+            if qc_manager is not None and qc_manager.is_user_blocked(username):
+                outcome = CompletionOutcome.FAILED_CHECKS
+        except Exception as e:
+            logger.debug(f"Could not evaluate quality-control block state: {e}")
+
+        # Flush the user's state to disk BEFORE rendering any completion
+        # action: an auto-redirect must never race the final save.
+        try:
+            get_user_state_manager().save_user_state(user_state)
+        except Exception as e:
+            logger.warning(f"Could not flush user state before completion redirect: {e}")
+
+        try:
+            provider.on_completion(identity, outcome)
+        except Exception as e:
+            logger.warning(f"Crowd provider completion callback failed: {e}")
+
+        action = provider.completion_action(identity, outcome)
+        completion_code = action.code or completion_code
+        if action.kind == 'redirect':
+            prolific_redirect_url = action.redirect_url
+            auto_redirect = action.auto_redirect
+            auto_redirect_delay = action.auto_redirect_delay
+        elif action.kind == 'post_form':
+            mturk_submit_url = action.form_action
+            mturk_assignment_id = action.form_fields.get('assignmentId')
+
+    # Show the completion page
+    return render_template("done.html",
+                          title=config.get("annotation_task_name", "Annotation Platform"),
+                          action=action,
+                          completion_code=completion_code,
+                          prolific_redirect_url=prolific_redirect_url,
+                          mturk_submit_url=mturk_submit_url,
+                          mturk_assignment_id=mturk_assignment_id,
+                          auto_redirect=auto_redirect,
+                          auto_redirect_delay=auto_redirect_delay)
+
+def _annotator_dashboard_config():
+    """Return the normalized annotator_dashboard config block.
+
+    Disabled (returns enabled=False) unless explicitly turned on. Accepts a
+    bare ``annotator_dashboard: true`` shorthand as well as a dict.
+    """
+    raw = config.get("annotator_dashboard", False)
+    if raw is True:
+        raw = {"enabled": True}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "show_project_progress": bool(raw.get("show_project_progress", True)),
+        "show_personal_progress": bool(raw.get("show_personal_progress", True)),
+        "show_active_annotators": bool(raw.get("show_active_annotators", False)),
+    }
+
+
+@app.route("/progress", methods=["GET"])
+def annotator_progress():
+    """
+    Read-only, opt-in progress dashboard for annotators.
+
+    Shows ONLY project-level aggregate progress and the requesting annotator's
+    own stats. Never exposes other annotators' identities, admin actions, or
+    configuration. Disabled by default (see annotator_dashboard config).
+    """
+    dash = _annotator_dashboard_config()
+    if not dash["enabled"]:
+        # Feature off: behave as if the route does not exist.
+        return home()
+
+    if 'username' not in session:
+        return home()
+
+    return render_template(
+        "annotator_dashboard.html",
+        title=config.get("annotation_task_name", "Annotation Platform"),
+        annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+        dashboard_config=dash,
+    )
+
+
+@app.route("/progress/api/summary", methods=["GET"])
+def annotator_progress_summary():
+    """JSON progress numbers for the annotator dashboard (read-only)."""
+    dash = _annotator_dashboard_config()
+    if not dash["enabled"]:
+        return jsonify({"error": "Not found"}), 404
+
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+
+    from potato.server_utils.progress_stats import (
+        compute_project_progress,
+        compute_personal_progress,
+    )
+
+    result = {}
+
+    if dash["show_project_progress"]:
+        project = compute_project_progress()
+        project_out = {
+            "total_items": project["total_items"],
+            "items_with_annotations": project["items_with_annotations"],
+            "completion_percentage": project["completion_percentage"],
+            "total_annotations": project["total_annotations"],
+        }
+        # active annotators is a COUNT only and separately gated
+        if dash["show_active_annotators"]:
+            project_out["active_annotators"] = project["active_annotators"]
+        result["project"] = project_out
+
+    if dash["show_personal_progress"]:
+        # Only ever the requesting user's own data.
+        result["personal"] = compute_personal_progress(username)
+
+    return jsonify(result)
+
+
+@app.route("/admin", methods=["GET"])
+def admin():
+    """
+    Serve the admin dashboard page.
+
+    This route serves the main admin dashboard interface with API key authentication.
+    The dashboard provides comprehensive system monitoring and management capabilities.
+
+    Returns:
+        flask.Response: Rendered admin dashboard template or login form
+    """
+    # Check if admin API key is provided in session or headers
+    api_key = request.headers.get('X-API-Key') or session.get('admin_api_key')
+
+    if not validate_admin_api_key(api_key):
+        # Show API key entry form
+        return render_template("admin_login.html",
+                             title=config.get("annotation_task_name", "Admin Dashboard"))
+
+    # Store API key in session for future requests
+    session['admin_api_key'] = api_key
+
+    # Check if embedding visualization is available
+    from potato.embedding_visualization import get_embedding_viz_manager
+    viz_manager = get_embedding_viz_manager()
+    embedding_viz_enabled = viz_manager is not None and viz_manager.enabled
+
+    # Get basic context for the dashboard
+    context = {
+        "annotation_task_name": config.get("annotation_task_name", "Annotation Platform"),
+        "debug_mode": config.get("debug", False),
+        "admin_api_key": get_admin_api_key() or "",
+        "mace_enabled": config.get("mace", {}).get("enabled", False),
+        "bws_enabled": bool(config.get("bws_config")),
+        "embedding_viz_enabled": embedding_viz_enabled,
+        "datasets_enabled": config.get("datasets", {}).get("enabled", False),
+        "judge_calibration_enabled": config.get("judge_calibration", {}).get("enabled", False),
+        "triage_enabled": config.get("triage", {}).get("enabled", False),
+        "automation_enabled": config.get("automation", {}).get("enabled", False),
+        "curation_enabled": config.get("curation", {}).get("enabled", False),
+        "arena_enabled": config.get("arena", {}).get("enabled", False),
+    }
+
+    return render_template("admin.html", **context)
+
+
+
+
+
+
+
+@app.route("/api-frontend", methods=["GET"])
+def api_frontend():
+    """
+    Serve the API-based frontend interface.
+
+    This route serves a modern single-page application that uses API calls
+    to interact with the backend instead of server-side rendering.
+
+    Returns:
+        flask.Response: Rendered API frontend template
+    """
+    if 'username' not in session:
+        return redirect(url_for("home"))
+
+
+    username = session['username']
+
+    # Ensure user state exists
+    if not get_user_state_manager().has_user(username):
+        logger.info(f"Creating missing user state for {username}")
+        init_user_state(username)
+
+    user_state = get_user_state(username)
+
+    # Check user phase
+    if user_state.get_phase() != UserPhase.ANNOTATION:
+        logger.info(f"User {username} not in annotation phase, redirecting")
+        return redirect(url_for("home"))
+
+    # If the user hasn't yet been assigned anything to annotate, do so now
+    if not user_state.has_assignments():
+        get_item_state_manager().assign_instances_to_user(user_state)
+
+    # See if this user has finished annotating all of their assigned instances
+    if not user_state.has_remaining_assignments():
+        # If the user is done annotating, advance to the next phase
+        get_user_state_manager().advance_phase(username)
+        return redirect(url_for("home"))
+
+    # Render the API frontend template
+    return render_template("api_frontend.html",
+                         username=username,
+                         annotation_task_name=config.get("annotation_task_name", "Annotation Platform"),
+                         annotation_codebook_url=config.get("annotation_codebook_url", ""),
+                         alert_time_each_instance=config.get("alert_time_each_instance", 10000000))
+
+
+@app.route("/span-api-frontend", methods=["GET"])
+def span_api_frontend():
+    """
+    Serve the span annotation API-based frontend interface.
+
+    This route serves a modern single-page application specifically designed
+    for span annotation tasks that uses API calls to interact with the backend.
+
+    Returns:
+        flask.Response: Rendered span API frontend template
+    """
+    if 'username' not in session:
+        return redirect(url_for("home"))
+
+
+    username = session['username']
+
+    # Ensure user state exists
+    if not get_user_state_manager().has_user(username):
+        logger.info(f"Creating missing user state for {username}")
+        init_user_state(username)
+
+    user_state = get_user_state(username)
+
+    # Check user phase
+    if user_state.get_phase() != UserPhase.ANNOTATION:
+        logger.info(f"User {username} not in annotation phase, redirecting")
+        return redirect(url_for("home"))
+
+    # If the user hasn't yet been assigned anything to annotate, do so now
+    if not user_state.has_assignments():
+        get_item_state_manager().assign_instances_to_user(user_state)
+
+    # See if this user has finished annotating all of their assigned instances
+    if not user_state.has_remaining_assignments():
+        # If the user is done annotating, advance to the next phase
+        get_user_state_manager().advance_phase(username)
+        return redirect(url_for("home"))
+
+    # Render the span API frontend template
+    return render_template("span_api_frontend.html",
+                         username=username,
+                         annotation_task_name=config.get("annotation_task_name", "Span Annotation Platform"),
+                         annotation_codebook_url=config.get("annotation_codebook_url", ""),
+                         alert_time_each_instance=config.get("alert_time_each_instance", 10000000))
+
+@app.route("/test-span-colors")
+def test_span_colors():
+    """
+    Serve a test page for visually verifying span colors.
+    """
+    return render_template("test_span_colors.html")
+
+def normalize_color(color_value):
+    """
+    Normalize color value to a consistent format for the frontend.
+    Accepts: hex (#rrggbb), rgb/rgba, named colors, or tuple format "(r, g, b)".
+    Returns a CSS-compatible color string.
+    """
+    if not color_value:
+        return None
+
+    color_str = str(color_value).strip()
+
+    # Already a valid CSS color (hex, rgb, rgba, named)
+    if color_str.startswith('#') or color_str.startswith('rgb') or color_str.startswith('hsl'):
+        return color_str
+
+    # Tuple format "(r, g, b)" -> rgba
+    if color_str.startswith("(") and color_str.endswith(")"):
+        try:
+            rgb_parts = color_str.strip("()").split(",")
+            rgb_parts = [p.strip() for p in rgb_parts]
+            if len(rgb_parts) == 3:
+                r, g, b = int(rgb_parts[0]), int(rgb_parts[1]), int(rgb_parts[2])
+                return f"rgba({r}, {g}, {b}, 0.8)"
+            elif len(rgb_parts) == 4:
+                r, g, b, a = int(rgb_parts[0]), int(rgb_parts[1]), int(rgb_parts[2]), float(rgb_parts[3])
+                return f"rgba({r}, {g}, {b}, {a})"
+        except (ValueError, IndexError):
+            pass
+
+    # Named color - return as-is
+    return color_str
+
+
+# Default color palette for labels (used when no custom color is specified)
+DEFAULT_LABEL_COLORS = [
+    'rgba(110, 86, 207, 0.8)',   # Purple (primary)
+    'rgba(34, 197, 94, 0.8)',    # Green
+    'rgba(239, 68, 68, 0.8)',    # Red
+    'rgba(59, 130, 246, 0.8)',   # Blue
+    'rgba(245, 158, 11, 0.8)',   # Amber
+    'rgba(236, 72, 153, 0.8)',   # Pink
+    'rgba(6, 182, 212, 0.8)',    # Cyan
+    'rgba(249, 115, 22, 0.8)',   # Orange
+    'rgba(139, 92, 246, 0.8)',   # Violet
+    'rgba(16, 185, 129, 0.8)',   # Emerald
+]
+
+# Named color mappings for common label names
+NAMED_LABEL_COLORS = {
+    'positive': 'rgba(34, 197, 94, 0.8)',    # Green
+    'negative': 'rgba(239, 68, 68, 0.8)',    # Red
+    'neutral': 'rgba(156, 163, 175, 0.8)',   # Gray
+    'mixed': 'rgba(245, 158, 11, 0.8)',      # Amber
+    'happy': 'rgba(34, 197, 94, 0.8)',       # Green
+    'sad': 'rgba(59, 130, 246, 0.8)',        # Blue
+    'angry': 'rgba(220, 38, 38, 0.8)',       # Dark red
+    'fear': 'rgba(139, 92, 246, 0.8)',       # Violet
+    'surprise': 'rgba(249, 115, 22, 0.8)',   # Orange
+    'disgust': 'rgba(132, 204, 22, 0.8)',    # Lime
+    'yes': 'rgba(34, 197, 94, 0.8)',         # Green
+    'no': 'rgba(239, 68, 68, 0.8)',          # Red
+    'maybe': 'rgba(245, 158, 11, 0.8)',      # Amber
+    'true': 'rgba(34, 197, 94, 0.8)',        # Green
+    'false': 'rgba(239, 68, 68, 0.8)',       # Red
+    'high': 'rgba(239, 68, 68, 0.8)',        # Red
+    'medium': 'rgba(245, 158, 11, 0.8)',     # Amber
+    'low': 'rgba(34, 197, 94, 0.8)',         # Green
+}
+
+
+def get_default_label_color(label_name, index=0):
+    """
+    Get a default color for a label based on its name or index.
+    First checks for named colors, then falls back to palette by index.
+    """
+    # Check for named color match (case-insensitive).
+    # F-027: YAML parses unquoted yes/no/on/off/true/false as Python bools (and
+    # bare numbers as int/float), so a label "name" may not be a str — coerce
+    # before string ops to avoid a 500 in /api/colors.
+    lower_name = str(label_name).lower().strip()
+    if lower_name in NAMED_LABEL_COLORS:
+        return NAMED_LABEL_COLORS[lower_name]
+
+    # Fall back to color from palette based on index
+    return DEFAULT_LABEL_COLORS[index % len(DEFAULT_LABEL_COLORS)]
+
+
+@app.route("/api/colors")
+def get_span_colors():
+    """
+    Return the color mapping for all schemas/labels as JSON.
+    Supports colors from:
+    1. ui.label_colors - global color definitions by schema/label
+    2. ui.spans.span_colors - legacy span-specific colors
+    3. Inline 'color' property on labels in annotation_schemes
+    4. Auto-generated colors from SPAN_COLOR_PALETTE
+    """
+    logger.debug("=== GET_COLORS START ===")
+
+    color_map = {}
+
+    # 1. Load colors from ui.label_colors (new unified format)
+    if "ui" in config and "label_colors" in config["ui"]:
+        logger.debug("Found ui.label_colors in config")
+        for schema_name, label_colors in config["ui"]["label_colors"].items():
+            color_map[schema_name] = {}
+            for label_name, color_value in label_colors.items():
+                normalized = normalize_color(color_value)
+                if normalized:
+                    color_map[schema_name][label_name] = normalized
+
+    # 2. Load colors from ui.spans.span_colors (legacy format)
+    if "ui" in config and "spans" in config["ui"] and "span_colors" in config["ui"]["spans"]:
+        logger.debug("Found ui.spans.span_colors in config")
+        span_colors = config["ui"]["spans"]["span_colors"]
+        for schema_name, label_colors in span_colors.items():
+            if schema_name not in color_map:
+                color_map[schema_name] = {}
+            for label_name, color_value in label_colors.items():
+                if label_name not in color_map[schema_name]:
+                    normalized = normalize_color(color_value)
+                    if normalized:
+                        color_map[schema_name][label_name] = normalized
+
+    # 3. Extract colors from annotation_schemes (inline label colors)
+    annotation_schemes = config.get('annotation_schemes', [])
+    if isinstance(annotation_schemes, list):
+        for schema in annotation_schemes:
+            schema_name = schema.get('name', f"schema_{schema.get('annotation_id', 'unknown')}")
+            if schema_name not in color_map:
+                color_map[schema_name] = {}
+
+            labels = schema.get('labels', [])
+            for i, label in enumerate(labels):
+                if isinstance(label, dict):
+                    # F-027: str() so a YAML-bool/number label name (yes/no/1)
+                    # doesn't become a non-str dict key (jsonify sort_keys then
+                    # raises "'<' not supported between 'str' and 'bool'").
+                    label_name = str(label.get('name', label))
+                    # Check for inline color definition
+                    if 'color' in label and label_name not in color_map[schema_name]:
+                        normalized = normalize_color(label['color'])
+                        if normalized:
+                            color_map[schema_name][label_name] = normalized
+                else:
+                    label_name = str(label)
+
+                # Generate default color if not already set
+                if label_name not in color_map[schema_name]:
+                    # Try to get from SPAN_COLOR_PALETTE
+                    assigned_color = get_span_color(schema_name, label_name)
+                    if assigned_color:
+                        normalized = normalize_color(assigned_color)
+                        if normalized:
+                            color_map[schema_name][label_name] = normalized
+                    else:
+                        # Use hash-based color from default palette
+                        color_map[schema_name][label_name] = get_default_label_color(label_name, i)
+
+    logger.debug(f"Final color map: {color_map}")
+    logger.debug("=== GET_COLORS END ===")
+    return jsonify(color_map)
+
+
+@app.route("/api/keyword_highlights/<instance_id>")
+def get_keyword_highlights(instance_id):
+    """
+    Get keyword highlights for a specific instance.
+
+    This endpoint finds all occurrences of admin-defined keywords in the instance text
+    and returns them in the same format as AI keyword suggestions, so they can be
+    displayed using the same visual system (bounding boxes around keywords).
+
+    The endpoint supports randomization for research purposes:
+    - keyword_probability: Probability of showing each matched keyword (default: 1.0)
+    - random_word_probability: Probability of highlighting random words as distractors (default: 0.0)
+
+    Highlights are cached per user+instance to ensure consistency across navigation.
+
+    Colors are assigned based on schema/label to match the span annotation color scheme.
+
+    Returns:
+        JSON with list of keyword matches:
+        {
+            "keywords": [
+                {
+                    "label": "Economic",
+                    "start": 10,
+                    "end": 20,
+                    "text": "employment",
+                    "reasoning": "Keyword match: employ*",
+                    "schema": "Issue-General",
+                    "color": "rgba(110, 86, 207, 0.8)",
+                    "type": "keyword"
+                },
+                ...
+            ],
+            "instance_id": "item_1",
+            "from_cache": false
+        }
+    """
+    import urllib.parse
+    import random
+    import hashlib
+    import re
+
+    logger.debug(f"=== GET_KEYWORD_HIGHLIGHTS START ===")
+    logger.debug(f"Instance ID: {instance_id}")
+
+    decoded_instance_id = urllib.parse.unquote(instance_id)
+
+    if 'username' not in session:
+        logger.warning("Get keyword highlights without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session.get('username')
+
+    # Get user state for caching
+    user_state = get_user_state(username) if username else None
+
+    # Check for cached state
+    if user_state:
+        cached_state = user_state.get_keyword_highlight_state(instance_id)
+        if not cached_state:
+            # Try with decoded ID
+            cached_state = user_state.get_keyword_highlight_state(decoded_instance_id)
+        if cached_state:
+            logger.debug(f"Returning cached keyword highlights for {instance_id}")
+            return jsonify({
+                "keywords": cached_state.get("highlights", []),
+                "instance_id": instance_id,
+                "from_cache": True
+            })
+
+    # Get settings for randomization
+    settings = get_keyword_highlight_settings()
+    keyword_prob = settings.get('keyword_probability', 1.0)
+    random_word_prob = settings.get('random_word_probability', 0.0)
+    random_word_label = settings.get('random_word_label', 'distractor')
+    random_word_schema = settings.get('random_word_schema', 'keyword')
+
+    logger.debug(f"Keyword highlight settings: keyword_prob={keyword_prob}, random_word_prob={random_word_prob}")
+
+    # Create deterministic seed from username + instance_id for reproducibility
+    seed_str = f"{username}:{instance_id}" if username else instance_id
+    seed = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+    rng = random.Random(seed)
+
+    # Check if keyword highlights are enabled
+    keyword_patterns = get_keyword_highlight_patterns()
+
+    # Get the instance text
+    try:
+        item_state_manager = get_item_state_manager()
+        instance = item_state_manager.get_item(instance_id)
+        if not instance:
+            instance = item_state_manager.get_item(decoded_instance_id)
+            if instance:
+                instance_id = decoded_instance_id
+            else:
+                logger.error(f"Instance not found: {instance_id}")
+                return jsonify({"error": "Instance not found"}), 404
+
+        original_text = instance.get_text()
+        logger.debug(f"Instance text length: {len(original_text)}")
+
+    except Exception as e:
+        logger.error(f"Error getting instance text: {e}")
+        return jsonify({"error": f"Instance not found: {instance_id}"}), 404
+
+    # Find all keyword matches in the text
+    keywords = []
+    seen_spans = set()  # Track (start, end) to avoid duplicate overlapping matches
+
+    # Track color assignments for keyword labels (schema -> label -> color)
+    keyword_color_counter = 0
+
+    for pattern_info in keyword_patterns:
+        regex = pattern_info['regex']
+        label = pattern_info['label']
+        schema = pattern_info['schema']
+        pattern_str = pattern_info['pattern']
+
+        for match in regex.finditer(original_text):
+            start = match.start()
+            end = match.end()
+            matched_text = match.group()
+
+            # Skip if we already have a match at this exact position
+            span_key = (start, end)
+            if span_key in seen_spans:
+                continue
+
+            # Apply keyword probability filter
+            if rng.random() > keyword_prob:
+                logger.debug(f"Skipping keyword '{matched_text}' due to probability filter")
+                continue
+
+            seen_spans.add(span_key)
+
+            # Get or assign color for this schema/label combination
+            color = get_span_color(schema, label)
+            if not color:
+                # Auto-assign a color from the palette
+                idx = keyword_color_counter % len(SPAN_COLOR_PALETTE)
+                color = SPAN_COLOR_PALETTE[idx]
+                keyword_color_counter += 1
+                # Store it for consistency
+                set_span_color(schema, label, color)
+
+            # Convert RGB tuple string to rgba format for frontend
+            # Color format is "(r, g, b)" - convert to "rgba(r, g, b, 0.8)"
+            if color.startswith("(") and color.endswith(")"):
+                rgba_color = f"rgba{color[:-1]}, 0.8)"
+            else:
+                rgba_color = color
+
+            keywords.append({
+                "label": label,
+                "start": start,
+                "end": end,
+                "text": matched_text,
+                "reasoning": f"Keyword: {pattern_str} → {label}",
+                "schema": schema,
+                "color": rgba_color,
+                "type": "keyword"
+            })
+
+    # Generate random word highlights (distractors)
+    random_highlights = []
+    if random_word_prob > 0:
+        random_highlights = generate_random_word_highlights(
+            original_text, rng, random_word_prob,
+            random_word_label, random_word_schema,
+            seen_spans
+        )
+        keywords.extend(random_highlights)
+
+    # Sort by start position
+    keywords.sort(key=lambda k: k['start'])
+
+    logger.debug(f"Found {len(keywords)} total highlights ({len(keywords) - len(random_highlights)} keywords, {len(random_highlights)} random)")
+
+    # Cache the state for this user+instance
+    if user_state:
+        user_state.set_keyword_highlight_state(instance_id, {
+            "highlights": keywords,
+            "seed": seed,
+            "settings": {
+                "keyword_probability": keyword_prob,
+                "random_word_probability": random_word_prob
+            }
+        })
+        logger.debug(f"Cached keyword highlight state for {username}:{instance_id}")
+
+    logger.debug("=== GET_KEYWORD_HIGHLIGHTS END ===")
+
+    return jsonify({
+        "keywords": keywords,
+        "instance_id": instance_id,
+        "from_cache": False
+    })
+
+
+def generate_random_word_highlights(text: str, rng, probability: float,
+                                    label: str, schema: str, excluded_spans: set) -> list:
+    """
+    Generate random word highlights based on probability.
+
+    This function selects random words from the text to highlight as "distractors"
+    to prevent annotators from relying solely on keyword highlights.
+
+    Args:
+        text: The instance text
+        rng: Seeded random.Random instance for reproducibility
+        probability: Probability of selecting each word (0.0-1.0)
+        label: Label for random highlights (e.g., 'distractor')
+        schema: Schema for random highlights (e.g., 'keyword')
+        excluded_spans: Set of (start, end) tuples to avoid (already highlighted)
+
+    Returns:
+        List of highlight dictionaries with keys: label, start, end, text, reasoning, schema, color, type
+    """
+    import re
+
+    highlights = []
+
+    # Find all words (sequences of word characters)
+    word_pattern = re.compile(r'\b\w+\b')
+
+    # Get color for random highlights
+    color = get_span_color(schema, label)
+    if not color:
+        # Use a gray color for distractors by default
+        color = "(156, 163, 175)"
+        set_span_color(schema, label, color)
+
+    # Convert to rgba
+    if color.startswith("(") and color.endswith(")"):
+        color_str = f"rgba{color[:-1]}, 0.6)"
+    else:
+        color_str = color
+
+    for match in word_pattern.finditer(text):
+        start = match.start()
+        end = match.end()
+        word = match.group()
+
+        # Skip if overlaps with existing highlight
+        overlaps = False
+        for ex_start, ex_end in excluded_spans:
+            if start < ex_end and end > ex_start:
+                overlaps = True
+                break
+        if overlaps:
+            continue
+
+        # Skip very short words (1-2 chars) - articles, prepositions, etc.
+        if len(word) <= 2:
+            continue
+
+        # Apply probability
+        if rng.random() < probability:
+            highlights.append({
+                "label": label,
+                "start": start,
+                "end": end,
+                "text": word,
+                "reasoning": "Random selection",
+                "schema": schema,
+                "color": color_str,
+                "type": "random"
+            })
+            excluded_spans.add((start, end))
+
+    return highlights
+
+
+# =============================================================================
+# Behavioral Tracking API Endpoints
+# =============================================================================
+
+@app.route("/api/track_interactions", methods=["POST"])
+def track_interactions():
+    """
+    Receive batched interaction events from the frontend.
+
+    Expected JSON payload:
+    {
+        "instance_id": "...",
+        "events": [...],
+        "focus_time": {"element": ms, ...},
+        "scroll_depth": float
+    }
+    """
+    import time as time_module
+    from potato.interaction_tracking import get_or_create_behavioral_data
+
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    instance_id = data.get('instance_id')
+    events = data.get('events', [])
+
+    user_state = get_user_state(username)
+    if not user_state:
+        return jsonify({"error": "User state not found"}), 404
+
+    # Get or create behavioral data for this instance
+    bd = get_or_create_behavioral_data(
+        user_state.instance_id_to_behavioral_data,
+        instance_id
+    )
+
+    # Record server timestamp for each event
+    server_timestamp = time_module.time()
+
+    # Add events
+    for event in events:
+        # Add server timestamp if not present
+        if 'timestamp' not in event or event.get('timestamp') is None:
+            event['timestamp'] = server_timestamp
+
+        # Ensure instance_id is set
+        event['instance_id'] = instance_id
+
+        # Add to behavioral data
+        if hasattr(bd, 'interactions'):
+            from potato.interaction_tracking import InteractionEvent
+            bd.interactions.append(InteractionEvent(
+                event_type=event.get('event_type', 'unknown'),
+                timestamp=event.get('timestamp', server_timestamp),
+                target=event.get('target', ''),
+                instance_id=instance_id,
+                client_timestamp=event.get('client_timestamp'),
+                metadata=event.get('metadata', {}),
+            ))
+
+    # Update focus time if provided
+    focus_time = data.get('focus_time', {})
+    for element, time_ms in focus_time.items():
+        if hasattr(bd, 'update_focus_time'):
+            bd.update_focus_time(element, time_ms)
+        elif hasattr(bd, 'focus_time_by_element'):
+            bd.focus_time_by_element[element] = bd.focus_time_by_element.get(element, 0) + time_ms
+
+    # Update scroll depth
+    if 'scroll_depth' in data:
+        scroll_depth = data['scroll_depth']
+        if hasattr(bd, 'update_scroll_depth'):
+            bd.update_scroll_depth(scroll_depth)
+        elif hasattr(bd, 'scroll_depth_max'):
+            bd.scroll_depth_max = max(bd.scroll_depth_max, scroll_depth)
+
+    return jsonify({"status": "ok", "events_recorded": len(events)})
+
+
+@app.route("/api/track_ai_usage", methods=["POST"])
+def track_ai_usage():
+    """
+    Track AI assistance request, response, and user decisions.
+
+    Expected JSON payload:
+    {
+        "instance_id": "...",
+        "schema_name": "...",
+        "event_type": "request" | "response" | "accept" | "reject",
+        "suggestions": [...],  # for response events
+        "accepted_value": "..."  # for accept events
+    }
+    """
+    import time as time_module
+    from potato.interaction_tracking import get_or_create_behavioral_data, AIUsageEvent
+
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    instance_id = data.get('instance_id')
+    schema_name = data.get('schema_name')
+    event_type = data.get('event_type')  # 'request', 'response', 'accept', 'reject'
+
+    if not instance_id or not schema_name or not event_type:
+        return jsonify({"error": "Missing required fields"}), 400
+
+    user_state = get_user_state(username)
+    if not user_state:
+        return jsonify({"error": "User state not found"}), 404
+
+    # Get or create behavioral data
+    bd = get_or_create_behavioral_data(
+        user_state.instance_id_to_behavioral_data,
+        instance_id
+    )
+
+    timestamp = time_module.time()
+
+    if event_type == 'request':
+        # Create new AI usage event
+        ai_event = AIUsageEvent(
+            request_timestamp=timestamp,
+            schema_name=schema_name,
+        )
+        if hasattr(bd, 'ai_usage'):
+            bd.ai_usage.append(ai_event)
+
+    elif event_type == 'response':
+        suggestions = data.get('suggestions', [])
+        # Update the most recent AI event for this schema
+        if hasattr(bd, 'ai_usage'):
+            for ai_event in reversed(bd.ai_usage):
+                event_schema = ai_event.schema_name if hasattr(ai_event, 'schema_name') else ai_event.get('schema_name')
+                event_response = ai_event.response_timestamp if hasattr(ai_event, 'response_timestamp') else ai_event.get('response_timestamp')
+                if event_schema == schema_name and not event_response:
+                    if hasattr(ai_event, 'response_timestamp'):
+                        ai_event.response_timestamp = timestamp
+                        ai_event.suggestions_shown = suggestions
+                    else:
+                        ai_event['response_timestamp'] = timestamp
+                        ai_event['suggestions_shown'] = suggestions
+                    break
+
+    elif event_type in ('accept', 'reject'):
+        accepted_value = data.get('accepted_value') if event_type == 'accept' else None
+        # Update the most recent AI event for this schema
+        if hasattr(bd, 'ai_usage'):
+            for ai_event in reversed(bd.ai_usage):
+                event_schema = ai_event.schema_name if hasattr(ai_event, 'schema_name') else ai_event.get('schema_name')
+                event_response = ai_event.response_timestamp if hasattr(ai_event, 'response_timestamp') else ai_event.get('response_timestamp')
+                if event_schema == schema_name and event_response:
+                    if hasattr(ai_event, 'suggestion_accepted'):
+                        ai_event.suggestion_accepted = accepted_value
+                        ai_event.time_to_decision_ms = int((timestamp - ai_event.response_timestamp) * 1000)
+                    else:
+                        ai_event['suggestion_accepted'] = accepted_value
+                        ai_event['time_to_decision_ms'] = int((timestamp - ai_event['response_timestamp']) * 1000)
+                    break
+
+    return jsonify({"status": "ok", "event_type": event_type})
+
+
+@app.route("/api/track_annotation_change", methods=["POST"])
+def track_annotation_change():
+    """
+    Track annotation changes from the frontend.
+
+    Expected JSON payload:
+    {
+        "instance_id": "...",
+        "schema_name": "...",
+        "label_name": "...",
+        "action": "select" | "deselect" | "update" | "clear",
+        "old_value": ...,
+        "new_value": ...,
+        "source": "user" | "ai_accept" | "keyboard" | "prefill"
+    }
+    """
+    import time as time_module
+    from potato.interaction_tracking import get_or_create_behavioral_data, AnnotationChange
+
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    instance_id = data.get('instance_id')
+    schema_name = data.get('schema_name')
+    action = data.get('action')
+
+    if not instance_id or not schema_name or not action:
+        return jsonify({"error": "Missing required fields"}), 400
+
+    user_state = get_user_state(username)
+    if not user_state:
+        return jsonify({"error": "User state not found"}), 404
+
+    # Get or create behavioral data
+    bd = get_or_create_behavioral_data(
+        user_state.instance_id_to_behavioral_data,
+        instance_id
+    )
+
+    # Create annotation change record
+    change = AnnotationChange(
+        timestamp=time_module.time(),
+        schema_name=schema_name,
+        label_name=data.get('label_name'),
+        action=action,
+        old_value=data.get('old_value'),
+        new_value=data.get('new_value'),
+        source=data.get('source', 'user'),
+    )
+
+    if hasattr(bd, 'annotation_changes'):
+        bd.annotation_changes.append(change)
+
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/behavioral_data/<instance_id>", methods=["GET"])
+def get_behavioral_data(instance_id):
+    """
+    Get behavioral data for a specific instance.
+    Useful for debugging and analysis.
+    """
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    user_state = get_user_state(username)
+
+    if not user_state:
+        return jsonify({"error": "User state not found"}), 404
+
+    bd = user_state.instance_id_to_behavioral_data.get(instance_id)
+
+    if not bd:
+        return jsonify({"error": "No behavioral data for instance"}), 404
+
+    if hasattr(bd, 'to_dict'):
+        return jsonify(bd.to_dict())
+    elif isinstance(bd, dict):
+        return jsonify(bd)
+    else:
+        return jsonify({"error": "Invalid behavioral data format"}), 500
+
+
+@app.route("/api/schemas")
+def get_annotation_schemas():
+    """
+    Return the annotation schema information for all annotation types.
+    This provides the schema names, types, and their labels to the frontend
+    and API consumers (like the user simulator).
+    """
+    logger.debug("=== GET_ANNOTATION_SCHEMAS START ===")
+
+    schemas = {}
+    annotation_scheme = config.get('annotation_scheme') or config.get('annotation_schemes')
+
+    if annotation_scheme:
+        # Helper function to extract labels from a schema
+        def extract_labels(schema):
+            labels = []
+            for label in schema.get('labels', []):
+                if isinstance(label, dict):
+                    labels.append(label.get('name', str(label)))
+                else:
+                    labels.append(str(label))
+            return labels
+
+        # Keys we surface via dedicated top-level fields above, plus
+        # internal/runtime keys that should never round-trip to API
+        # consumers. Anything else configured on the schema (likert.size,
+        # slider.min_value, process_reward.mode, code_review.verdict_options,
+        # span.labels, custom plugin keys, etc.) passes through verbatim.
+        _RESERVED_SCHEMA_KEYS = frozenset({
+            "name",
+            "annotation_type",
+            "type",
+            "labels",
+            "description",
+            # Runtime / server-side internals
+            "annotation_id",
+            "sequential_key_binding",
+        })
+
+        # Helper function to process a single schema
+        def process_schema(schema, schema_name=None):
+            name = schema_name or schema.get('name', 'unknown')
+            schema_type = schema.get('annotation_type') or schema.get('type', 'unknown')
+
+            schema_info = {
+                'name': name,
+                'description': schema.get('description', ''),
+                'labels': extract_labels(schema),
+                'type': schema_type
+            }
+
+            # Pass through every other configured key unchanged. This keeps
+            # the API forward-compatible for any schema type (built-in or
+            # plugin) that carries type-specific config (e.g. likert.size,
+            # process_reward.mode, code_review.verdict_options). Underscore-
+            # prefixed keys are treated as internal and skipped.
+            for key, value in schema.items():
+                if key in _RESERVED_SCHEMA_KEYS or key.startswith('_'):
+                    continue
+                schema_info.setdefault(key, value)
+
+            return schema_info
+
+        # If dict (new style), iterate items
+        if isinstance(annotation_scheme, dict):
+            for schema_name, schema in annotation_scheme.items():
+                schemas[schema_name] = process_schema(schema, schema_name)
+        # If list (legacy style), iterate list
+        elif isinstance(annotation_scheme, list):
+            for schema in annotation_scheme:
+                schema_name = schema.get('name', 'unknown')
+                schemas[schema_name] = process_schema(schema)
+
+    logger.debug(f"Found schemas: {schemas}")
+    logger.debug("=== GET_ANNOTATION_SCHEMAS END ===")
+    return jsonify(schemas)
+
+@app.route("/api/spans/<instance_id>/clear", methods=["POST"])
+def clear_span_annotations(instance_id):
+    """
+    Clear all span annotations for a specific instance and user.
+    This is useful for debugging and fixing persistent overlay issues.
+    """
+    logger.debug(f"=== CLEAR_SPAN_ANNOTATIONS START ===")
+    logger.debug(f"Instance ID: {instance_id}")
+
+    if 'username' not in session:
+        logger.warning("Clear span annotations without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Normalize instance_id to string
+        instance_id = str(instance_id)
+
+        # Check if instance has span annotations
+        if hasattr(user_state, 'instance_id_to_span_to_value'):
+            if instance_id in user_state.instance_id_to_span_to_value:
+                spans_before = len(user_state.instance_id_to_span_to_value[instance_id])
+                logger.debug(f"Found {spans_before} spans for instance {instance_id}")
+
+                # Clear the spans
+                del user_state.instance_id_to_span_to_value[instance_id]
+                logger.debug(f"Cleared {spans_before} spans for instance {instance_id}")
+
+                return jsonify({
+                    "status": "success",
+                    "message": f"Cleared {spans_before} span annotations for instance {instance_id}",
+                    "spans_cleared": spans_before
+                })
+            else:
+                logger.debug(f"No spans found for instance {instance_id}")
+                return jsonify({
+                    "status": "success",
+                    "message": f"No span annotations found for instance {instance_id}",
+                    "spans_cleared": 0
+                })
+        else:
+            logger.debug("User state has no span annotations")
+            return jsonify({
+                "status": "success",
+                "message": "User state has no span annotations",
+                "spans_cleared": 0
+            })
+
+    except Exception as e:
+        logger.error(f"Error clearing span annotations: {e}")
+        return jsonify({"error": "Failed to clear span annotations"}), 500
+
+    finally:
+        logger.debug(f"=== CLEAR_SPAN_ANNOTATIONS END ===")
+
+
+@app.route("/api/links/<instance_id>")
+def get_link_annotations(instance_id):
+    """
+    Get link annotations (span relationships) for a specific instance.
+
+    Returns:
+        JSON with link annotations for the instance.
+    """
+    logger.debug(f"=== GET_LINK_ANNOTATIONS START ===")
+    logger.debug(f"Instance ID: {instance_id}")
+
+    if 'username' not in session:
+        logger.warning("Get link annotations without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Normalize instance_id to string
+        instance_id = str(instance_id)
+
+        # Get link annotations for this instance
+        links = user_state.get_link_annotations(instance_id)
+
+        # Convert to serializable format
+        links_data = []
+        for link_id, link in links.items():
+            links_data.append(link.to_dict())
+
+        logger.debug(f"Found {len(links_data)} link annotations for instance {instance_id}")
+
+        return jsonify({
+            "status": "success",
+            "instance_id": instance_id,
+            "links": links_data
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting link annotations: {e}")
+        return jsonify({"error": "Failed to get link annotations"}), 500
+
+    finally:
+        logger.debug(f"=== GET_LINK_ANNOTATIONS END ===")
+
+
+@app.route("/api/links/<instance_id>/<link_id>", methods=["DELETE"])
+def delete_link_annotation(instance_id, link_id):
+    """
+    Delete a specific link annotation.
+
+    Args:
+        instance_id: The instance ID
+        link_id: The link ID to delete
+
+    Returns:
+        JSON with success/failure status.
+    """
+    logger.debug(f"=== DELETE_LINK_ANNOTATION START ===")
+    logger.debug(f"Instance ID: {instance_id}, Link ID: {link_id}")
+
+    if 'username' not in session:
+        logger.warning("Delete link annotation without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Normalize instance_id to string
+        instance_id = str(instance_id)
+
+        # Try to remove the link
+        success = user_state.remove_link_annotation(instance_id, link_id)
+
+        if success:
+            logger.debug(f"Deleted link annotation: {link_id} from instance {instance_id}")
+            return jsonify({
+                "status": "success",
+                "message": f"Link {link_id} deleted successfully"
+            })
+        else:
+            logger.warning(f"Link not found: {link_id} in instance {instance_id}")
+            return jsonify({
+                "status": "error",
+                "message": f"Link {link_id} not found"
+            }), 404
+
+    except Exception as e:
+        logger.error(f"Error deleting link annotation: {e}")
+        return jsonify({"error": "Failed to delete link annotation"}), 500
+
+    finally:
+        logger.debug(f"=== DELETE_LINK_ANNOTATION END ===")
+
+
+# ============================================================================
+# Event Annotation API Routes
+# ============================================================================
+
+@app.route("/api/events/<instance_id>")
+def get_event_annotations(instance_id):
+    """
+    Get event annotations for a specific instance.
+
+    Returns:
+        JSON with event annotations for the instance.
+    """
+    logger.debug(f"=== GET_EVENT_ANNOTATIONS START ===")
+    logger.debug(f"Instance ID: {instance_id}")
+
+    if 'username' not in session:
+        logger.warning("Get event annotations without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Normalize instance_id to string
+        instance_id = str(instance_id)
+
+        # Verify the user is assigned this instance
+        if instance_id not in user_state.get_assigned_instance_ids():
+            logger.warning(f"User {username} not assigned to instance {instance_id}")
+            return jsonify({"error": "Instance not assigned to user"}), 403
+
+        # Get event annotations for this instance
+        events = user_state.get_event_annotations(instance_id)
+
+        # Convert to serializable format
+        events_data = []
+        for event_id, event in events.items():
+            event_dict = event.to_dict()
+            events_data.append(event_dict)
+            logger.debug(f"  Event ID: {event_id}, data: {event_dict}")
+
+        logger.debug(f"Found {len(events_data)} event annotations for instance {instance_id}")
+        logger.debug(f"Event IDs in storage: {list(events.keys())}")
+
+        return jsonify({
+            "status": "success",
+            "instance_id": instance_id,
+            "events": events_data
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting event annotations: {e}")
+        return jsonify({"error": "Failed to get event annotations"}), 500
+
+    finally:
+        logger.debug(f"=== GET_EVENT_ANNOTATIONS END ===")
+
+
+@app.route("/api/events/<instance_id>/<event_id>", methods=["DELETE"])
+def delete_event_annotation(instance_id, event_id):
+    """
+    Delete a specific event annotation.
+
+    Args:
+        instance_id: The instance ID
+        event_id: The event ID to delete
+
+    Returns:
+        JSON with success/failure status.
+    """
+    logger.debug(f"=== DELETE_EVENT_ANNOTATION START ===")
+    logger.debug(f"Instance ID: {instance_id}, Event ID: {event_id}")
+
+    if 'username' not in session:
+        logger.warning("Delete event annotation without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+    logger.debug(f"Username: {username}")
+
+    try:
+        user_state = get_user_state(username)
+        if not user_state:
+            logger.error(f"User state not found for user: {username}")
+            return jsonify({"error": "User state not found"}), 404
+
+        # Normalize instance_id to string
+        instance_id = str(instance_id)
+
+        # Verify the user is assigned this instance
+        if instance_id not in user_state.get_assigned_instance_ids():
+            logger.warning(f"User {username} not assigned to instance {instance_id}")
+            return jsonify({"error": "Instance not assigned to user"}), 403
+
+        # Try to remove the event
+        success = user_state.remove_event_annotation(instance_id, event_id)
+
+        if success:
+            logger.debug(f"Deleted event annotation: {event_id} from instance {instance_id}")
+            return jsonify({
+                "status": "success",
+                "message": f"Event {event_id} deleted successfully"
+            })
+        else:
+            logger.warning(f"Event not found: {event_id} in instance {instance_id}")
+            return jsonify({
+                "status": "error",
+                "message": f"Event {event_id} not found"
+            }), 404
+
+    except Exception as e:
+        logger.error(f"Error deleting event annotation: {e}")
+        return jsonify({"error": "Failed to delete event annotation"}), 500
+
+    finally:
+        logger.debug(f"=== DELETE_EVENT_ANNOTATION END ===")
+
+
+# ============================================================================
+# Entity Linking API Routes
+# ============================================================================
+
+@app.route("/api/entity_linking/search")
+def entity_linking_search():
+    """
+    Search a knowledge base for entities matching a query.
+
+    Query parameters:
+        q: Search query string (required)
+        kb: Knowledge base name (required, e.g., "wikidata", "umls")
+        limit: Maximum number of results (default: 10)
+
+    Returns:
+        JSON with list of matching entities.
+    """
+    logger.debug(f"=== ENTITY_LINKING_SEARCH START ===")
+
+    if 'username' not in session:
+        logger.warning("Entity linking search without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    query = request.args.get('q', '').strip()
+    kb_name = request.args.get('kb', '').strip()
+    limit = request.args.get('limit', 10, type=int)
+
+    logger.debug(f"Query: '{query}', KB: '{kb_name}', Limit: {limit}")
+
+    if not query:
+        return jsonify({"error": "Search query 'q' is required"}), 400
+
+    if not kb_name:
+        return jsonify({"error": "Knowledge base 'kb' is required"}), 400
+
+    try:
+        from potato.knowledge_base import get_kb_manager
+
+        kb_manager = get_kb_manager()
+        results = kb_manager.search(query, kb_name, limit=limit)
+
+        # Convert to serializable format
+        entities = [entity.to_dict() for entity in results]
+
+        logger.debug(f"Found {len(entities)} entities for query '{query}'")
+
+        return jsonify({
+            "status": "success",
+            "query": query,
+            "kb": kb_name,
+            "results": entities
+        })
+
+    except Exception as e:
+        logger.error(f"Error in entity linking search: {e}")
+        return jsonify({"error": "Search failed"}), 500
+
+    finally:
+        logger.debug(f"=== ENTITY_LINKING_SEARCH END ===")
+
+
+@app.route("/api/entity_linking/entity/<kb_name>/<entity_id>")
+def entity_linking_get_entity(kb_name, entity_id):
+    """
+    Get detailed information about a specific entity.
+
+    Args:
+        kb_name: Knowledge base name (e.g., "wikidata", "umls")
+        entity_id: Entity ID within the knowledge base (e.g., "Q937")
+
+    Returns:
+        JSON with entity details.
+    """
+    logger.debug(f"=== ENTITY_LINKING_GET_ENTITY START ===")
+    logger.debug(f"KB: {kb_name}, Entity ID: {entity_id}")
+
+    if 'username' not in session:
+        logger.warning("Entity linking get_entity without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    try:
+        from potato.knowledge_base import get_kb_manager
+
+        kb_manager = get_kb_manager()
+        client = kb_manager.get_client(kb_name)
+
+        if not client:
+            return jsonify({"error": f"Knowledge base '{kb_name}' not configured"}), 404
+
+        entity = client.get_entity(entity_id)
+
+        if not entity:
+            return jsonify({"error": f"Entity '{entity_id}' not found"}), 404
+
+        logger.debug(f"Found entity: {entity.label}")
+
+        return jsonify({
+            "status": "success",
+            "entity": entity.to_dict()
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting entity: {e}")
+        return jsonify({"error": "Failed to get entity"}), 500
+
+    finally:
+        logger.debug(f"=== ENTITY_LINKING_GET_ENTITY END ===")
+
+
+@app.route("/api/entity_linking/configured_kbs")
+def entity_linking_configured_kbs():
+    """
+    Get list of configured knowledge bases.
+
+    Returns:
+        JSON with list of available knowledge base names and types.
+    """
+    logger.debug(f"=== ENTITY_LINKING_CONFIGURED_KBS START ===")
+
+    if 'username' not in session:
+        logger.warning("Entity linking configured_kbs without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    try:
+        from potato.knowledge_base import get_kb_manager
+
+        kb_manager = get_kb_manager()
+        kb_names = kb_manager.list_clients()
+
+        # Get config info for each KB
+        kbs = []
+        for name in kb_names:
+            config = kb_manager.get_config(name)
+            if config:
+                kbs.append({
+                    "name": name,
+                    "type": config.kb_type,
+                    "language": config.language
+                })
+
+        logger.debug(f"Found {len(kbs)} configured knowledge bases")
+
+        return jsonify({
+            "status": "success",
+            "knowledge_bases": kbs
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting configured KBs: {e}")
+        return jsonify({"error": "Failed to get configured KBs"}), 500
+
+    finally:
+        logger.debug(f"=== ENTITY_LINKING_CONFIGURED_KBS END ===")
+
+
+@app.route("/api/entity_linking/update_span", methods=["POST"])
+def entity_linking_update_span():
+    """
+    Update a span annotation with entity linking information.
+
+    Request body:
+        instance_id: Instance ID
+        span_id: Span annotation ID
+        kb_id: Knowledge base entity ID
+        kb_source: Knowledge base source name
+        kb_label: Human-readable entity label
+
+    Returns:
+        JSON with success/failure status.
+    """
+    logger.debug(f"=== ENTITY_LINKING_UPDATE_SPAN START ===")
+
+    if 'username' not in session:
+        logger.warning("Entity linking update_span without active session")
+        return jsonify({"error": "No active session"}), 401
+
+    username = session['username']
+
+    try:
+        data = request.json
+        instance_id = data.get('instance_id')
+        span_id = data.get('span_id')
+        kb_id = data.get('kb_id')
+        kb_source = data.get('kb_source')
+        kb_label = data.get('kb_label')
+
+        logger.debug(f"Updating span {span_id} with KB: {kb_source}:{kb_id}")
+
+        if not instance_id or not span_id:
+            return jsonify({"error": "instance_id and span_id are required"}), 400
+
+        # Validate string types and enforce length limits
+        MAX_FIELD_LEN = 1024
+        for field_name, field_val in [("span_id", span_id), ("kb_id", kb_id),
+                                       ("kb_source", kb_source), ("kb_label", kb_label)]:
+            if field_val is not None and (not isinstance(field_val, str) or len(field_val) > MAX_FIELD_LEN):
+                return jsonify({"error": f"Invalid {field_name}"}), 400
+
+        user_state = get_user_state(username)
+        if not user_state:
+            return jsonify({"error": "User state not found"}), 404
+
+        # Get span annotations for this instance
+        span_annotations = user_state.get_span_annotations(str(instance_id))
+
+        # Debug: Log all existing span IDs
+        existing_ids = []
+        for span_key, span in span_annotations.items():
+            if hasattr(span_key, 'get_id'):
+                existing_ids.append(span_key.get_id())
+            elif isinstance(span_key, dict):
+                existing_ids.append(span_key.get('id', 'no-id'))
+        logger.debug(f"Looking for span_id={span_id}, existing IDs: {existing_ids}")
+
+        # Find the span with matching ID
+        # Note: span_key is the SpanAnnotation object, span is the value
+        updated = False
+        for span_key, span_value in span_annotations.items():
+            if hasattr(span_key, 'get_id') and span_key.get_id() == span_id:
+                # Update the span's KB link
+                span_key.set_entity_link(kb_id, kb_source, kb_label)
+                updated = True
+                logger.debug(f"Updated span {span_id} with entity link")
+                break
+            elif isinstance(span_key, dict) and span_key.get('id') == span_id:
+                span_key['kb_id'] = kb_id
+                span_key['kb_source'] = kb_source
+                span_key['kb_label'] = kb_label
+                updated = True
+                logger.debug(f"Updated span dict {span_id} with entity link")
+                break
+
+        if not updated:
+            return jsonify({"error": f"Span {span_id} not found"}), 404
+
+        return jsonify({
+            "status": "success",
+            "message": f"Span {span_id} linked to {kb_source}:{kb_id}"
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating span with entity link: {e}")
+        return jsonify({"error": "Failed to update span"}), 500
+
+    finally:
+        logger.debug(f"=== ENTITY_LINKING_UPDATE_SPAN END ===")
+
+
+@app.route("/api/waveform/<cache_key>")
+def get_waveform_data(cache_key):
+    """
+    Serve pre-computed waveform data for audio annotation.
+
+    This endpoint serves .dat waveform files generated by the WaveformService.
+    The cache_key is an MD5 hash of the audio file path.
+
+    Args:
+        cache_key: The MD5 hash identifying the cached waveform file
+
+    Returns:
+        The binary waveform data file, or an error response
+    """
+    logger.debug(f"=== GET_WAVEFORM_DATA START ===")
+    logger.debug(f"Cache key: {cache_key}")
+
+    try:
+        # Import waveform service
+        from potato.server_utils.waveform_service import get_waveform_service
+
+        waveform_service = get_waveform_service()
+        if not waveform_service:
+            logger.warning("WaveformService not initialized")
+            return jsonify({"error": "Waveform service not available"}), 503
+
+        # Construct the cache file path
+        cache_path = os.path.join(waveform_service.cache_dir, f"{cache_key}.dat")
+
+        if not os.path.exists(cache_path):
+            logger.warning(f"Waveform file not found: {cache_path}")
+            return jsonify({"error": "Waveform data not found"}), 404
+
+        # Serve the waveform file
+        from flask import send_file
+        logger.debug(f"Serving waveform file: {cache_path}")
+        return send_file(
+            cache_path,
+            mimetype='application/octet-stream',
+            as_attachment=False
+        )
+
+    except Exception as e:
+        logger.error(f"Error serving waveform data: {e}")
+        return jsonify({"error": "Failed to serve waveform data"}), 500
+
+    finally:
+        logger.debug(f"=== GET_WAVEFORM_DATA END ===")
+
+
+@app.route("/api/waveform/generate", methods=["POST"])
+def generate_waveform():
+    """
+    Generate waveform data for an audio file.
+
+    This endpoint triggers waveform generation for a given audio URL.
+    It can be called by the frontend when the audio loads.
+
+    Request body:
+        audio_url: URL or path of the audio file
+
+    Returns:
+        JSON with the waveform URL or error message
+    """
+    logger.debug(f"=== GENERATE_WAVEFORM START ===")
+
+    try:
+        data = request.get_json()
+        if not data or 'audio_url' not in data:
+            return jsonify({"error": "audio_url is required"}), 400
+
+        audio_url = data['audio_url']
+        logger.debug(f"Generating waveform for: {audio_url}")
+
+        # Import waveform service
+        from potato.server_utils.waveform_service import get_waveform_service
+
+        waveform_service = get_waveform_service()
+        if not waveform_service:
+            logger.warning("WaveformService not initialized")
+            return jsonify({
+                "error": "Waveform service not available",
+                "use_client_fallback": True
+            }), 503
+
+        # Check if we should use client-side fallback
+        if not waveform_service.is_available:
+            return jsonify({
+                "use_client_fallback": True,
+                "message": "Server-side waveform generation not available"
+            })
+
+        # Get or generate waveform
+        waveform_path = waveform_service.get_waveform_path(audio_url)
+        if waveform_path:
+            waveform_url = waveform_service.get_waveform_url(audio_url)
+            logger.debug(f"Waveform available at: {waveform_url}")
+            return jsonify({
+                "waveform_url": waveform_url,
+                "use_client_fallback": False
+            })
+        else:
+            logger.warning(f"Failed to generate waveform for: {audio_url}")
+            return jsonify({
+                "use_client_fallback": True,
+                "message": "Waveform generation failed, use client-side fallback"
+            })
+
+    except Exception as e:
+        logger.error(f"Error generating waveform: {e}")
+        return jsonify({
+            "error": f"Failed to generate waveform: {str(e)}",
+            "use_client_fallback": True
+        }), 500
+
+    finally:
+        logger.debug(f"=== GENERATE_WAVEFORM END ===")
+
+
+@app.route("/api/video/metadata", methods=["POST"])
+def get_video_metadata():
+    """
+    Get metadata for a video file.
+
+    This endpoint returns video metadata including duration, FPS, and resolution.
+    It can be called by the frontend when a video loads to get frame-accurate
+    timing information for video annotation.
+
+    Request body:
+        video_url: URL or path of the video file
+
+    Returns:
+        JSON with video metadata:
+        - duration: Video duration in seconds
+        - fps: Frames per second (estimated if not available)
+        - width: Video width in pixels
+        - height: Video height in pixels
+        - frame_count: Total number of frames (if calculable)
+    """
+    logger.debug("=== GET_VIDEO_METADATA START ===")
+
+    try:
+        data = request.get_json()
+        if not data or 'video_url' not in data:
+            return jsonify({"error": "Missing video_url parameter"}), 400
+
+        video_url = data['video_url']
+        logger.debug(f"Video URL: {video_url}")
+
+        # For now, return a basic response that the frontend can use
+        # The actual video metadata will be determined by the browser
+        # since we don't have ffprobe installed by default
+        return jsonify({
+            "status": "ok",
+            "message": "Video metadata should be retrieved client-side",
+            "video_url": video_url,
+            "use_client_detection": True
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting video metadata: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        logger.debug("=== GET_VIDEO_METADATA END ===")
+
+
+@app.route("/api/video/waveform/generate", methods=["POST"])
+def generate_video_waveform():
+    """
+    Generate waveform data from a video file's audio track.
+
+    This endpoint triggers waveform generation for a video's audio track.
+    It reuses the existing audio waveform generation infrastructure.
+
+    Request body:
+        video_url: URL or path of the video file
+
+    Returns:
+        JSON with waveform status and cache key (if successful)
+    """
+    logger.debug("=== GENERATE_VIDEO_WAVEFORM START ===")
+
+    try:
+        data = request.get_json()
+        if not data or 'video_url' not in data:
+            return jsonify({"error": "Missing video_url parameter"}), 400
+
+        video_url = data['video_url']
+        logger.debug(f"Video URL for waveform: {video_url}")
+
+        # Try to generate waveform using the existing WaveformService
+        try:
+            from potato.server_utils.waveform_service import WaveformService
+            waveform_service = WaveformService()
+
+            # Generate waveform from video (will extract audio track)
+            result = waveform_service.generate_waveform(video_url)
+
+            if result.get('status') == 'ready':
+                return jsonify({
+                    "status": "ready",
+                    "waveform_url": result.get('waveform_url'),
+                    "cache_key": result.get('cache_key')
+                })
+            else:
+                return jsonify({
+                    "status": result.get('status', 'pending'),
+                    "message": result.get('message', 'Waveform generation in progress')
+                })
+
+        except ImportError:
+            logger.warning("WaveformService not available for video waveform generation")
+            return jsonify({
+                "status": "unavailable",
+                "message": "Waveform service not available",
+                "use_client_fallback": True
+            })
+
+    except Exception as e:
+        logger.error(f"Error generating video waveform: {e}")
+        return jsonify({
+            "error": str(e),
+            "use_client_fallback": True
+        }), 500
+
+    finally:
+        logger.debug("=== GENERATE_VIDEO_WAVEFORM END ===")
+
+
+@app.route("/api/audio/proxy")
+def audio_proxy():
+    """
+    Proxy endpoint for fetching external audio files with Range request support.
+
+    This endpoint fetches audio files from external URLs and returns them
+    with proper headers, bypassing CORS restrictions that prevent the browser
+    from directly accessing external audio files for waveform generation.
+
+    Supports HTTP Range requests to enable seeking in audio files.
+
+    Query parameters:
+        url: The external audio URL to fetch
+
+    Returns:
+        The audio file with appropriate Content-Type header
+    """
+    import requests as req
+
+    audio_url = request.args.get('url')
+    if not audio_url:
+        return jsonify({"error": "Missing url parameter"}), 400
+
+    # Validate URL (basic security check)
+    if not audio_url.startswith(('http://', 'https://')):
+        return jsonify({"error": "Invalid URL - must be http or https"}), 400
+
+    try:
+        # Forward any Range header from the client to the upstream server
+        headers = {}
+        if 'Range' in request.headers:
+            headers['Range'] = request.headers['Range']
+
+        # Fetch the audio file
+        response = req.get(audio_url, headers=headers, stream=True, timeout=30)
+        response.raise_for_status()
+
+        # Get content type from response or default to audio/mpeg
+        content_type = response.headers.get('Content-Type', 'audio/mpeg')
+        content_length = response.headers.get('Content-Length')
+
+        # Create response with the audio data
+        flask_response = make_response(response.content)
+        flask_response.headers['Content-Type'] = content_type
+        flask_response.headers['Access-Control-Allow-Origin'] = '*'
+        flask_response.headers['Cache-Control'] = 'public, max-age=3600'
+
+        # Add headers to support Range requests (seeking)
+        flask_response.headers['Accept-Ranges'] = 'bytes'
+
+        if content_length:
+            flask_response.headers['Content-Length'] = content_length
+
+        # If the upstream returned a 206 Partial Content, pass that through
+        if response.status_code == 206:
+            flask_response.status_code = 206
+            if 'Content-Range' in response.headers:
+                flask_response.headers['Content-Range'] = response.headers['Content-Range']
+
+        return flask_response
+
+    except req.exceptions.Timeout:
+        logger.error(f"Timeout fetching audio: {audio_url}")
+        return jsonify({"error": "Request timed out"}), 504
+    except req.exceptions.RequestException as e:
+        logger.error(f"Error fetching audio {audio_url}: {e}")
+        return jsonify({"error": "Failed to fetch audio"}), 502
+
+
+@app.route("/api/ai_assistant", methods=["GET"])
+def ai_assistant():
+    annotation_id_str = request.args.get("annotationId")
+    logger.debug(f"[AI Assistant] Request for annotationId={annotation_id_str}")
+
+    # Handle null/None/invalid annotation IDs
+    if annotation_id_str is None or annotation_id_str == "null" or annotation_id_str == "":
+        logger.debug("[AI Assistant] Invalid annotation ID - returning empty")
+        return jsonify({"html": "", "error": None})
+
+    try:
+        annotation_id = int(annotation_id_str)
+    except (ValueError, TypeError):
+        logger.debug("[AI Assistant] Failed to parse annotation ID")
+        return jsonify({"html": "", "error": None})
+
+    username = session['username']
+    # annotation_id is positional within the schemes this user sees, so resolve
+    # against the user's cohort schemes (falls back to the global list).
+    try:
+        from potato.server_utils.cohort_schemes import get_cohort_scheme_resolver
+        _user_schemes = get_cohort_scheme_resolver().get_schemes_for_user(username)
+    except Exception:
+        _user_schemes = config.get("annotation_schemes", [])
+
+    # Check if annotation_id is valid
+    if annotation_id < 0 or annotation_id >= len(_user_schemes):
+        logger.debug(f"[AI Assistant] annotation_id {annotation_id} out of range")
+        return jsonify({"html": "", "error": None})
+
+    user_state = get_user_state(username)
+    instance = user_state.get_current_instance_index()
+    annotation_type = _user_schemes[annotation_id]["annotation_type"]
+
+    result = generate_ai_help_html(instance, annotation_id, annotation_type)
+    logger.debug(f"[AI Assistant] Result for instance={instance}, annotation_id={annotation_id}, type={annotation_type}: '{result[:100] if result else 'empty'}...'")
+    return result
+
+
+def admin_reset_password():
+    """Admin API to reset a user's password.
+
+    Requires X-API-Key header. Takes JSON body with username and new_password.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Unauthorized - valid API key required"}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
+    username = data.get("username")
+    new_password = data.get("new_password")
+
+    if not username or not new_password:
+        return jsonify({"error": "username and new_password are required"}), 400
+
+    user_authenticator = UserAuthenticator.get_instance()
+    if not user_authenticator.is_valid_username(username):
+        return jsonify({"error": f"User '{username}' does not exist"}), 404
+
+    if user_authenticator.update_password(username, new_password):
+        user_authenticator.save_user_config()
+        return jsonify({"status": "success", "message": f"Password reset for '{username}'"})
+    else:
+        return jsonify({"error": "Failed to reset password"}), 500
+
+
+def admin_create_reset_token():
+    """Admin API to generate a password reset token for a user.
+
+    Requires X-API-Key header. Takes JSON body with username and optional ttl_hours.
+    Returns the reset link and token.
+    """
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Unauthorized - valid API key required"}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
+    username = data.get("username")
+    ttl_hours = data.get("ttl_hours", 24)
+
+    if not username:
+        return jsonify({"error": "username is required"}), 400
+
+    user_authenticator = UserAuthenticator.get_instance()
+    token = user_authenticator.create_reset_token(username, ttl_hours=ttl_hours)
+
+    if token is None:
+        return jsonify({"error": f"User '{username}' does not exist"}), 404
+
+    reset_link = f"{request.host_url.rstrip('/')}/reset/{token}"
+    return jsonify({
+        "status": "success",
+        "reset_link": reset_link,
+        "token": token,
+        "expires_in_hours": ttl_hours
+    })
+
+
+def forgot_password():
+    """Self-service forgot password page.
+
+    GET: Show the forgot password form.
+    POST: Generate a reset token and display the reset link.
+    """
+    if request.method == "GET":
+        return render_template("forgot_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"))
+
+    username = request.form.get("username", "").strip()
+    # Always show success to prevent user enumeration
+    if not username:
+        return render_template("forgot_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             error="Please enter your username.")
+
+    user_authenticator = UserAuthenticator.get_instance()
+    token = user_authenticator.create_reset_token(username)
+
+    if token:
+        reset_link = f"{request.host_url.rstrip('/')}/reset/{token}"
+        return render_template("forgot_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             reset_link=reset_link,
+                             success=True)
+    else:
+        # Show same success message to prevent enumeration
+        return render_template("forgot_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             success=True)
+
+
+def reset_password_with_token(token):
+    """Self-service password reset using a token.
+
+    GET: Show the reset form if token is valid.
+    POST: Process the new password.
+    """
+    user_authenticator = UserAuthenticator.get_instance()
+
+    if request.method == "GET":
+        username = user_authenticator.validate_reset_token(token)
+        if not username:
+            return render_template("reset_password.html",
+                                 title=config.get("annotation_task_name", "Annotation Platform"),
+                                 error="This reset link is invalid or has expired.",
+                                 token_invalid=True)
+        return render_template("reset_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             token=token,
+                             username=username)
+
+    # POST
+    new_password = request.form.get("password", "")
+    confirm_password = request.form.get("confirm_password", "")
+
+    if not new_password:
+        return render_template("reset_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             token=token,
+                             error="Password cannot be empty.")
+
+    if new_password != confirm_password:
+        return render_template("reset_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             token=token,
+                             error="Passwords do not match.")
+
+    # Consume token (single-use)
+    username = user_authenticator.consume_reset_token(token)
+    if not username:
+        return render_template("reset_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             error="This reset link is invalid or has expired.",
+                             token_invalid=True)
+
+    if user_authenticator.update_password(username, new_password):
+        user_authenticator.save_user_config()
+        return render_template("reset_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             success=True)
+    else:
+        return render_template("reset_password.html",
+                             title=config.get("annotation_task_name", "Annotation Platform"),
+                             token=token,
+                             error="Failed to reset password. Please try again.")
+
+
+def configure_routes(flask_app, app_config):
+    """
+    Initialize the Flask routes with the given Flask app instance
+    and configuration.
+
+    This function is called by flask_server.py when initializing the application.
+
+    Args:
+        flask_app: The Flask application instance
+        app_config: The application configuration
+    """
+    global app, config
+    app = flask_app
+    config = app_config
+
+    # Set up session configuration
+    # Use a random secret key if sessions shouldn't persist, otherwise use the configured one
+    if config.get("persist_sessions", False):
+        secret_key = config.get("secret_key") or os.environ.get("POTATO_SECRET_KEY")
+        if not secret_key:
+            raise ValueError(
+                "persist_sessions is enabled but no secret_key is configured. "
+                "Set 'secret_key' in your config file or POTATO_SECRET_KEY environment variable."
+            )
+        app.secret_key = secret_key
+    else:
+        # Generate a random secret key to ensure sessions don't persist between restarts
+        import secrets
+        app.secret_key = secrets.token_hex(32)
+
+    app.permanent_session_lifetime = timedelta(days=config.get("session_lifetime_days", 7))
+
+    # Register all routes with the flask app instance
+    app.add_url_rule("/media/<path:filepath>", "serve_media", serve_media)
+    app.add_url_rule(
+        "/screenshots/<path:filepath>",
+        "serve_trace_screenshot",
+        serve_trace_screenshot,
+    )
+    app.add_url_rule("/", "home", home, methods=["GET", "POST"])
+    app.add_url_rule("/auth", "auth", auth, methods=["GET", "POST"])
+    app.add_url_rule("/passwordless-login", "passwordless_login", passwordless_login, methods=["GET", "POST"])
+    app.add_url_rule("/clerk-login", "clerk_login", clerk_login, methods=["GET", "POST"])
+    app.add_url_rule("/login", "login", login, methods=["GET", "POST"])
+    app.add_url_rule("/logout", "logout", logout)
+    app.add_url_rule("/submit_annotation", "submit_annotation", submit_annotation, methods=["POST"])
+    app.add_url_rule("/register", "register", register, methods=["POST"])
+    app.add_url_rule("/consent", "consent", consent, methods=["GET", "POST"])
+    app.add_url_rule("/instructions", "instructions", instructions, methods=["GET", "POST"])
+    app.add_url_rule("/prestudy", "prestudy", prestudy, methods=["GET", "POST"])
+    app.add_url_rule("/training", "training", training, methods=["GET", "POST"])
+    app.add_url_rule("/annotate", "annotate", annotate, methods=["GET", "POST"])
+    app.add_url_rule("/go_to", "go_to", go_to, methods=["GET", "POST"])
+    app.add_url_rule("/updateinstance", "update_instance", update_instance, methods=["POST"])
+    app.add_url_rule("/get_annotations", "get_annotations", get_annotations, methods=["GET"])
+    app.add_url_rule("/poststudy", "poststudy", poststudy, methods=["GET", "POST"])
+    app.add_url_rule("/done", "done", done, methods=["GET", "POST"])
+    app.add_url_rule("/admin", "admin", admin, methods=["GET"])
+    app.add_url_rule("/progress", "annotator_progress", annotator_progress, methods=["GET"])
+    app.add_url_rule("/progress/api/summary", "annotator_progress_summary", annotator_progress_summary, methods=["GET"])
+
+    app.add_url_rule("/api/get_ai_suggestion", "get_ai_suggestion", get_ai_suggestion, methods=["GET"])
+    app.add_url_rule("/api/prm/prelabel", "prm_prelabel", prm_prelabel, methods=["GET"])
+
+    # Option highlighting API routes
+    app.add_url_rule("/api/option_highlights/config", "get_option_highlighting_config", get_option_highlighting_config, methods=["GET"])
+    app.add_url_rule("/api/option_highlights/prefetch", "trigger_option_highlight_prefetch", trigger_option_highlight_prefetch, methods=["POST"])
+    app.add_url_rule("/api/option_highlights/<int:annotation_id>", "get_option_highlights", get_option_highlights, methods=["GET"])
+
+    app.add_url_rule("/api-frontend", "api_frontend", api_frontend, methods=["GET"])
+    app.add_url_rule("/span-api-frontend", "span_api_frontend", span_api_frontend, methods=["GET"])
+    app.add_url_rule("/api/spans/<instance_id>", "get_span_data", get_span_data, methods=["GET"])
+    app.add_url_rule("/api/colors", "get_span_colors", get_span_colors, methods=["GET"])
+    app.add_url_rule("/api/schemas", "get_annotation_schemas", get_annotation_schemas, methods=["GET"])
+    app.add_url_rule("/api/keyword_highlights/<instance_id>", "get_keyword_highlights", get_keyword_highlights, methods=["GET"])
+    app.add_url_rule("/test-span-colors", "test_span_colors", test_span_colors, methods=["GET"])
+    app.add_url_rule("/api/spans/<instance_id>/clear", "clear_span_annotations", clear_span_annotations, methods=["POST"])
+    app.add_url_rule("/api/links/<instance_id>", "get_link_annotations", get_link_annotations, methods=["GET"])
+    app.add_url_rule("/api/links/<instance_id>/<link_id>", "delete_link_annotation", delete_link_annotation, methods=["DELETE"])
+
+    # Event annotation API routes
+    app.add_url_rule("/api/events/<instance_id>", "get_event_annotations", get_event_annotations, methods=["GET"])
+    app.add_url_rule("/api/events/<instance_id>/<event_id>", "delete_event_annotation", delete_event_annotation, methods=["DELETE"])
+
+    # Entity linking API routes
+    app.add_url_rule("/api/entity_linking/search", "entity_linking_search", entity_linking_search, methods=["GET"])
+    app.add_url_rule("/api/entity_linking/entity/<kb_name>/<entity_id>", "entity_linking_get_entity", entity_linking_get_entity, methods=["GET"])
+    app.add_url_rule("/api/entity_linking/configured_kbs", "entity_linking_configured_kbs", entity_linking_configured_kbs, methods=["GET"])
+    app.add_url_rule("/api/entity_linking/update_span", "entity_linking_update_span", entity_linking_update_span, methods=["POST"])
+
+    app.add_url_rule("/api/current_instance", "get_current_instance", get_current_instance, methods=["GET"])
+    # F-024: get_instance_data is registered only via a module-level @app.route,
+    # which binds to a throwaway app in the CLI start path; without this explicit
+    # re-registration on the serving app the route 404s on every `potato start`
+    # server (dynamic schemas — extractive_qa/error_span/text_edit/card_sort/
+    # conjoint — then rely solely on annotation.js's embedded-JSON fallback).
+    app.add_url_rule("/api/instance_data", "get_instance_data", get_instance_data, methods=["GET"])
+    app.add_url_rule("/api/ai_assistant", "ai_assistant", ai_assistant, methods=["GET"])
+    app.add_url_rule("/api/audio/proxy", "audio_proxy", audio_proxy, methods=["GET"])
+    app.add_url_rule("/admin/user_state/<user_id>", "admin_user_state", admin_user_state, methods=["GET"])
+    app.add_url_rule("/admin/health", "admin_health", admin_health, methods=["GET"])
+    app.add_url_rule("/admin/system_state", "admin_system_state", admin_system_state, methods=["GET"])
+    app.add_url_rule("/admin/all_instances", "admin_all_instances", admin_all_instances, methods=["GET"])
+    app.add_url_rule("/admin/item_state", "admin_item_state", admin_item_state, methods=["GET"])
+    app.add_url_rule("/admin/item_state/<item_id>", "admin_item_state_detail", admin_item_state_detail, methods=["GET"])
+
+    # Password management routes
+    app.add_url_rule("/admin/reset_password", "admin_reset_password", admin_reset_password, methods=["POST"])
+    app.add_url_rule("/admin/create_reset_token", "admin_create_reset_token", admin_create_reset_token, methods=["POST"])
+    app.add_url_rule("/forgot-password", "forgot_password", forgot_password, methods=["GET", "POST"])
+    app.add_url_rule("/reset/<token>", "reset_password_with_token", reset_password_with_token, methods=["GET", "POST"])
+
+    # New admin dashboard API routes
+    app.add_url_rule("/admin/api/overview", "admin_api_overview", admin_api_overview, methods=["GET"])
+    app.add_url_rule("/admin/api/annotators", "admin_api_annotators", admin_api_annotators, methods=["GET"])
+    app.add_url_rule("/admin/api/instances", "admin_api_instances", admin_api_instances, methods=["GET"])
+    app.add_url_rule("/admin/api/config", "admin_api_config", admin_api_config, methods=["GET", "POST"])
+    app.add_url_rule("/admin/api/user/<username>/set_instances", "admin_api_set_user_instances", admin_api_set_user_instances, methods=["POST"])
+    app.add_url_rule("/admin/api/stale_assignments", "admin_api_stale_assignments", admin_api_stale_assignments, methods=["GET"])
+    app.add_url_rule("/admin/api/reclaim_instance", "admin_api_reclaim_instance", admin_api_reclaim_instance, methods=["POST"])
+    # F-041 (F-024 class): debug-gated test-state reset. It existed only as a
+    # module-level @app.route, so it 404'd on the serving app built by
+    # configure_routes — leaving Selenium suites that rely on it (e.g. video
+    # annotation persistence) without per-test isolation.
+    app.add_url_rule("/admin/api/test/reset_state", "admin_api_test_reset_state", admin_api_test_reset_state, methods=["POST"])
+    # F-042 (F-024 class): these were registered ONLY via module-level @app.route
+    # and so 404'd on every live `potato start` server (the serving app is built
+    # by configure_routes). Audit: diff of @app.route paths vs add_url_rule paths.
+    app.add_url_rule("/get_ai_suggestion", "get_ai_suggestion", get_ai_suggestion, methods=["GET"])
+    app.add_url_rule("/admin/iaa", "admin_iaa", admin_iaa, methods=["GET"])
+    app.add_url_rule("/admin/api/agent_rollup", "admin_api_agent_rollup", admin_api_agent_rollup, methods=["GET"])
+    app.add_url_rule("/admin/annotation-integrity", "admin_annotation_integrity", admin_annotation_integrity, methods=["GET"])
+    app.add_url_rule("/admin/api/perspectivist", "admin_perspectivist_export", admin_perspectivist_export, methods=["GET"])
+    app.add_url_rule("/admin/api/induce-metrics", "admin_induce_metrics", admin_induce_metrics, methods=["GET"])
+    app.add_url_rule("/admin/judge-alignment", "admin_judge_alignment", admin_judge_alignment, methods=["GET"])
+    app.add_url_rule("/admin/api/judge-alignment/run", "admin_judge_alignment_run", admin_judge_alignment_run, methods=["POST"])
+    app.add_url_rule("/admin/api/judge-alignment/autocalibrate", "admin_judge_alignment_autocalibrate", admin_judge_alignment_autocalibrate, methods=["POST"])
+    app.add_url_rule("/admin/triage-queue", "admin_triage_queue", admin_triage_queue, methods=["GET"])
+    app.add_url_rule("/admin/api/step_agreement", "admin_api_step_agreement", admin_api_step_agreement, methods=["GET"])
+    app.add_url_rule("/admin/api/step_quality", "admin_api_step_quality", admin_api_step_quality, methods=["GET"])
+    app.add_url_rule("/api/waveform/<cache_key>", "get_waveform_data", get_waveform_data, methods=["GET"])
+    app.add_url_rule("/api/waveform/generate", "generate_waveform", generate_waveform, methods=["POST"])
+    app.add_url_rule("/api/video/metadata", "get_video_metadata", get_video_metadata, methods=["POST"])
+    app.add_url_rule("/api/video/waveform/generate", "generate_video_waveform", generate_video_waveform, methods=["POST"])
+    app.add_url_rule("/admin/api/data_sources", "admin_api_data_sources", admin_api_data_sources, methods=["GET"])
+    app.add_url_rule("/admin/api/data_sources/<source_id>/load_more", "admin_api_data_sources_load_more", admin_api_data_sources_load_more, methods=["POST"])
+    app.add_url_rule("/admin/api/data_sources/<source_id>/refresh", "admin_api_data_sources_refresh", admin_api_data_sources_refresh, methods=["POST"])
+    app.add_url_rule("/admin/api/cache/clear", "admin_api_cache_clear", admin_api_cache_clear, methods=["POST"])
+    app.add_url_rule("/admin/api/webhooks", "admin_api_webhooks", admin_api_webhooks, methods=["GET"])
+    app.add_url_rule("/admin/api/webhooks/test", "admin_api_webhooks_test", admin_api_webhooks_test, methods=["POST"])
+    app.add_url_rule("/admin/api/questions", "admin_api_questions", admin_api_questions, methods=["GET"])
+    app.add_url_rule("/admin/api/annotation_history", "admin_api_annotation_history", admin_api_annotation_history, methods=["GET"])
+    app.add_url_rule("/admin/api/suspicious_activity", "admin_api_suspicious_activity", admin_api_suspicious_activity, methods=["GET"])
+    app.add_url_rule("/admin/api/crowdsourcing", "admin_api_crowdsourcing", admin_api_crowdsourcing, methods=["GET"])
+
+    # ICL labeling admin API routes
+    app.add_url_rule("/admin/api/icl/status", "admin_api_icl_status", admin_api_icl_status, methods=["GET"])
+    app.add_url_rule("/admin/api/icl/examples", "admin_api_icl_examples", admin_api_icl_examples, methods=["GET"])
+    app.add_url_rule("/admin/api/icl/predictions", "admin_api_icl_predictions", admin_api_icl_predictions, methods=["GET"])
+    app.add_url_rule("/admin/api/icl/accuracy", "admin_api_icl_accuracy", admin_api_icl_accuracy, methods=["GET"])
+    app.add_url_rule("/admin/api/icl/trigger", "admin_api_icl_trigger", admin_api_icl_trigger, methods=["POST"])
+    app.add_url_rule("/api/icl/record_verification", "api_icl_record_verification", api_icl_record_verification, methods=["POST"])
+
+    # Behavioral tracking and analytics routes
+    app.add_url_rule("/admin/api/agreement", "admin_api_agreement", admin_api_agreement, methods=["GET"])
+    app.add_url_rule("/admin/api/code_cooccurrence", "admin_api_code_cooccurrence", admin_api_code_cooccurrence, methods=["GET"])
+    app.add_url_rule("/admin/api/code_crosstab", "admin_api_code_crosstab", admin_api_code_crosstab, methods=["GET"])
+    app.add_url_rule("/admin/api/quality_control", "admin_api_quality_control", admin_api_quality_control, methods=["GET"])
+    app.add_url_rule("/admin/api/behavioral_analytics", "admin_api_behavioral_analytics", admin_api_behavioral_analytics, methods=["GET"])
+    app.add_url_rule("/api/track_interactions", "track_interactions", track_interactions, methods=["POST"])
+    app.add_url_rule("/api/track_ai_usage", "track_ai_usage", track_ai_usage, methods=["POST"])
+    app.add_url_rule("/api/track_annotation_change", "track_annotation_change", track_annotation_change, methods=["POST"])
+    app.add_url_rule("/api/behavioral_data/<instance_id>", "get_behavioral_data", get_behavioral_data, methods=["GET"])
+
+    # Adjudication routes
+    app.add_url_rule("/adjudicate", "adjudicate", adjudicate, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/queue", "adjudicate_api_queue", adjudicate_api_queue, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/item/<instance_id>", "adjudicate_api_item", adjudicate_api_item, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/submit", "adjudicate_api_submit", adjudicate_api_submit, methods=["POST"])
+    app.add_url_rule("/adjudicate/api/stats", "adjudicate_api_stats", adjudicate_api_stats, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/skip/<instance_id>", "adjudicate_api_skip", adjudicate_api_skip, methods=["POST"])
+    app.add_url_rule("/adjudicate/api/next", "adjudicate_api_next", adjudicate_api_next, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/similar/<instance_id>", "adjudicate_api_similar", adjudicate_api_similar, methods=["GET"])
+    app.add_url_rule("/admin/api/adjudication", "admin_api_adjudication", admin_api_adjudication, methods=["GET"])
+
+    # BWS scoring admin API routes
+    app.add_url_rule("/admin/api/bws_scoring", "admin_api_bws_scoring", admin_api_bws_scoring, methods=["GET"])
+    app.add_url_rule("/admin/api/bws_scoring/generate", "admin_api_bws_scoring_generate", admin_api_bws_scoring_generate, methods=["POST"])
+
+    # IBWS admin API routes
+    app.add_url_rule("/admin/api/ibws_status", "admin_api_ibws_status", admin_api_ibws_status, methods=["GET"])
+    app.add_url_rule("/admin/api/ibws_ranking", "admin_api_ibws_ranking", admin_api_ibws_ranking, methods=["GET"])
+
+    # MACE admin API routes
+    app.add_url_rule("/admin/api/mace/overview", "admin_api_mace_overview", admin_api_mace_overview, methods=["GET"])
+    app.add_url_rule("/admin/api/mace/predictions", "admin_api_mace_predictions", admin_api_mace_predictions, methods=["GET"])
+    app.add_url_rule("/admin/api/mace/trigger", "admin_api_mace_trigger", admin_api_mace_trigger, methods=["POST"])
+
+    # Embedding visualization admin API routes
+    app.add_url_rule("/admin/api/embedding_viz/data", "admin_api_embedding_viz_data", admin_api_embedding_viz_data, methods=["GET"])
+    app.add_url_rule("/admin/api/embedding_viz/reorder", "admin_api_embedding_viz_reorder", admin_api_embedding_viz_reorder, methods=["POST"])
+    app.add_url_rule("/admin/api/embedding_viz/refresh", "admin_api_embedding_viz_refresh", admin_api_embedding_viz_refresh, methods=["POST"])
+    app.add_url_rule("/admin/api/embedding_viz/stats", "admin_api_embedding_viz_stats", admin_api_embedding_viz_stats, methods=["GET"])
+
+    # Export admin API routes
+    app.add_url_rule("/admin/api/export/formats", "admin_api_export_formats", admin_api_export_formats, methods=["GET"])
+    app.add_url_rule("/admin/api/export", "admin_api_export", admin_api_export, methods=["POST"])
+
+    # Agent chat routes (interactive agent testing)
+    app.add_url_rule("/agent_chat/send", "agent_chat_send", agent_chat_send, methods=["POST"])
+    app.add_url_rule("/agent_chat/finish", "agent_chat_finish", agent_chat_finish, methods=["POST"])
+    app.add_url_rule("/agent_chat/status", "agent_chat_status", agent_chat_status, methods=["GET"])
+
+    # OAuth SSO routes
+    app.add_url_rule("/auth/login/<provider>", "oauth_login", oauth_login, methods=["GET"])
+    app.add_url_rule("/auth/callback/<provider>", "oauth_callback", oauth_callback, methods=["GET"])
+
+    # Chat support API routes
+    app.add_url_rule("/api/chat/send", "chat_send", chat_send, methods=["POST"])
+    app.add_url_rule("/api/chat/history", "chat_history", chat_history, methods=["GET"])
+    app.add_url_rule("/api/chat/config", "chat_config", chat_config, methods=["GET"])
+
+    app.add_url_rule("/shutdown", "shutdown", shutdown, methods=["POST"])
+
+    # Register crowd-platform admin API blueprint if not already registered
+    if 'crowd_admin' not in app.blueprints:
+        try:
+            from potato.crowdsourcing.admin_api import crowd_admin_bp
+            app.register_blueprint(crowd_admin_bp)
+        except ImportError:
+            pass
+
+    # Register Prolific webhook receiver (HMAC-authenticated, no session)
+    if 'crowd_webhooks' not in app.blueprints:
+        try:
+            from potato.crowdsourcing.webhooks import crowd_webhooks_bp
+            app.register_blueprint(crowd_webhooks_bp)
+        except ImportError:
+            pass
+
+    # Register Solo Mode blueprint if not already registered
+    if 'solo_mode' not in app.blueprints:
+        try:
+            from potato.solo_mode.routes import solo_mode_bp
+            app.register_blueprint(solo_mode_bp)
+        except ImportError:
+            pass
+
+    # Register QDA Mode blueprint if not already registered
+    if 'qda_mode' not in app.blueprints:
+        try:
+            from potato.qda_mode import qda_mode_bp
+            app.register_blueprint(qda_mode_bp)
+        except ImportError:
+            pass
+
+    # Register universal Memos blueprint if not already registered
+    if 'memos' not in app.blueprints:
+        try:
+            from potato.memos.api import memos_bp
+            app.register_blueprint(memos_bp)
+        except ImportError:
+            pass
+
+    # Register universal Search blueprint if not already registered
+    if 'search' not in app.blueprints:
+        try:
+            from potato.search.api import search_bp
+            app.register_blueprint(search_bp)
+        except ImportError:
+            pass
+
+    # Register universal Codebook blueprint if not already registered
+    if 'codebook' not in app.blueprints:
+        try:
+            from potato.codebook.api import codebook_bp
+            app.register_blueprint(codebook_bp)
+        except ImportError:
+            pass
+
+    # Register the Codebook full-page document view (separate blueprint so
+    # it serves /codebook at the site root, not under /api).
+    if 'codebook_page' not in app.blueprints:
+        try:
+            from potato.codebook.page import codebook_page_bp
+            app.register_blueprint(codebook_page_bp)
+        except ImportError:
+            pass
+
+    # Register universal Cases blueprint if not already registered
+    if 'cases' not in app.blueprints:
+        try:
+            from potato.cases.api import cases_bp
+            app.register_blueprint(cases_bp)
+        except ImportError:
+            pass
+
+    # Register Sessions blueprint (session-level scoring) if not already registered
+    if 'sessions' not in app.blueprints:
+        try:
+            from potato.sessions.api import sessions_bp
+            app.register_blueprint(sessions_bp)
+        except ImportError:
+            pass
+
+    # Register Review Workflow blueprint (reviewer routing + kanban) if not
+    # already registered
+    if 'review_workflow' not in app.blueprints:
+        try:
+            from potato.review_workflow import review_bp
+            app.register_blueprint(review_bp)
+        except ImportError:
+            pass
+
+    # Register Judge Calibration blueprint if not already registered
+    if 'judge_calibration' not in app.blueprints:
+        try:
+            from potato.judge_calibration.routes import judge_calibration_bp
+            app.register_blueprint(judge_calibration_bp)
+        except ImportError:
+            pass
+
+    # Register Boundary Lab blueprint (counterfactual boundary probing) if not
+    # already registered
+    if 'boundary' not in app.blueprints:
+        try:
+            from potato.boundary.routes import boundary_bp
+            app.register_blueprint(boundary_bp)
+        except ImportError:
+            pass
+
+    # Register Truth Serum blueprint (surprisingly-popular scoring) if not
+    # already registered
+    if 'truth_serum' not in app.blueprints:
+        try:
+            from potato.truth_serum.routes import truth_serum_bp
+            app.register_blueprint(truth_serum_bp)
+        except ImportError:
+            pass
+
+    # Register Think-Aloud blueprint (voice rationales, rule-based labels) if
+    # not already registered
+    if 'thinkaloud' not in app.blueprints:
+        try:
+            from potato.thinkaloud.routes import thinkaloud_bp
+            app.register_blueprint(thinkaloud_bp)
+        except ImportError:
+            pass
+
+    # Register Pocket Mode blueprint (mobile-first annotation PWA) if not
+    # already registered
+    if 'pocket' not in app.blueprints:
+        try:
+            from potato.pocket.routes import pocket_bp
+            app.register_blueprint(pocket_bp)
+        except ImportError:
+            pass
+
+    # Register Psychometrics blueprint (live IRT: labels with error bars,
+    # adaptive routing, study designer) if not already registered
+    if 'psychometrics' not in app.blueprints:
+        try:
+            from potato.psychometrics.routes import psychometrics_bp
+            app.register_blueprint(psychometrics_bp)
+        except ImportError:
+            pass
+
+    # Register Multiplayer Rooms blueprint (norming sessions, adjudication
+    # huddles, shadowing) if not already registered
+    if 'rooms' not in app.blueprints:
+        try:
+            from potato.rooms.routes import rooms_bp
+            app.register_blueprint(rooms_bp)
+        except ImportError:
+            pass
+
+# ============================================================================
+# Adjudication Routes
+# ============================================================================
+
+def _check_adjudicator_auth():
+    """Check if current user is an authorized adjudicator.
+
+    Returns:
+        tuple: (is_authorized: bool, username: str, error_response)
+    """
+    username = session.get('username')
+    if not username:
+        return False, None, (jsonify({"error": "Not authenticated"}), 401)
+
+    adj_mgr = get_adjudication_manager()
+    if not adj_mgr or not adj_mgr.adj_config.enabled:
+        return False, username, (jsonify({"error": "Adjudication not enabled"}), 404)
+
+    if not _is_authorized_adjudicator(username, adj_mgr):
+        return False, username, (jsonify({"error": "Not authorized as adjudicator"}), 403)
+
+    return True, username, None
+
+
+def _is_authorized_adjudicator(username, adj_mgr):
+    """True if the user may adjudicate: legacy allow-list OR RBAC permission.
+
+    Keeps ``adjudicator_users`` working while letting role-based adjudicators
+    (and the shared-key superuser) through.
+    """
+    if adj_mgr and adj_mgr.is_adjudicator(username):
+        return True
+    from potato.server_utils.rbac import get_rbac_manager, Permission
+    return get_rbac_manager().check(Permission.ADJUDICATE, request, session)
+
+
+@app.route('/adjudicate', methods=['GET'])
+def adjudicate():
+    """Main adjudication page."""
+    username = session.get('username')
+    if not username:
+        return redirect(url_for('home'))
+
+    adj_mgr = get_adjudication_manager()
+    if not adj_mgr or not adj_mgr.adj_config.enabled:
+        return redirect(url_for('home'))
+
+    if not _is_authorized_adjudicator(username, adj_mgr):
+        return redirect(url_for('home'))
+
+    # Get annotation schemes for form rendering. Adjudicators review every
+    # cohort, so they see the union of all cohort scheme sets (falls back to the
+    # global annotation_schemes when per-cohort schemas are not configured).
+    from potato.server_utils.cohort_schemes import get_cohort_scheme_resolver
+    annotation_schemes = get_cohort_scheme_resolver().union_of_all_schemes()
+
+    return render_template(
+        'adjudication.html',
+        annotation_task_name=config.get('annotation_task_name', 'Annotation Task'),
+        username=username,
+        annotation_schemes=annotation_schemes,
+        adj_config={
+            'show_annotator_names': adj_mgr.adj_config.show_annotator_names,
+            'show_timing_data': adj_mgr.adj_config.show_timing_data,
+            'show_agreement_scores': adj_mgr.adj_config.show_agreement_scores,
+            'fast_decision_warning_ms': adj_mgr.adj_config.fast_decision_warning_ms,
+            'require_confidence': adj_mgr.adj_config.require_confidence,
+            'require_notes_on_override': adj_mgr.adj_config.require_notes_on_override,
+            'error_taxonomy': adj_mgr.adj_config.error_taxonomy,
+            'similarity_enabled': adj_mgr.adj_config.similarity_enabled,
+        },
+    )
+
+
+@app.route('/adjudicate/api/queue', methods=['GET'])
+def adjudicate_api_queue():
+    """Get the adjudication queue."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+    filter_status = request.args.get('status', None)
+
+    items = adj_mgr.get_queue(
+        adjudicator_id=username,
+        filter_status=filter_status,
+    )
+
+    return jsonify({
+        "items": [item.to_dict() for item in items],
+        "total": len(items),
+    })
+
+
+@app.route('/adjudicate/api/item/<instance_id>', methods=['GET'])
+def adjudicate_api_item(instance_id):
+    """Get full item detail for adjudication."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+    item = adj_mgr.get_item(instance_id)
+
+    if not item:
+        return jsonify({"error": "Item not found in adjudication queue"}), 404
+
+    # Get item text and data
+    item_text = adj_mgr.get_item_text(instance_id)
+    item_data = adj_mgr.get_item_data(instance_id)
+
+    # Get existing decision if any
+    decision = adj_mgr.get_decision(instance_id)
+
+    # Phase 3: annotator signals and similar items
+    annotator_signals = {}
+    for user_id in item.annotations:
+        annotator_signals[user_id] = adj_mgr.get_annotator_signals(
+            user_id, instance_id
+        )
+
+    similar_items = []
+    if adj_mgr.adj_config.similarity_enabled:
+        similar_items = adj_mgr.get_similar_items(instance_id)
+
+    return jsonify({
+        "item": item.to_dict(),
+        "item_text": item_text,
+        "item_data": item_data,
+        "decision": decision.to_dict() if decision else None,
+        "annotator_signals": annotator_signals,
+        "similar_items": similar_items,
+    })
+
+
+@app.route('/adjudicate/api/similar/<instance_id>', methods=['GET'])
+def adjudicate_api_similar(instance_id):
+    """Get similar items for a specific instance (lazy-loading endpoint)."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+    enabled = adj_mgr.adj_config.similarity_enabled
+    similar_items = adj_mgr.get_similar_items(instance_id) if enabled else []
+
+    return jsonify({
+        "enabled": enabled,
+        "instance_id": instance_id,
+        "similar_items": similar_items,
+        "count": len(similar_items),
+    })
+
+
+@app.route('/admin/api/adjudication', methods=['GET'])
+def admin_api_adjudication():
+    """Admin dashboard overview of adjudication status."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    adj_mgr = get_adjudication_manager()
+    if not adj_mgr or not adj_mgr.adj_config.enabled:
+        return jsonify({"enabled": False, "message": "Adjudication not configured"})
+
+    overview = admin_dashboard.get_adjudication_overview()
+    return jsonify(overview)
+
+
+# ============================================================================
+# BWS Scoring Admin API Routes
+# ============================================================================
+
+@app.route('/admin/api/bws_scoring', methods=['GET'])
+def admin_api_bws_scoring():
+    """Get current BWS scoring status and cached scores."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not config.get("bws_config"):
+        return jsonify({"error": "BWS not configured"}), 400
+
+    return jsonify({
+        "total_items": len(config.get("_bws_pool_items", [])),
+        "total_annotations": 0,
+        "method": config.get("bws_config", {}).get("scoring", {}).get("method", "counting"),
+        "scores": [],
+    })
+
+
+@app.route('/admin/api/bws_scoring/generate', methods=['POST'])
+def admin_api_bws_scoring_generate():
+    """Generate BWS scores from current annotations."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not config.get("bws_config"):
+        return jsonify({"error": "BWS not configured"}), 400
+
+    method = request.args.get("method", "counting")
+
+    from potato.bws_scoring import BwsScorer, write_scores
+
+    # Collect annotations from all users
+    pool_items = config.get("_bws_pool_items", [])
+    id_key = config["item_properties"]["id_key"]
+    text_key = config["item_properties"]["text_key"]
+
+    # Find BWS schema name
+    bws_schema_name = None
+    for scheme in config.get("annotation_schemes", []):
+        if scheme.get("annotation_type") == "bws":
+            bws_schema_name = scheme["name"]
+            break
+
+    if not bws_schema_name:
+        return jsonify({"error": "No BWS annotation scheme found"}), 400
+
+    # Collect annotations from all user states
+    ism = get_item_state_manager()
+    usm = get_user_state_manager()
+    annotations = []
+
+    # Build a lookup of instance_id -> bws_items from items
+    instance_bws_items = {}
+    for item in ism.items():
+        item_data = item.get_data()
+        bws_items = item_data.get("_bws_items", [])
+        if bws_items:
+            instance_bws_items[item.get_id()] = bws_items
+
+    # Iterate all user states to collect annotations
+    for user_state in usm.get_all_users():
+        username = user_state.get_user_id()
+        label_store = getattr(user_state, 'instance_id_to_label_to_value', {})
+
+        for instance_id, labels in label_store.items():
+            bws_items = instance_bws_items.get(instance_id, [])
+            if not bws_items:
+                continue
+
+            # Labels is {Label -> value} dict. Find best/worst for this schema.
+            best_val = None
+            worst_val = None
+            for label_obj, value in labels.items():
+                if label_obj.get_schema() == bws_schema_name:
+                    if label_obj.get_name() == "best":
+                        best_val = value
+                    elif label_obj.get_name() == "worst":
+                        worst_val = value
+
+            if best_val and worst_val:
+                annotations.append({
+                    "instance_id": instance_id,
+                    "bws_items": bws_items,
+                    "best": best_val,
+                    "worst": worst_val,
+                    "annotator": username,
+                })
+
+    if not annotations:
+        return jsonify({
+            "status": "success",
+            "total_items": len(pool_items),
+            "total_annotations": 0,
+            "method": method,
+            "scores": [],
+            "message": "No BWS annotations found yet",
+        })
+
+    try:
+        scorer = BwsScorer(annotations, pool_items, id_key, text_key)
+        scores_dict = scorer.score(method)
+    except ImportError as e:
+        logger.error("BWS scoring import error: %s", traceback.format_exc())
+        return jsonify({"error": "A required dependency is missing"}), 400
+    except Exception as e:
+        logger.error("BWS scoring failed: %s", traceback.format_exc())
+        return jsonify({"error": "An internal error occurred"}), 500
+
+    # Write scores file
+    output_dir = config.get("output_annotation_dir", "annotation_output")
+    output_path = os.path.join(output_dir, "bws_scores.tsv")
+    try:
+        write_scores(scores_dict, output_path)
+    except Exception as e:
+        logger.warning(f"Failed to write BWS scores file: {e}")
+
+    # Sort and format for response
+    sorted_scores = sorted(
+        scores_dict.items(), key=lambda x: x[1]["score"], reverse=True
+    )
+    scores_list = []
+    for rank, (item_id, data) in enumerate(sorted_scores, 1):
+        scores_list.append({
+            "rank": rank,
+            "item_id": item_id,
+            "text": data.get("text", "")[:200],
+            "score": round(data["score"], 6),
+            "best_count": data.get("best_count"),
+            "worst_count": data.get("worst_count"),
+            "appearances": data.get("appearances"),
+        })
+
+    return jsonify({
+        "status": "success",
+        "total_items": len(pool_items),
+        "total_annotations": len(annotations),
+        "method": method,
+        "scores": scores_list,
+    })
+
+
+# ============================================================================
+# IBWS Admin API Routes
+# ============================================================================
+
+@app.route('/admin/api/ibws_status', methods=['GET'])
+def admin_api_ibws_status():
+    """Get current IBWS round status and progress."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not config.get("ibws_config"):
+        return jsonify({"error": "IBWS not configured"}), 400
+
+    from potato.ibws_manager import get_ibws_manager
+    ibws_mgr = get_ibws_manager()
+    if not ibws_mgr:
+        return jsonify({"error": "IBWS manager not initialized"}), 500
+
+    return jsonify(ibws_mgr.get_round_info())
+
+
+@app.route('/admin/api/ibws_ranking', methods=['GET'])
+def admin_api_ibws_ranking():
+    """Get current IBWS ordinal ranking."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not config.get("ibws_config"):
+        return jsonify({"error": "IBWS not configured"}), 400
+
+    from potato.ibws_manager import get_ibws_manager
+    ibws_mgr = get_ibws_manager()
+    if not ibws_mgr:
+        return jsonify({"error": "IBWS manager not initialized"}), 500
+
+    ranking = ibws_mgr.get_final_ranking()
+    return jsonify({
+        "completed": ibws_mgr.is_completed(),
+        "current_round": ibws_mgr.current_round,
+        "ranking": ranking,
+    })
+
+
+# ============================================================================
+# MACE Admin API Routes
+# ============================================================================
+
+@app.route('/admin/api/mace/overview', methods=['GET'])
+def admin_api_mace_overview():
+    """Admin dashboard overview of MACE competence estimation results."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    return jsonify(admin_dashboard.get_mace_overview())
+
+
+@app.route('/admin/api/mace/predictions', methods=['GET'])
+def admin_api_mace_predictions():
+    """Get MACE predicted labels, optionally filtered by schema and instance."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    schema = request.args.get('schema')
+    instance_id = request.args.get('instance_id')
+
+    if not schema:
+        return jsonify({"error": "schema parameter required"}), 400
+
+    return jsonify(admin_dashboard.get_mace_predictions(schema, instance_id))
+
+
+@app.route('/admin/api/mace/trigger', methods=['POST'])
+def admin_api_mace_trigger():
+    """Manually trigger a MACE recomputation."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.mace_manager import get_mace_manager
+    mace_mgr = get_mace_manager()
+    if not mace_mgr or not mace_mgr.mace_config.enabled:
+        return jsonify({"error": "MACE not enabled"}), 400
+
+    results = mace_mgr.run_all_schemas()
+    return jsonify({
+        "status": "success",
+        "schemas_processed": len(results),
+        "schemas": list(results.keys()),
+    })
+
+
+# =============================================================================
+# Embedding Visualization API Endpoints
+# =============================================================================
+
+@app.route('/admin/api/embedding_viz/data', methods=['GET'])
+def admin_api_embedding_viz_data():
+    """
+    Get visualization data for the embedding scatter plot.
+    Admin-only endpoint requiring API key.
+
+    Query Parameters:
+        force_refresh: If "true", force recomputation of UMAP projection
+
+    Returns:
+        JSON with points, labels, label_colors, and stats
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.embedding_visualization import get_embedding_viz_manager
+
+    viz_manager = get_embedding_viz_manager()
+    if not viz_manager:
+        return jsonify({
+            "error": "Embedding visualization not initialized. "
+                     "Ensure diversity_ordering is enabled in config."
+        }), 400
+
+    if not viz_manager.enabled:
+        return jsonify({
+            "error": "Embedding visualization disabled. "
+                     "Install umap-learn: pip install umap-learn"
+        }), 400
+
+    try:
+        force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
+        data = viz_manager.get_visualization_data(force_refresh=force_refresh)
+
+        # Convert to JSON-serializable format
+        points_json = []
+        for p in data.points:
+            points_json.append({
+                "instance_id": p.instance_id,
+                "x": p.x,
+                "y": p.y,
+                "label": p.label,
+                "label_source": p.label_source,
+                "preview": p.preview,
+                "preview_type": p.preview_type,
+                "annotated": p.annotated,
+                "annotation_count": p.annotation_count
+            })
+
+        return jsonify({
+            "points": points_json,
+            "labels": data.labels,
+            "label_colors": data.label_colors,
+            "stats": data.stats
+        })
+
+    except Exception as e:
+        logger.error("Error getting embedding visualization data: %s", traceback.format_exc())
+        return jsonify({"error": "An internal error occurred"}), 500
+
+
+@app.route('/admin/api/embedding_viz/reorder', methods=['POST'])
+def admin_api_embedding_viz_reorder():
+    """
+    Reorder the annotation queue based on selected instances.
+    Admin-only endpoint requiring API key.
+
+    JSON Body:
+        selections: List of selection groups, each with:
+            - instance_ids: List of selected instance IDs
+            - priority: Priority number (lower = higher priority)
+        interleave: Whether to interleave selections (default: true)
+
+    Returns:
+        JSON with success status, reordered_count, and new_order_preview
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.embedding_visualization import get_embedding_viz_manager
+
+    viz_manager = get_embedding_viz_manager()
+    if not viz_manager or not viz_manager.enabled:
+        return jsonify({"error": "Embedding visualization not available"}), 400
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        selections = data.get("selections", [])
+        interleave = data.get("interleave", True)
+
+        if not selections:
+            return jsonify({"error": "No selections provided"}), 400
+
+        result = viz_manager.reorder_instances(selections, interleave=interleave)
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error("Error reordering instances: %s", traceback.format_exc())
+        return jsonify({"success": False, "error": "An internal error occurred"}), 500
+
+
+@app.route('/admin/api/embedding_viz/refresh', methods=['POST'])
+def admin_api_embedding_viz_refresh():
+    """
+    Force re-computation of embeddings and UMAP projection.
+    Admin-only endpoint requiring API key.
+
+    JSON Body (optional):
+        force_recompute: If true, invalidate cache and recompute (default: true)
+
+    Returns:
+        JSON with status and statistics
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.embedding_visualization import get_embedding_viz_manager
+
+    viz_manager = get_embedding_viz_manager()
+    if not viz_manager or not viz_manager.enabled:
+        return jsonify({"error": "Embedding visualization not available"}), 400
+
+    try:
+        data = request.get_json() or {}
+        force_recompute = data.get("force_recompute", True)
+
+        if force_recompute:
+            viz_manager.invalidate_cache()
+
+        # Trigger recomputation by fetching data
+        viz_data = viz_manager.get_visualization_data(force_refresh=True)
+
+        return jsonify({
+            "status": "success",
+            "stats": viz_data.stats
+        })
+
+    except Exception as e:
+        logger.error("Error refreshing embedding visualization: %s", traceback.format_exc())
+        return jsonify({"status": "error", "error": "An internal error occurred"}), 500
+
+
+@app.route('/admin/api/embedding_viz/stats', methods=['GET'])
+def admin_api_embedding_viz_stats():
+    """
+    Get embedding visualization statistics.
+    Admin-only endpoint requiring API key.
+
+    Returns:
+        JSON with visualization manager statistics
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.embedding_visualization import get_embedding_viz_manager
+
+    viz_manager = get_embedding_viz_manager()
+    if not viz_manager:
+        return jsonify({
+            "enabled": False,
+            "error": "Embedding visualization not initialized"
+        })
+
+    return jsonify(viz_manager.get_stats())
+
+
+# =============================================================================
+# Data Sources API Endpoints
+# =============================================================================
+
+@app.route('/admin/api/data_sources', methods=['GET'])
+def admin_api_data_sources():
+    """
+    List all data sources with their status.
+
+    Returns:
+        JSON with list of sources and their status
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.data_sources import get_data_source_manager
+
+    manager = get_data_source_manager()
+    if not manager:
+        return jsonify({
+            "enabled": False,
+            "message": "Data sources not configured"
+        })
+
+    return jsonify({
+        "enabled": True,
+        "sources": manager.list_sources(),
+        "stats": manager.get_stats()
+    })
+
+
+@app.route('/admin/api/data_sources/<source_id>/load_more', methods=['POST'])
+def admin_api_data_sources_load_more(source_id):
+    """
+    Load more items from a specific data source.
+
+    Args:
+        source_id: The source identifier
+
+    Query params:
+        count: Number of items to load (optional, uses batch_size default)
+
+    Returns:
+        JSON with number of items loaded
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.data_sources import get_data_source_manager
+
+    manager = get_data_source_manager()
+    if not manager:
+        return jsonify({"error": "Data sources not configured"}), 400
+
+    try:
+        # Get optional count parameter
+        count = request.args.get('count', type=int)
+
+        loaded = manager.load_more(source_id, count=count)
+        return jsonify({
+            "status": "success",
+            "source_id": source_id,
+            "items_loaded": loaded
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.error(f"Error loading more from {source_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/api/data_sources/<source_id>/refresh', methods=['POST'])
+def admin_api_data_sources_refresh(source_id):
+    """
+    Refresh a data source (re-fetch from remote).
+
+    Args:
+        source_id: The source identifier
+
+    Returns:
+        JSON with refresh status
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.data_sources import get_data_source_manager
+
+    manager = get_data_source_manager()
+    if not manager:
+        return jsonify({"error": "Data sources not configured"}), 400
+
+    try:
+        success = manager.refresh_source(source_id)
+        return jsonify({
+            "status": "success" if success else "failed",
+            "source_id": source_id
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.error(f"Error refreshing source {source_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/api/cache/clear', methods=['POST'])
+def admin_api_cache_clear():
+    """
+    Clear the data source cache.
+
+    Returns:
+        JSON with number of entries cleared
+    """
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.data_sources import get_data_source_manager
+
+    manager = get_data_source_manager()
+    if not manager:
+        return jsonify({"error": "Data sources not configured"}), 400
+
+    try:
+        entries_cleared = manager.clear_cache()
+        return jsonify({
+            "status": "success",
+            "entries_cleared": entries_cleared
+        })
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/api/webhooks', methods=['GET'])
+def admin_api_webhooks():
+    """Get webhook configuration and delivery stats."""
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.webhooks import get_webhook_emitter
+    emitter = get_webhook_emitter()
+    if not emitter:
+        return jsonify({"enabled": False, "endpoints": [], "stats": {}})
+
+    return jsonify({
+        "enabled": True,
+        "endpoints": emitter.get_endpoint_info(),
+        "stats": emitter.get_stats(),
+    })
+
+
+@app.route('/admin/api/webhooks/test', methods=['POST'])
+def admin_api_webhooks_test():
+    """Send a test webhook event to verify endpoint connectivity."""
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.webhooks import get_webhook_emitter
+    emitter = get_webhook_emitter()
+    if not emitter:
+        return jsonify({"error": "Webhooks not enabled"}), 400
+
+    import datetime
+    test_payload = {
+        "event": "webhook.test",
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "data": {"message": "Test webhook from Potato admin"},
+    }
+    count = emitter.emit("webhook.test", test_payload)
+    return jsonify({"status": "sent", "endpoints_matched": count})
+
+
+@app.route('/admin/api/export/formats', methods=['GET'])
+def admin_api_export_formats():
+    """List available export formats with metadata."""
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.export import export_registry
+    formats = export_registry.list_exporters()
+    return jsonify({"formats": formats})
+
+
+@app.route('/admin/api/export', methods=['POST'])
+def admin_api_export():
+    """Run an export in the requested format and return the result."""
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    fmt = data.get("format")
+    if not fmt:
+        return jsonify({"error": "Missing required field: format"}), 400
+
+    output = data.get("output", "")
+    options = data.get("options") or {}
+
+    config_file = config.get("__config_file__")
+    if not config_file:
+        return jsonify({"error": "Config file path not available"}), 500
+
+    try:
+        from potato.export.cli import build_export_context
+        from potato.export import export_registry
+
+        context = build_export_context(config_file)
+        # Default the output directory when the caller didn't supply one, so the
+        # admin dashboard "Export" button works without requiring a path. Writes
+        # under <output_annotation_dir>/exports/<format>/ (auto-export convention).
+        if not output:
+            base_out = getattr(context, "output_dir", "") or os.getcwd()
+            output = os.path.join(base_out, "exports", fmt)
+            os.makedirs(output, exist_ok=True)
+        result = export_registry.export(fmt, context, output, options)
+
+        return jsonify({
+            "success": result.success,
+            "format": result.format_name,
+            "files_written": result.files_written,
+            "stats": result.stats,
+            "warnings": result.warnings,
+            "errors": result.errors,
+        })
+    except Exception as e:
+        logger.exception("Export failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/adjudicate/api/submit', methods=['POST'])
+def adjudicate_api_submit():
+    """Submit an adjudication decision."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        instance_id = data.get('instance_id')
+        if not instance_id:
+            return jsonify({"error": "instance_id is required"}), 400
+
+        decision = AdjudicationDecision(
+            instance_id=str(instance_id),
+            adjudicator_id=username,
+            timestamp=datetime.datetime.now().isoformat(),
+            label_decisions=data.get('label_decisions', {}),
+            span_decisions=data.get('span_decisions', []),
+            source=data.get('source', {}),
+            confidence=data.get('confidence', 'medium'),
+            notes=data.get('notes', ''),
+            error_taxonomy=data.get('error_taxonomy', []),
+            guideline_update_flag=data.get('guideline_update_flag', False),
+            guideline_update_notes=data.get('guideline_update_notes', ''),
+            time_spent_ms=data.get('time_spent_ms', 0),
+        )
+
+        success = adj_mgr.submit_decision(decision)
+        if success:
+            return jsonify({"status": "ok", "instance_id": instance_id})
+        else:
+            return jsonify({"error": "Failed to save decision"}), 500
+
+    except Exception as e:
+        logger.error(f"Error submitting adjudication decision: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/adjudicate/api/stats', methods=['GET'])
+def adjudicate_api_stats():
+    """Get adjudication progress statistics."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+    stats = adj_mgr.get_stats()
+    return jsonify(stats)
+
+
+@app.route('/adjudicate/api/skip/<instance_id>', methods=['POST'])
+def adjudicate_api_skip(instance_id):
+    """Skip an adjudication item."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+    success = adj_mgr.skip_item(instance_id, username)
+
+    if success:
+        return jsonify({"status": "ok", "instance_id": instance_id})
+    else:
+        return jsonify({"error": "Item not found"}), 404
+
+
+@app.route('/adjudicate/api/next', methods=['GET'])
+def adjudicate_api_next():
+    """Get the next item to adjudicate."""
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+
+    adj_mgr = get_adjudication_manager()
+    item = adj_mgr.get_next_item(username)
+
+    if not item:
+        return jsonify({"item": None, "message": "No more items to adjudicate"})
+
+    item_text = adj_mgr.get_item_text(item.instance_id)
+    item_data = adj_mgr.get_item_data(item.instance_id)
+
+    return jsonify({
+        "item": item.to_dict(),
+        "item_text": item_text,
+        "item_data": item_data,
+    })
+
+
+# ============================================================================
+# Chat Support API Endpoints
+# ============================================================================
+
+@app.route("/api/chat/send", methods=["POST"])
+def chat_send():
+    """Send a message to the LLM chat assistant and get a response."""
+    import time as time_module
+    from potato.chat_manager import get_chat_manager
+    from potato.interaction_tracking import (
+        get_or_create_behavioral_data, ChatMessage,
+    )
+
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    data = request.get_json()
+    if not data or not data.get("message"):
+        return jsonify({"error": "No message provided"}), 400
+
+    chat_manager = get_chat_manager()
+    if not chat_manager or not chat_manager.enabled:
+        return jsonify({"error": "Chat support is not enabled"}), 404
+
+    user_state = get_user_state(username)
+    if not user_state:
+        return jsonify({"error": "User state not found"}), 404
+
+    # Get instance info
+    instance_id = data.get("instance_id")
+    if not instance_id:
+        current_instance = user_state.get_current_instance()
+        if current_instance:
+            instance_id = current_instance.get_id()
+
+    # Get instance text for context
+    instance_text = ""
+    if instance_id:
+        item_state_mgr = get_item_state_manager()
+        item = item_state_mgr.get_item(instance_id)
+        if item:
+            text_key = config.get("item_properties", {}).get("text_key", "text")
+            item_data = item.get_data()
+            instance_text = item_data.get(text_key, item.get_text())
+
+    # Get behavioral data and existing chat history
+    bd = get_or_create_behavioral_data(
+        user_state.instance_id_to_behavioral_data,
+        instance_id or "",
+    )
+
+    # Build history from chat_history (only role + content for the LLM)
+    history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in bd.chat_history
+        if isinstance(msg, ChatMessage)
+    ]
+
+    # Enforce max history
+    max_hist = chat_manager.max_history_per_instance
+    if len(history) > max_hist:
+        history = history[-max_hist:]
+
+    user_message = data["message"]
+    now = time_module.time()
+
+    # Send to LLM
+    result = chat_manager.send_message(
+        user_message, instance_text, instance_id or "", history
+    )
+
+    # Record messages in behavioral data
+    bd.chat_history.append(ChatMessage(
+        role="user",
+        content=user_message,
+        timestamp=now,
+        instance_id=instance_id or "",
+    ))
+    bd.chat_history.append(ChatMessage(
+        role="assistant",
+        content=result["content"],
+        timestamp=time_module.time(),
+        instance_id=instance_id or "",
+        response_time_ms=result["response_time_ms"],
+    ))
+
+    # Log interaction event
+    bd.add_interaction(
+        event_type="chat_message_sent",
+        target="chat_sidebar",
+        metadata={
+            "message_length": len(user_message),
+            "response_length": len(result["content"]),
+            "response_time_ms": result["response_time_ms"],
+        },
+    )
+
+    # Persist user state
+    usm = get_user_state_manager()
+    if usm:
+        usm.save_user_state(user_state)
+
+    return jsonify(result)
+
+
+@app.route("/api/chat/history", methods=["GET"])
+def chat_history():
+    """Get chat history for a specific instance."""
+    from potato.interaction_tracking import get_or_create_behavioral_data, ChatMessage
+
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    instance_id = request.args.get("instance_id", "")
+
+    user_state = get_user_state(username)
+    if not user_state:
+        return jsonify({"error": "User state not found"}), 404
+
+    if not instance_id:
+        current_instance = user_state.get_current_instance()
+        if current_instance:
+            instance_id = current_instance.get_id()
+
+    # Get existing behavioral data (don't create if it doesn't exist)
+    bd_dict = user_state.instance_id_to_behavioral_data
+    if instance_id and instance_id in bd_dict:
+        bd = get_or_create_behavioral_data(bd_dict, instance_id)
+        messages = [
+            msg.to_dict() if hasattr(msg, 'to_dict') else msg
+            for msg in bd.chat_history
+        ]
+    else:
+        messages = []
+
+    return jsonify({"messages": messages, "instance_id": instance_id})
+
+
+@app.route("/api/chat/config", methods=["GET"])
+def chat_config():
+    """Get chat UI configuration."""
+    from potato.chat_manager import get_chat_manager
+
+    chat_manager = get_chat_manager()
+    if not chat_manager:
+        return jsonify({"enabled": False})
+
+    return jsonify(chat_manager.get_ui_config())
+
+
+@app.route('/shutdown', methods=['POST'])
+def shutdown():
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func is None:
+        return jsonify({'error': 'Not running with the Werkzeug Server'}), 500
+    logger.info('Shutting down server via /shutdown')
+    func()
+    return jsonify({'status': 'Server shutting down...'})

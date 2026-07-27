@@ -1,0 +1,394 @@
+"""
+Identifier Utilities for Schema Generation
+
+This module provides centralized functions for generating consistent identifiers
+and validating schema configurations across all annotation schema types.
+"""
+
+import html
+import logging
+from collections.abc import Mapping
+from typing import Dict, Any, Tuple, List
+
+logger = logging.getLogger(__name__)
+
+def validate_schema_config(annotation_scheme: dict) -> bool:
+    """
+    Validate schema configuration before generating HTML.
+
+    Args:
+        annotation_scheme: Schema configuration dictionary
+
+    Returns:
+        bool: True if valid, raises exception if invalid
+
+    Raises:
+        ValueError: If configuration is invalid
+    """
+    # Check required fields
+    required_fields = ["name", "description"]
+    for field in required_fields:
+        if field not in annotation_scheme:
+            raise ValueError(f"Missing required field: {field}")
+
+    # Validate schema name
+    schema_name = annotation_scheme["name"]
+    if not schema_name or not str(schema_name).strip():
+        raise ValueError("Schema name cannot be empty")
+
+    # Validate description
+    description = annotation_scheme["description"]
+    if not description or not str(description).strip():
+        raise ValueError("Schema description cannot be empty")
+
+    # Validate labels if present
+    if "labels" in annotation_scheme:
+        labels = annotation_scheme["labels"]
+        if not labels:
+            raise ValueError("Labels list cannot be empty")
+
+        # Check for duplicate labels
+        label_names = []
+        for label in labels:
+            if isinstance(label, str):
+                label_names.append(label.strip())
+            elif isinstance(label, dict) and "name" in label:
+                label_names.append(label["name"].strip())
+            else:
+                raise ValueError(f"Invalid label format: {label}")
+
+        # Check for empty labels
+        if any(not name for name in label_names):
+            raise ValueError("Label names cannot be empty")
+
+        # Check for duplicates
+        if len(label_names) != len(set(label_names)):
+            duplicates = [name for name in set(label_names) if label_names.count(name) > 1]
+            raise ValueError(f"Duplicate labels found: {duplicates}")
+
+    logger.debug(f"Schema configuration validation passed for: {schema_name}")
+    return True
+
+def generate_element_identifier(schema_name: str, label_name: str, element_type: str = "default") -> Dict[str, str]:
+    """
+    Generate consistent identifiers for form elements.
+
+    Args:
+        schema_name: Name of the annotation schema
+        label_name: Name of the specific label/option
+        element_type: Type of element (radio, checkbox, text, etc.)
+
+    Returns:
+        dict: Contains id, name, schema, and label_name attributes
+    """
+    # Sanitize inputs
+    safe_schema = escape_html_content(schema_name.strip())
+    safe_label = escape_html_content(label_name.strip())
+
+    # Generate unique identifier (using underscore to avoid conflicts with CSS selectors)
+    element_id = f"{safe_schema}_{safe_label}_{element_type}".replace(":::", "_")
+
+    # For radio buttons, use schema name as the group name to ensure mutual exclusivity
+    if element_type == "radio":
+        element_name = safe_schema
+    else:
+        element_name = f"{safe_schema}:::{safe_label}"
+
+    return {
+        "id": element_id,
+        "name": element_name,
+        "schema": safe_schema,
+        "label_name": safe_label
+    }
+
+def generate_element_value(label_data: Any, index: int, annotation_scheme: dict) -> str:
+    """
+    Generate consistent value attributes for form elements.
+
+    Args:
+        label_data: Label configuration (string or dict)
+        index: Index of the label in the list
+        annotation_scheme: Full schema configuration
+
+    Returns:
+        str: Value to use for the element
+    """
+    # Handle custom key_value first
+    if isinstance(label_data, dict) and "key_value" in label_data:
+        return str(label_data["key_value"])
+
+    # Handle sequential key binding
+    if annotation_scheme.get("sequential_key_binding"):
+        return str(index % 10)
+
+    # Default to label name
+    if isinstance(label_data, str):
+        return label_data
+    elif isinstance(label_data, dict) and "name" in label_data:
+        return label_data["name"]
+
+    # Fallback to index
+    return str(index)
+
+def escape_html_content(content: str) -> str:
+    """
+    Escape HTML content to prevent injection.
+
+    Args:
+        content: Content to escape
+
+    Returns:
+        str: Escaped content
+    """
+    if not content:
+        return ""
+    return html.escape(str(content))
+
+
+def humanize_label(text: str) -> str:
+    """Turn a machine label (``agent_a_much_better``) into readable text
+    (``Agent A Much Better``) for display only -- the stored annotation
+    value is always the original label name, never this.
+
+    Tokens that are already mixed/upper case or contain digits+letters
+    (acronyms, ``GPT4``, ``v2``) are preserved as-is so we don't mangle
+    them; purely lowercase tokens are capitalized.
+    """
+    if not text:
+        return ""
+    # Never mangle Jinja/template expressions (e.g. dynamic_labels:
+    # "{{instance_obj.labels[0]}}"). Humanizing would rewrite `instance_obj`
+    # to `instance Obj`, producing invalid Jinja and a 500 at render time.
+    if "{{" in str(text) or "{%" in str(text):
+        return str(text)
+    s = str(text).replace("_", " ").replace("-", " ")
+    s = " ".join(s.split())  # collapse whitespace
+    out = []
+    for tok in s.split(" "):
+        if tok.islower():
+            out.append(tok[:1].upper() + tok[1:])
+        else:
+            out.append(tok)  # preserve ACRONYMs, GPT4, v2, MixedCase
+    return " ".join(out)
+
+
+def display_label_text(label_data: Any, annotation_scheme: dict) -> str:
+    """Resolve the *visible* text for a label.
+
+    Precedence: explicit ``displayed_label`` on a dict label  >
+    humanized name (default, when ``humanize_labels`` is not disabled) >
+    raw name. Stored value is unaffected by this function.
+    """
+    if isinstance(label_data, Mapping):
+        if label_data.get("displayed_label"):
+            return str(label_data["displayed_label"])
+        name = label_data.get("name", "")
+    else:
+        name = label_data
+    if annotation_scheme.get("humanize_labels", True):
+        return humanize_label(name)
+    return str(name)
+
+def safe_generate_layout(annotation_scheme: dict, layout_function: callable, *args, **kwargs) -> Tuple[str, List[Tuple[str, str]]]:
+    """
+    Safely generate layout with proper error handling.
+
+    Args:
+        annotation_scheme: Schema configuration
+        layout_function: Function to generate layout
+        *args, **kwargs: Additional arguments for the layout function
+
+    Returns:
+        tuple: (html_string, key_bindings)
+    """
+    try:
+        # Validate configuration
+        validate_schema_config(annotation_scheme)
+
+        # Generate layout
+        return layout_function(annotation_scheme, *args, **kwargs)
+
+    except Exception as e:
+        schema_name = annotation_scheme.get('name', 'unknown')
+        logger.error(f"Failed to generate layout for schema '{schema_name}': {e}")
+
+        # Return error HTML instead of crashing
+        error_html = f"""
+        <div class="annotation-error" style="border: 2px solid #ff0000; padding: 10px; margin: 10px 0; background-color: #fff5f5;">
+            <h4 style="color: #ff0000; margin: 0 0 10px 0;">Error Generating Annotation Form</h4>
+            <p style="margin: 0; color: #666;">Schema: {escape_html_content(schema_name)}</p>
+            <p style="margin: 5px 0 0 0; color: #333;">{escape_html_content(str(e))}</p>
+        </div>
+        """
+        return error_html, []
+
+def generate_validation_attribute(annotation_scheme: dict, label_name: str = None) -> str:
+    """
+    Generate validation attribute for form elements.
+
+    Args:
+        annotation_scheme: Schema configuration
+        label_name: Specific label name for required_label validation
+
+    Returns:
+        str: Validation attribute value
+    """
+    label_requirement = annotation_scheme.get("label_requirement", {})
+
+    # Normalize: label_requirement: true (bool) → {"required": true}
+    if isinstance(label_requirement, bool):
+        label_requirement = {"required": True} if label_requirement else {}
+
+    # Support top-level required: true as shorthand for label_requirement.required
+    if not label_requirement and annotation_scheme.get("required") is True:
+        label_requirement = {"required": True}
+
+    # Debug logging
+    logger.debug(f"generate_validation_attribute called with label_requirement: {label_requirement}")
+    logger.debug(f"label_name: {label_name}")
+
+    # Check for required_label validation
+    if label_name and label_requirement.get("required_label"):
+        required_labels = label_requirement["required_label"]
+        if isinstance(required_labels, str) and label_name == required_labels:
+            logger.debug(f"Returning 'required_label' for label: {label_name}")
+            return "required_label"
+        elif isinstance(required_labels, list) and label_name in required_labels:
+            logger.debug(f"Returning 'required_label' for label: {label_name}")
+            return "required_label"
+
+    # Check for general required validation
+    if label_requirement.get("required"):
+        logger.debug(f"Returning 'required' for general requirement")
+        return "required"
+
+    logger.debug(f"Returning empty string - no validation requirements met")
+    return ""
+
+
+def generate_layout_attributes(annotation_scheme: dict) -> str:
+    """
+    Generate layout-related HTML attributes for grid positioning.
+
+    Args:
+        annotation_scheme: Schema configuration that may contain:
+            - layout: dict with layout options
+                - columns: Number of grid columns to span (1-6, default: 1)
+                - rows: Number of grid rows to span (1-4, default: 1)
+                - order: Explicit ordering integer for grid placement
+                - min_width: Minimum width CSS value (e.g., "200px")
+                - max_width: Maximum width CSS value (e.g., "400px")
+                - align_self: Alignment override (start, center, end, stretch)
+
+    Returns:
+        str: HTML attribute string for layout (e.g., 'data-grid-columns="2" data-grid-rows="1"')
+
+    Example config:
+        annotation_schemes:
+          - name: preference
+            description: "Which is better?"
+            layout:
+              columns: 2      # Span 2 columns in the grid
+              rows: 1         # Span 1 row (default)
+              order: 1        # Explicit ordering
+              min_width: "200px"
+              max_width: "400px"
+              align_self: "start"
+    """
+    layout_config = annotation_scheme.get("layout", {})
+    attrs = []
+
+    # Column span (1-6, default: 1)
+    columns = layout_config.get("columns", 1)
+    if not isinstance(columns, int) or columns < 1:
+        columns = 1
+    elif columns > 6:
+        columns = 6
+    attrs.append(f'data-grid-columns="{columns}"')
+
+    # Row span (1-4, default: 1)
+    rows = layout_config.get("rows", 1)
+    if isinstance(rows, int) and rows > 1:
+        rows = min(rows, 4)
+        attrs.append(f'data-grid-rows="{rows}"')
+
+    # Explicit order (integer)
+    order = layout_config.get("order")
+    if isinstance(order, int):
+        attrs.append(f'data-grid-order="{order}"')
+
+    # Min/max width via CSS custom properties in style attribute
+    style_parts = []
+    min_width = layout_config.get("min_width")
+    if min_width and isinstance(min_width, str):
+        style_parts.append(f"--form-min-width: {html.escape(min_width)}")
+
+    max_width = layout_config.get("max_width")
+    if max_width and isinstance(max_width, str):
+        style_parts.append(f"--form-max-width: {html.escape(max_width)}")
+
+    if style_parts:
+        attrs.append(f'style="{"; ".join(style_parts)}"')
+
+    # Align self override
+    align_self = layout_config.get("align_self")
+    valid_alignments = ["start", "center", "end", "stretch"]
+    if align_self and align_self in valid_alignments:
+        attrs.append(f'data-align-self="{align_self}"')
+
+    return " ".join(attrs)
+
+
+def generate_tooltip_html(label_data: Dict[str, Any]) -> str:
+    """
+    Generate tooltip HTML attribute from label data.
+
+    This function provides centralized tooltip generation for all schema types.
+    It checks for tooltip text in the label configuration, either directly or
+    from an external file.
+
+    Args:
+        label_data: Label configuration dictionary that may contain:
+            - tooltip: Direct tooltip text string
+            - tooltip_file: Path to file containing tooltip text
+
+    Returns:
+        str: Tooltip HTML attribute string (e.g., 'data-toggle="tooltip" ...')
+             or empty string if no tooltip is configured
+
+    Example:
+        >>> label_data = {"name": "Option 1", "tooltip": "Select this option"}
+        >>> generate_tooltip_html(label_data)
+        'data-toggle="tooltip" data-html="true" data-placement="top" title="Select this option"'
+    """
+    if not isinstance(label_data, dict):
+        return ""
+
+    tooltip_text = ""
+
+    # Check for direct tooltip text
+    if "tooltip" in label_data:
+        tooltip_text = label_data["tooltip"]
+        logger.debug(f"Found direct tooltip text for label")
+
+    # Check for tooltip file
+    elif "tooltip_file" in label_data:
+        try:
+            with open(label_data["tooltip_file"], "rt", encoding="utf-8") as f:
+                tooltip_text = "".join(f.readlines())
+            logger.debug(f"Read tooltip from file: {label_data['tooltip_file']}")
+        except FileNotFoundError:
+            logger.error(f"Tooltip file not found: {label_data['tooltip_file']}")
+            return ""
+        except PermissionError:
+            logger.error(f"Permission denied reading tooltip file: {label_data['tooltip_file']}")
+            return ""
+        except Exception as e:
+            logger.error(f"Failed to read tooltip file '{label_data['tooltip_file']}': {e}")
+            return ""
+
+    if tooltip_text:
+        escaped_tooltip = escape_html_content(tooltip_text)
+        return f'data-toggle="tooltip" data-html="true" data-placement="top" title="{escaped_tooltip}"'
+
+    return ""

@@ -1,0 +1,741 @@
+"""
+Schema Registry
+
+Provides a centralized registry for managing annotation schema types.
+This module serves as the single source of truth for available annotation
+types and their generators, replacing the hardcoded dictionary in front_end.py.
+
+Usage:
+    from potato.server_utils.schemas.registry import schema_registry
+
+    # Get a schema generator
+    generator = schema_registry.get("radio")
+
+    # Generate layout for an annotation scheme
+    html, keybindings = schema_registry.generate(annotation_scheme_dict)
+
+    # List all available schemas
+    schemas = schema_registry.list_schemas()
+"""
+
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Tuple, Any, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SchemaDefinition:
+    """
+    Defines metadata and generator for an annotation schema type.
+
+    Attributes:
+        name: Unique identifier for the schema type (e.g., "radio", "multiselect")
+        generator: Callable that generates HTML and keybindings for this schema type
+        required_fields: List of required configuration fields
+        optional_fields: List of optional configuration fields
+        supports_keybindings: Whether this schema type supports keyboard shortcuts
+        description: Human-readable description of the schema type
+    """
+    name: str
+    generator: Callable[[Dict[str, Any]], Tuple[str, List[Tuple[str, str]]]]
+    required_fields: List[str] = field(default_factory=list)
+    optional_fields: List[str] = field(default_factory=list)
+    supports_keybindings: bool = True
+    description: str = ""
+
+
+class SchemaRegistry:
+    """
+    Centralized registry for annotation schema types.
+
+    Provides methods to register, retrieve, and list schema types,
+    as well as generate layouts from annotation scheme configurations.
+    """
+
+    def __init__(self):
+        self._schemas: Dict[str, SchemaDefinition] = {}
+        logger.debug("SchemaRegistry initialized")
+
+    def register(self, schema: SchemaDefinition) -> None:
+        """
+        Register a new schema type.
+
+        Args:
+            schema: SchemaDefinition to register
+
+        Raises:
+            ValueError: If a schema with the same name is already registered
+        """
+        if schema.name in self._schemas:
+            raise ValueError(f"Schema '{schema.name}' is already registered")
+
+        self._schemas[schema.name] = schema
+        logger.debug(f"Registered schema: {schema.name}")
+
+    def get(self, name: str) -> Optional[SchemaDefinition]:
+        """
+        Get a schema definition by name.
+
+        Args:
+            name: The schema type name
+
+        Returns:
+            SchemaDefinition if found, None otherwise
+        """
+        return self._schemas.get(name)
+
+    def get_generator(self, name: str) -> Optional[Callable]:
+        """
+        Get the generator function for a schema type.
+
+        Args:
+            name: The schema type name
+
+        Returns:
+            Generator callable if found, None otherwise
+        """
+        schema = self.get(name)
+        return schema.generator if schema else None
+
+    def generate(self, annotation_scheme: Dict[str, Any]) -> Tuple[str, List[Tuple[str, str]]]:
+        """
+        Generate HTML and keybindings for an annotation scheme.
+
+        Args:
+            annotation_scheme: Configuration dictionary with 'annotation_type' key
+
+        Returns:
+            Tuple of (html_string, keybindings_list)
+
+        Raises:
+            ValueError: If annotation_type is missing or not supported
+        """
+        import json as json_module
+
+        annotation_type = annotation_scheme.get("annotation_type")
+        if not annotation_type:
+            raise ValueError("annotation_scheme must have 'annotation_type' field")
+
+        schema = self.get(annotation_type)
+        if not schema:
+            supported = ", ".join(sorted(self._schemas.keys()))
+            raise ValueError(
+                f"Unsupported annotation type: '{annotation_type}'. "
+                f"Supported types are: {supported}"
+            )
+
+        logger.debug(f"Generating layout for annotation type: {annotation_type}")
+        html, keybindings = schema.generator(annotation_scheme)
+
+        # Wrap HTML with display_logic attributes if present
+        html = self._wrap_with_display_logic(html, annotation_scheme)
+
+        return html, keybindings
+
+    def _wrap_with_display_logic(self, html: str, annotation_scheme: Dict[str, Any]) -> str:
+        """
+        Wrap the generated HTML with display_logic attributes and container if needed.
+
+        If the annotation scheme has display_logic, wraps the HTML in a container
+        div with data-display-logic attribute containing the serialized logic,
+        and applies the initial hidden state.
+
+        Args:
+            html: The generated HTML from the schema generator
+            annotation_scheme: The annotation scheme configuration
+
+        Returns:
+            The HTML, possibly wrapped with display_logic container
+        """
+        import json as json_module
+        from html import escape
+
+        display_logic = annotation_scheme.get("display_logic")
+        if not display_logic:
+            return html
+
+        schema_name = annotation_scheme.get("name", "")
+
+        # Serialize display_logic to JSON for the data attribute
+        display_logic_json = json_module.dumps(display_logic)
+        # Escape for HTML attribute (single quotes in JSON are safe)
+        display_logic_escaped = escape(display_logic_json)
+
+        # Wrap in a container with display logic attributes
+        # Initially hidden - the frontend JS will evaluate and show if conditions are met
+        wrapped_html = f'''<div class="display-logic-container display-logic-hidden"
+     data-display-logic="{display_logic_escaped}"
+     data-schema-name="{escape(schema_name)}"
+     data-display-logic-target="true">
+{html}
+</div>'''
+
+        return wrapped_html
+
+    def list_schemas(self) -> List[Dict[str, Any]]:
+        """
+        List all registered schemas with their metadata.
+
+        Returns:
+            List of dictionaries containing schema metadata
+        """
+        return [
+            {
+                "name": schema.name,
+                "description": schema.description,
+                "required_fields": schema.required_fields,
+                "optional_fields": schema.optional_fields,
+                "supports_keybindings": schema.supports_keybindings,
+            }
+            for schema in sorted(self._schemas.values(), key=lambda s: s.name)
+        ]
+
+    def is_registered(self, name: str) -> bool:
+        """
+        Check if a schema type is registered.
+
+        Args:
+            name: The schema type name
+
+        Returns:
+            True if registered, False otherwise
+        """
+        return name in self._schemas
+
+    def get_supported_types(self) -> List[str]:
+        """
+        Get a list of all supported annotation types.
+
+        Returns:
+            Sorted list of annotation type names
+        """
+        return sorted(self._schemas.keys())
+
+
+# Global registry instance
+schema_registry = SchemaRegistry()
+
+
+def _register_builtin_schemas():
+    """
+    Register all built-in annotation schema types.
+    Called automatically when this module is imported.
+    """
+    from .radio import generate_radio_layout
+    from .multiselect import generate_multiselect_layout
+    from .multirate import generate_multirate_layout
+    from .likert import generate_likert_layout
+    from .textbox import generate_textbox_layout
+    from .number import generate_number_layout
+    from .slider import generate_slider_layout
+    from .span import generate_span_layout
+    from .span_link import generate_span_link_layout
+    from .select import generate_select_layout
+    from .pure_display import generate_pure_display_layout
+    from .video import generate_video_layout
+    from .image_annotation import generate_image_annotation_layout
+    from .audio_annotation import generate_audio_annotation_layout
+    from .video_annotation import generate_video_annotation_layout
+    from .pairwise import generate_pairwise_layout
+    from .coreference import generate_coreference_layout
+    from .tree_annotation import generate_tree_annotation_layout
+    from .triage import generate_triage_layout
+    from .event_annotation import generate_event_annotation_layout
+    from .multi_document_event import generate_multi_document_event_layout
+    from .tiered_annotation import generate_tiered_annotation_layout
+    from .bws import generate_bws_layout
+    from .soft_label import generate_soft_label_layout
+    from .confidence import generate_confidence_layout
+    from .constant_sum import generate_constant_sum_layout
+    from .semantic_differential import generate_semantic_differential_layout
+    from .ranking import generate_ranking_layout
+    from .range_slider import generate_range_slider_layout
+    from .hierarchical_multiselect import generate_hierarchical_multiselect_layout
+    from .vas import generate_vas_layout
+    from .extractive_qa import generate_extractive_qa_layout
+    from .rubric_eval import generate_rubric_eval_layout
+    from .text_edit import generate_text_edit_layout
+    from .error_span import generate_error_span_layout
+    from .card_sort import generate_card_sort_layout
+    from .conjoint import generate_conjoint_layout
+    from .trajectory_eval import generate_trajectory_eval_layout
+    from .trajectory_edit import generate_trajectory_edit_layout
+    from .process_reward import generate_process_reward_layout
+    from .failure_attribution import generate_failure_attribution_layout
+    from .tool_call_review import generate_tool_call_review_layout
+    from .consensus_tracking import generate_consensus_tracking_layout
+    from .context_attribution import generate_context_attribution_layout
+    from .agent_scorecard import generate_agent_scorecard_layout
+    from .handoff_review import generate_handoff_review_layout
+    from .agent_interaction_graph import generate_agent_interaction_graph_layout
+    from .gui_trajectory import generate_gui_trajectory_layout
+    from .voice_interaction import generate_voice_interaction_layout
+    from .multimodal_reasoning import generate_multimodal_reasoning_layout
+    from .speech_transcript import generate_speech_transcript_layout
+    from .tool_contention import generate_tool_contention_layout
+    from .temporal_grounding import generate_temporal_grounding_layout
+    from .emergent_behavior import generate_emergent_behavior_layout
+    from .table_grid import generate_table_grid_layout
+    from .code_review import generate_code_review_layout
+
+    schemas = [
+        SchemaDefinition(
+            name="radio",
+            generator=generate_radio_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["horizontal", "label_requirement", "sequential_key_binding", "has_free_response", "option_randomization", "dynamic_options", "dynamic_options_field"],
+            supports_keybindings=True,
+            description="Single-choice radio button selection"
+        ),
+        SchemaDefinition(
+            name="multiselect",
+            generator=generate_multiselect_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["display_config", "label_requirement", "sequential_key_binding", "video_as_label", "has_free_response", "option_randomization", "dynamic_options", "dynamic_options_field"],
+            supports_keybindings=True,
+            description="Multiple-choice checkbox selection"
+        ),
+        SchemaDefinition(
+            name="multirate",
+            generator=generate_multirate_layout,
+            required_fields=["name", "description", "options", "labels"],
+            optional_fields=["label_requirement"],
+            supports_keybindings=False,
+            description="Rate multiple items on a scale"
+        ),
+        SchemaDefinition(
+            name="likert",
+            generator=generate_likert_layout,
+            required_fields=["name", "description", "min_label", "max_label", "size"],
+            optional_fields=["label_requirement"],
+            supports_keybindings=True,
+            description="Likert scale rating"
+        ),
+        SchemaDefinition(
+            name="text",
+            generator=generate_textbox_layout,
+            required_fields=["name", "description"],
+            optional_fields=["label_requirement", "placeholder", "rows"],
+            supports_keybindings=False,
+            description="Free-form text input"
+        ),
+        SchemaDefinition(
+            name="number",
+            generator=generate_number_layout,
+            required_fields=["name", "description"],
+            optional_fields=["min", "max", "step", "label_requirement"],
+            supports_keybindings=False,
+            description="Numeric input field"
+        ),
+        SchemaDefinition(
+            name="slider",
+            generator=generate_slider_layout,
+            required_fields=["name", "description", "min_value", "max_value", "starting_value"],
+            optional_fields=["step", "label_requirement"],
+            supports_keybindings=False,
+            description="Slider for selecting a value in a range"
+        ),
+        SchemaDefinition(
+            name="span",
+            generator=generate_span_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["sequential_key_binding", "bad_text_label", "title", "allow_discontinuous", "entity_linking", "show_span_labels"],
+            supports_keybindings=True,
+            description="Text span annotation/highlighting with optional entity linking to knowledge bases"
+        ),
+        SchemaDefinition(
+            name="select",
+            generator=generate_select_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["label_requirement", "option_randomization", "dynamic_options", "dynamic_options_field"],
+            supports_keybindings=False,
+            description="Dropdown selection"
+        ),
+        SchemaDefinition(
+            name="pure_display",
+            generator=generate_pure_display_layout,
+            required_fields=["name", "description"],
+            optional_fields=["labels", "allow_html"],
+            supports_keybindings=False,
+            description="Display-only content (instructions, headers)"
+        ),
+        SchemaDefinition(
+            name="video",
+            generator=generate_video_layout,
+            required_fields=["name", "description", "video_path"],
+            optional_fields=["autoplay", "loop", "muted", "controls", "custom_css", "fallback_text", "additional_sources"],
+            supports_keybindings=False,
+            description="Video player display"
+        ),
+        SchemaDefinition(
+            name="image_annotation",
+            generator=generate_image_annotation_layout,
+            required_fields=["name", "description", "tools", "labels"],
+            optional_fields=["zoom_enabled", "pan_enabled", "min_annotations", "max_annotations", "freeform_brush_size", "freeform_simplify"],
+            supports_keybindings=True,
+            description="Image annotation with bounding boxes, polygons, freeform drawing, and landmarks"
+        ),
+        SchemaDefinition(
+            name="audio_annotation",
+            generator=generate_audio_annotation_layout,
+            required_fields=["name", "description"],
+            optional_fields=["mode", "labels", "segment_schemes", "min_segments", "max_segments", "zoom_enabled", "playback_rate_control"],
+            supports_keybindings=True,
+            description="Audio segmentation and annotation with waveform visualization"
+        ),
+        SchemaDefinition(
+            name="video_annotation",
+            generator=generate_video_annotation_layout,
+            required_fields=["name", "description"],
+            optional_fields=["mode", "labels", "segment_schemes", "min_segments", "max_segments", "timeline_height", "overview_height", "zoom_enabled", "playback_rate_control", "frame_stepping", "show_timecode", "video_fps", "tracking_options"],
+            supports_keybindings=True,
+            description="Video annotation with temporal segments, frame classification, keyframes, and object tracking"
+        ),
+        SchemaDefinition(
+            name="span_link",
+            generator=generate_span_link_layout,
+            required_fields=["name", "description", "link_types", "span_schema"],
+            optional_fields=["visual_display"],
+            supports_keybindings=False,
+            description="Create relationships/links between spans (e.g., PERSON works_for ORGANIZATION)"
+        ),
+        SchemaDefinition(
+            name="pairwise",
+            generator=generate_pairwise_layout,
+            required_fields=["name", "description"],
+            optional_fields=["mode", "items_key", "items", "show_labels", "labels", "allow_tie", "tie_label", "sequential_key_binding", "scale", "label_requirement"],
+            supports_keybindings=True,
+            description="Pairwise comparison of two items (binary selection or scale rating)"
+        ),
+        SchemaDefinition(
+            name="coreference",
+            generator=generate_coreference_layout,
+            required_fields=["name", "description", "span_schema"],
+            optional_fields=["entity_types", "allow_singletons", "visual_display"],
+            supports_keybindings=False,
+            description="Coreference chain annotation for grouping mentions of the same entity"
+        ),
+        SchemaDefinition(
+            name="tree_annotation",
+            generator=generate_tree_annotation_layout,
+            required_fields=["name", "description"],
+            optional_fields=["node_scheme", "path_selection", "branch_comparison"],
+            supports_keybindings=False,
+            description="Annotation of conversation tree nodes with path selection"
+        ),
+        SchemaDefinition(
+            name="triage",
+            generator=generate_triage_layout,
+            required_fields=["name", "description"],
+            optional_fields=["accept_label", "reject_label", "skip_label", "auto_advance", "show_progress", "accept_key", "reject_key", "skip_key"],
+            supports_keybindings=True,
+            description="Binary accept/reject triage for rapid data curation"
+        ),
+        SchemaDefinition(
+            name="event_annotation",
+            generator=generate_event_annotation_layout,
+            required_fields=["name", "description", "event_types", "span_schema"],
+            optional_fields=["visual_display"],
+            supports_keybindings=False,
+            description="N-ary event annotation with triggers and typed arguments"
+        ),
+        SchemaDefinition(
+            name="multi_document_event",
+            generator=generate_multi_document_event_layout,
+            required_fields=["name", "description", "slots"],
+            optional_fields=["allow_annotator_create", "template_name"],
+            supports_keybindings=False,
+            description="Cross-document event annotation: template slots filled with evidence from many documents"
+        ),
+        SchemaDefinition(
+            name="tiered_annotation",
+            generator=generate_tiered_annotation_layout,
+            required_fields=["name", "description", "tiers", "source_field"],
+            optional_fields=["media_type", "tier_height", "show_tier_labels", "collapsed_tiers", "zoom_enabled", "playback_rate_control", "overview_height"],
+            supports_keybindings=True,
+            description="Hierarchical multi-tier annotation for audio/video (ELAN-style)"
+        ),
+        SchemaDefinition(
+            name="bws",
+            generator=generate_bws_layout,
+            required_fields=["name", "description"],
+            optional_fields=["best_description", "worst_description", "tuple_size", "sequential_key_binding", "label_requirement"],
+            supports_keybindings=True,
+            description="Best-Worst Scaling: select the best and worst item from a set"
+        ),
+        SchemaDefinition(
+            name="soft_label",
+            generator=generate_soft_label_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["total", "min_per_label", "show_distribution_chart"],
+            supports_keybindings=False,
+            description="Probability distribution across labels via constrained sliders"
+        ),
+        SchemaDefinition(
+            name="confidence",
+            generator=generate_confidence_layout,
+            required_fields=["name", "description"],
+            optional_fields=["target_schema", "scale_type", "scale_points", "labels", "min_value", "max_value", "step", "left_label", "right_label"],
+            supports_keybindings=False,
+            description="Confidence rating meta-annotation for any primary annotation"
+        ),
+        SchemaDefinition(
+            name="constant_sum",
+            generator=generate_constant_sum_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["total_points", "min_per_item", "input_type"],
+            supports_keybindings=False,
+            description="Allocate a fixed budget of points across categories"
+        ),
+        SchemaDefinition(
+            name="semantic_differential",
+            generator=generate_semantic_differential_layout,
+            required_fields=["name", "description", "pairs"],
+            optional_fields=["scale_points"],
+            supports_keybindings=False,
+            description="Bipolar adjective scales for measuring connotative meaning"
+        ),
+        SchemaDefinition(
+            name="ranking",
+            generator=generate_ranking_layout,
+            required_fields=["name", "description", "labels"],
+            optional_fields=["allow_ties"],
+            supports_keybindings=False,
+            description="Drag-and-drop ranking of items by preference or relevance"
+        ),
+        SchemaDefinition(
+            name="range_slider",
+            generator=generate_range_slider_layout,
+            required_fields=["name", "description"],
+            optional_fields=["min_value", "max_value", "step", "left_label", "right_label", "show_values"],
+            supports_keybindings=False,
+            description="Dual-thumb slider for selecting an acceptable range"
+        ),
+        SchemaDefinition(
+            name="hierarchical_multiselect",
+            generator=generate_hierarchical_multiselect_layout,
+            required_fields=["name", "description", "taxonomy"],
+            optional_fields=["auto_select_children", "auto_select_parent", "show_search", "max_selections"],
+            supports_keybindings=False,
+            description="Hierarchical tree-structured multi-label selection"
+        ),
+        SchemaDefinition(
+            name="vas",
+            generator=generate_vas_layout,
+            required_fields=["name", "description"],
+            optional_fields=["left_label", "right_label", "min_value", "max_value", "show_value"],
+            supports_keybindings=False,
+            description="Continuous visual analog scale for fine-grained magnitude estimation"
+        ),
+        SchemaDefinition(
+            name="extractive_qa",
+            generator=generate_extractive_qa_layout,
+            required_fields=["name", "description"],
+            optional_fields=["question_field", "passage_field", "allow_unanswerable", "highlight_color"],
+            supports_keybindings=False,
+            description="SQuAD-style extractive question answering with answer span highlighting"
+        ),
+        SchemaDefinition(
+            name="rubric_eval",
+            generator=generate_rubric_eval_layout,
+            required_fields=["name", "description", "criteria"],
+            optional_fields=["scale_points", "scale_labels", "show_overall"],
+            supports_keybindings=False,
+            description="Multi-criteria rubric evaluation grid for LLM and text quality assessment"
+        ),
+        SchemaDefinition(
+            name="text_edit",
+            generator=generate_text_edit_layout,
+            required_fields=["name", "description"],
+            optional_fields=["source_field", "show_diff", "show_edit_distance", "allow_reset"],
+            supports_keybindings=False,
+            description="Inline text editing with diff tracking for post-editing and correction tasks"
+        ),
+        SchemaDefinition(
+            name="error_span",
+            generator=generate_error_span_layout,
+            required_fields=["name", "description", "error_types"],
+            optional_fields=["severities", "show_score", "max_score"],
+            supports_keybindings=False,
+            description="MQM-style error span annotation with typed severity for quality evaluation"
+        ),
+        SchemaDefinition(
+            name="card_sort",
+            generator=generate_card_sort_layout,
+            required_fields=["name", "description"],
+            optional_fields=["mode", "groups", "items_field", "allow_empty_groups", "allow_multiple"],
+            supports_keybindings=False,
+            description="Drag-and-drop card sorting into predefined or user-created groups"
+        ),
+        SchemaDefinition(
+            name="conjoint",
+            generator=generate_conjoint_layout,
+            required_fields=["name", "description"],
+            optional_fields=["profiles_per_set", "attributes", "show_none_option", "profiles_field"],
+            supports_keybindings=False,
+            description="Discrete choice conjoint analysis with side-by-side profile comparison"
+        ),
+        SchemaDefinition(
+            name="trajectory_eval",
+            generator=generate_trajectory_eval_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "step_text_key", "correctness_options", "error_types", "severities", "show_score", "max_score"],
+            supports_keybindings=False,
+            description="Per-step trajectory evaluation with error taxonomy and severity scoring"
+        ),
+        SchemaDefinition(
+            name="process_reward",
+            generator=generate_process_reward_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "step_text_key", "mode", "allow_neutral", "inline_with_trace"],
+            supports_keybindings=False,
+            description="Per-step process reward signals for PRM training"
+        ),
+        SchemaDefinition(
+            name="failure_attribution",
+            generator=generate_failure_attribution_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "agent_key", "agents"],
+            supports_keybindings=False,
+            description="Multi-agent failure attribution: responsible agent + decisive step + reason"
+        ),
+        SchemaDefinition(
+            name="tool_call_review",
+            generator=generate_tool_call_review_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "verdict_options"],
+            supports_keybindings=False,
+            description="Per-tool-call correctness review (right tool / args / ordering)"
+        ),
+        SchemaDefinition(
+            name="consensus_tracking",
+            generator=generate_consensus_tracking_layout,
+            required_fields=["name", "description"],
+            optional_fields=["turns_key", "acts", "linked_acts", "hint"],
+            supports_keybindings=False,
+            description="Tag discussion acts per turn (proposal/agreement/disagreement/decision/concession) with cross-turn links to referenced proposals"
+        ),
+        SchemaDefinition(
+            name="context_attribution",
+            generator=generate_context_attribution_layout,
+            required_fields=["name", "description"],
+            optional_fields=["turns_key", "acts", "linked_acts", "hint"],
+            supports_keybindings=False,
+            description="Tag how each turn uses earlier context (used correctly / hallucinated / ignored) with links to the source turn"
+        ),
+        SchemaDefinition(
+            name="agent_scorecard",
+            generator=generate_agent_scorecard_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "agent_key", "agents", "agent_dimensions", "team_dimensions", "milestones", "scale"],
+            supports_keybindings=False,
+            description="Per-agent + per-team scorecard with optional milestones (MultiAgentBench-style)"
+        ),
+        SchemaDefinition(
+            name="handoff_review",
+            generator=generate_handoff_review_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "agent_key", "flags", "quality_scale"],
+            supports_keybindings=False,
+            description="Annotate agent-to-agent handoffs: inter-agent misalignment flags + quality"
+        ),
+        SchemaDefinition(
+            name="agent_interaction_graph",
+            generator=generate_agent_interaction_graph_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "agent_key"],
+            supports_keybindings=False,
+            description="Clickable agent-interaction graph: mark critical-path nodes + flag problematic edges"
+        ),
+        SchemaDefinition(
+            name="gui_trajectory",
+            generator=generate_gui_trajectory_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "screenshot_key", "action_key", "coord_space", "verdict_options"],
+            supports_keybindings=False,
+            description="Computer-use/GUI agent step review: per-step screenshot + action correctness + click grounding"
+        ),
+        SchemaDefinition(
+            name="voice_interaction",
+            generator=generate_voice_interaction_layout,
+            required_fields=["name", "description"],
+            optional_fields=["turns_key", "audio_key", "speaker_key", "user_speakers", "overlap_labels", "rating_scale"],
+            supports_keybindings=False,
+            description="Voice/full-duplex turn-taking: dual-track timeline + barge-in/overlap classification"
+        ),
+        SchemaDefinition(
+            name="multimodal_reasoning",
+            generator=generate_multimodal_reasoning_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "type_key", "verdict_options"],
+            supports_keybindings=False,
+            description="Interleaved text/image/tool reasoning trace: per-step coherence + visual-hallucination rating"
+        ),
+        SchemaDefinition(
+            name="speech_transcript",
+            generator=generate_speech_transcript_layout,
+            required_fields=["name", "description"],
+            optional_fields=["segments_key", "audio_key", "error_types", "allow_correction"],
+            supports_keybindings=False,
+            description="Aligned-transcript speech-error annotation: per-segment ASR/TTS error tags + correction"
+        ),
+        SchemaDefinition(
+            name="tool_contention",
+            generator=generate_tool_contention_layout,
+            required_fields=["name", "description"],
+            optional_fields=["calls_key", "agent_key", "resource_key", "contention_labels"],
+            supports_keybindings=False,
+            description="Tool/resource-contention timeline: per-agent lanes + shared-resource collision classification"
+        ),
+        SchemaDefinition(
+            name="temporal_grounding",
+            generator=generate_temporal_grounding_layout,
+            required_fields=["name", "description"],
+            optional_fields=["video_key", "events_key", "duration"],
+            supports_keybindings=False,
+            description="Video temporal grounding: mark gold event intervals with live IoU vs predicted"
+        ),
+        SchemaDefinition(
+            name="emergent_behavior",
+            generator=generate_emergent_behavior_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "agent_key", "behaviors", "allow_note"],
+            supports_keybindings=False,
+            description="Cross-lane emergent-behavior tagging: mark turn-sets for collusion/groupthink/cascade/role-drift"
+        ),
+        SchemaDefinition(
+            name="table_grid",
+            generator=generate_table_grid_layout,
+            required_fields=["name", "description"],
+            optional_fields=["image_key", "rows_key", "cols_key", "default_rows", "default_cols", "roles"],
+            supports_keybindings=False,
+            description="Table-cell structure annotation: rows x cols grid + per-cell role (header/data/empty)"
+        ),
+        SchemaDefinition(
+            name="trajectory_edit",
+            generator=generate_trajectory_edit_layout,
+            required_fields=["name", "description"],
+            optional_fields=["steps_key", "step_text_key", "editable_fields", "show_diff", "show_edit_distance", "allow_reset", "require_reason_on_edit", "edit_final_answer", "final_answer_key"],
+            supports_keybindings=False,
+            description="Per-step trajectory correction/editing for SFT/DPO training data"
+        ),
+        SchemaDefinition(
+            name="code_review",
+            generator=generate_code_review_layout,
+            required_fields=["name", "description"],
+            optional_fields=["comment_categories", "verdict_options", "file_rating_dimensions"],
+            supports_keybindings=False,
+            description="GitHub PR-style code review with inline comments and file ratings"
+        ),
+    ]
+
+    for schema in schemas:
+        schema_registry.register(schema)
+
+    logger.debug(f"Registered {len(schemas)} built-in schemas")
+
+
+# Auto-register built-in schemas on import
+_register_builtin_schemas()

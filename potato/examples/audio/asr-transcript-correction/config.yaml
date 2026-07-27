@@ -1,0 +1,88 @@
+annotation_task_name: "靖江热线 ASR 转写校对"
+
+ui_language:
+  html_lang: "zh-CN"
+  html_dir: "ltr"
+ 
+  next_button: "下一条"
+  previous_button: "上一条"
+  submit_button: "提交"
+  go_button: "跳转"
+  retry_button: "重试"
+  logout: "退出"
+  jump_prev_unannotated: "上一条未标注"
+  jump_next_unannotated: "下一条未标注"
+  labeled_badge: "已标注"
+  in_progress_badge: "标注中"
+  not_labeled_badge: "未标注"
+  progress_label: "进度"
+  loading: "正在加载标注界面……"
+  error_heading: "错误"
+  instructions_heading: "标注说明"
+  text_to_annotate: "待标注文本："
+  video_to_annotate: "待标注视频："
+  audio_to_annotate: "待标注音频："
+  adjudicate: "仲裁"
+  codebook: "标注手册"
+  powered_by: "技术支持"
+  cite_us: "引用我们"
+  
+  login_title: "语音标注平台"
+  login_subtitle_password: "请登录后继续标注"
+  login_subtitle_username: "请输入用户名继续标注"
+  sign_in_tab: "登录"
+  register_tab: "注册"
+  username_label: "用户名"
+  password_label: "密码"
+  sign_in_button: "登录"
+  continue_button: "进入标注"
+  register_button: "注册"
+  forgot_password: "忘记密码？"
+  username_placeholder: "请输入用户名"
+  choose_username_placeholder: "请设置用户名"
+  create_password_placeholder: "请设置密码"
+  sign_in_with: "使用以下方式登录"
+  or_divider: "或"
+
+task_dir: .
+host: 127.0.0.1
+require_password: false
+data_files:
+  - data/items.json
+media_directory: media
+output_annotation_dir: annotation_output
+output_annotation_format: json
+
+item_properties:
+  id_key: id
+  text_key: audio_url
+
+user_config:
+  allow_all_users: true
+  users: []
+
+audio_annotation:
+  waveform_cache_dir: waveform_cache
+  waveform_look_ahead: 1
+  waveform_cache_max_size: 10
+
+annotation_schemes:
+  - annotation_type: audio_annotation
+    name: transcript_segments
+    description: "拖动片段左右边缘校正时间，并在下方文本框修改转写内容。"
+    segments_key: segments
+    mode: label
+    labels:
+      - name: caller
+        display_name: "来电人"
+        color: "#FF6B6B"
+        key_value: "1"
+      - name: agent
+        display_name: "座席"
+        color: "#4ECDC4"
+        key_value: "2"
+    min_segments: 1
+    zoom_enabled: true
+    playback_rate_control: true
+
+site_dir: default

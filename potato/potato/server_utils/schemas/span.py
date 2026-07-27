@@ -1,0 +1,566 @@
+"""
+Span Layout
+"""
+
+import logging
+from collections.abc import Mapping
+from collections import defaultdict
+from potato.ai.ai_help_wrapper import get_ai_wrapper, get_dynamic_ai_help
+from potato.server_utils.config_module import config
+from .identifier_utils import (
+    safe_generate_layout,
+    generate_element_identifier,
+    generate_validation_attribute,
+    escape_html_content,
+    generate_layout_attributes
+)
+
+
+from item_state_management import SpanAnnotation
+
+logger = logging.getLogger(__name__)
+
+SPAN_COLOR_PALETTE = [
+    "(110, 86, 207)",   # Primary purple #6E56CF
+    "(239, 68, 68)",    # Destructive red #EF4444
+    "(113, 113, 122)",  # Gray #71717A
+    "(245, 158, 11)",   # Amber #F59E0B
+    "(16, 185, 129)",   # Success green #10B981
+    "(59, 130, 246)",   # Blue #3B82F6
+    "(220, 38, 38)",    # Red #DC2626
+    "(139, 92, 246)",   # Purple #8B5CF6
+    "(156, 163, 175)",  # Light gray #9CA3AF
+    "(107, 114, 128)",  # Medium gray #6B7280
+    "(55, 65, 81)",     # Dark gray #374151
+    "(249, 115, 22)",   # Orange #F97316
+    "(6, 182, 212)",    # Cyan #06B6D4
+    "(236, 72, 153)",   # Pink #EC4899
+    "(5, 150, 105)",    # Dark green #059669
+    "(124, 58, 237)",   # Violet #7C3AED
+    "(22, 163, 74)",    # Green #16A34A
+    "(234, 88, 12)",    # Dark orange #EA580C
+    "(37, 99, 235)",    # Blue #2563EB
+    "(127, 29, 29)",    # Dark red #7F1D1D
+    "(168, 85, 247)",   # Purple #A855F7
+    "(34, 197, 94)",    # Green #22C55E
+]
+
+span_counter = 0
+SPAN_COLOR_PALETTE_LENGTH = len(SPAN_COLOR_PALETTE)
+
+
+def reset_span_counter():
+    """Reset the span color counter to 0. Used for test isolation."""
+    global span_counter
+    span_counter = 0
+
+def get_span_color(schema, span_label):
+    """
+    Returns the color of a span with this label as a string with an RGB triple
+    in parentheses, or None if the span is unmapped.
+    """
+
+    if "ui" not in config or "spans" not in config["ui"]:
+        return None
+
+    span_ui = config["ui"]["spans"]
+
+    if "span_colors" not in span_ui:
+        return None
+
+    if schema in span_ui["span_colors"]:
+        schema_colors = span_ui["span_colors"][schema]
+        if span_label in schema_colors:
+            return schema_colors[span_label]
+
+    return None
+
+
+def set_span_color(schema, span_label, color):
+    """
+    Sets the color of a span with this label as a string with an RGB triple in parentheses.
+
+    :color: a string containing an RGB triple in parentheses
+    """
+    if "ui" not in config:
+        ui = {}
+        config["ui"] = ui
+    else:
+        ui = config["ui"]
+
+    if "spans" not in ui:
+        span_ui = {}
+        ui["spans"] = span_ui
+    else:
+        span_ui = ui["spans"]
+
+    if "span_colors" not in span_ui:
+        span_colors = defaultdict(dict)
+        span_ui["span_colors"] = span_colors
+    else:
+        span_colors = span_ui["span_colors"]
+
+    # Ensure the schema key exists (span_colors may be a regular dict, not defaultdict)
+    if schema not in span_colors:
+        span_colors[schema] = {}
+    span_colors[schema][span_label] = color
+
+def _generate_span_layout_internal(annotation_scheme, horizontal=False):
+    """
+    Internal function to generate span layout after validation.
+
+    Configuration options:
+        allow_discontinuous (bool): Enable discontinuous span selection via Ctrl/Cmd+click.
+            When enabled, users can hold Ctrl (Windows/Linux) or Cmd (Mac) and click to
+            add additional non-contiguous text ranges to an existing span annotation.
+            Default: false
+
+        entity_linking (dict): Configuration for knowledge base entity linking.
+            When enabled, users can link annotated spans to external knowledge bases
+            like Wikidata or UMLS. Configuration options:
+            - enabled (bool): Whether entity linking is enabled. Default: false
+            - knowledge_bases (list): List of KB configurations, each with:
+              - name (str): Display name for the KB
+              - type (str): KB type ("wikidata", "umls", "rest")
+              - api_key (str): Optional API key for authenticated services
+              - language (str): Language code for results. Default: "en"
+            - auto_search (bool): Automatically search when span is created. Default: true
+            - required (bool): Require entity link before saving span. Default: false
+
+            Example:
+                entity_linking:
+                  enabled: true
+                  knowledge_bases:
+                    - name: wikidata
+                      type: wikidata
+                      language: en
+                    - name: umls
+                      type: umls
+                      api_key: ${UMLS_API_KEY}
+                  auto_search: true
+                  required: false
+    """
+    import json as json_module
+
+    # Initialize form wrapper
+    scheme_name = annotation_scheme["name"]
+
+    # Get target_field for multi-span support (optional)
+    target_field = annotation_scheme.get("target_field", "")
+    target_field_attr = f' data-target-field="{escape_html_content(target_field)}"' if target_field else ""
+
+    # Check for discontinuous span support
+    allow_discontinuous = annotation_scheme.get("allow_discontinuous", False)
+    discontinuous_attr = ' data-allow-discontinuous="true"' if allow_discontinuous else ""
+
+    # Check for entity linking support
+    entity_linking = annotation_scheme.get("entity_linking", {})
+    entity_linking_enabled = entity_linking.get("enabled", False)
+    entity_linking_attr = ""
+    if entity_linking_enabled:
+        # Serialize entity_linking config to JSON for frontend
+        el_config = {
+            "enabled": True,
+            "knowledge_bases": entity_linking.get("knowledge_bases", []),
+            "auto_search": entity_linking.get("auto_search", True),
+            "required": entity_linking.get("required", False),
+            "multi_select": entity_linking.get("multi_select", False)
+        }
+        el_json = json_module.dumps(el_config)
+        entity_linking_attr = f' data-entity-linking=\'{escape_html_content(el_json)}\''
+
+    # Check for show_span_labels option (default: true)
+    show_span_labels = annotation_scheme.get("show_span_labels", True)
+    show_labels_attr = '' if show_span_labels else ' data-show-span-labels="false"'
+
+    # Get layout attributes for grid positioning
+    layout_attrs = generate_layout_attributes(annotation_scheme)
+
+    schematic = f"""
+    <form id="{escape_html_content(scheme_name)}" class="annotation-form span shadcn-span-container" action="javascript:void(0)" data-annotation-id="{escape_html_content(str(annotation_scheme.get("annotation_id", "")))}"{target_field_attr}{discontinuous_attr}{entity_linking_attr}{show_labels_attr} {layout_attrs}>
+            {get_ai_wrapper()}
+        <fieldset schema="{escape_html_content(scheme_name)}">
+            <legend class="shadcn-span-title">{escape_html_content(annotation_scheme["description"])}</legend>
+            {"<div class='discontinuous-hint'>Hold Ctrl/Cmd + select to add additional text to this span</div>" if allow_discontinuous else ""}
+            {"<div class='entity-linking-hint'>Click the link icon on spans to connect to knowledge base entities</div>" if entity_linking_enabled else ""}
+            <div class="shadcn-span-options"{f' style="grid-template-columns: repeat({int(annotation_scheme["columns"])}, 1fr)"' if annotation_scheme.get("columns") else ""}>
+    """
+
+    if isinstance(annotation_scheme["labels"], list) and len(annotation_scheme["labels"]) > 0:
+        labels = annotation_scheme["labels"]
+    else:
+        labels = [annotation_scheme["labels"]]
+
+    # Initialize keyboard shortcuts
+    key2label = {}
+    label2key = {}
+    key_bindings = []
+    span_title = annotation_scheme.get("title", "")
+
+    # Check for pre-allocated keys from the centralized allocator
+    allocated_keys = annotation_scheme.get("_allocated_keys", None)
+    allocated_map = {}
+    if allocated_keys:
+        for entry in allocated_keys:
+            if entry.get("key"):
+                allocated_map[entry["label"]] = entry["key"]
+
+    # Setup validation
+    validation = generate_validation_attribute(annotation_scheme)
+    span_color = "var(--primary-color)"
+
+    # Generate checkbox inputs for each label
+    for i, label_data in enumerate(labels, 1):
+        # Extract label information
+        if isinstance(label_data, str):
+            label = label_data
+            key_value = label  # Use label name as value
+            tooltip = ""
+        else:
+            label = label_data["name"]
+            key_value = label_data.get("key_value", label)
+            tooltip = _generate_tooltip(label_data)
+
+        # Check for color mappings
+        custom_color = get_span_color(scheme_name, label)
+        if custom_color:
+            span_color = custom_color
+        else:
+            # Assign a color from palette
+            global span_counter
+            idx = span_counter % SPAN_COLOR_PALETTE_LENGTH
+            span_color = SPAN_COLOR_PALETTE[idx]
+            span_counter += 1
+            set_span_color(scheme_name, label, span_color)
+
+        # Handle keybinding allocation
+        if label in allocated_map and label not in label2key:
+            shortcut_key = allocated_map[label]
+            key2label[shortcut_key] = label
+            label2key[label] = shortcut_key
+            key_bindings.append((shortcut_key, f"{scheme_name}: {label}"))
+        elif not allocated_keys and label not in label2key:
+            # Fallback: sequential key bindings when no allocator was used
+            if (
+                "sequential_key_binding" in annotation_scheme
+                and annotation_scheme["sequential_key_binding"]
+                and len(annotation_scheme["labels"]) <= 10
+            ):
+                shortcut_key = str(i % 10)
+                key2label[shortcut_key] = label
+                label2key[label] = shortcut_key
+                key_bindings.append((shortcut_key, f"{scheme_name}: {label}"))
+
+        # Format label content
+        if "displaying_score" in annotation_scheme and annotation_scheme["displaying_score"]:
+            label_content = f"{key_value}.{label}"
+        else:
+            label_content = label
+
+        # Generate name with span prefix so ingestion code can skip this
+        name_with_span = f"span_label:::{scheme_name}"
+
+        # Support abbreviation for label display (from master branch fix)
+        # Users can specify an abbreviation for the label shown above the span
+        if isinstance(label_data, dict) and label_data.get('abbreviation'):
+            label_title = label_data['abbreviation']
+        else:
+            label_title = label_content
+
+        # Use label as title if span_title is empty
+        effective_title = span_title if span_title else label
+
+        schematic += f"""
+            <div class="shadcn-span-option">
+                <input class="{escape_html_content(scheme_name)} shadcn-span-checkbox"
+                       for_span="true"
+                       type="checkbox"
+                       id="{escape_html_content(scheme_name)}_{escape_html_content(label)}"
+                       name="{escape_html_content(name_with_span)}"
+                       value="{escape_html_content(key_value)}"
+                       onclick="onlyOne(this); changeSpanLabel(this, '{escape_html_content(scheme_name)}', '{escape_html_content(label)}', '{escape_html_content(effective_title)}', '{escape_html_content(span_color)}', '{escape_html_content(target_field)}');"
+                       data-target-field="{escape_html_content(target_field)}"
+                       validation="{validation}">
+                <label for="{escape_html_content(scheme_name)}_{escape_html_content(label)}" class="shadcn-span-label" {tooltip}>
+                    <span style="background-color:rgb{span_color.replace(')', ',0.4)')};">{escape_html_content(label_content)}</span>
+                </label>
+            </div>
+        """
+
+    schematic += "</div>"
+
+    # Add optional bad text option
+    if "label_content" in annotation_scheme.get("bad_text_label", {}):
+        bad_text_identifiers = generate_element_identifier(annotation_scheme['name'], "bad_text", "checkbox")
+
+        schematic += f"""
+            <div class="shadcn-span-bad-text">
+                <input class="{bad_text_identifiers['schema']} shadcn-span-checkbox"
+                       for_span="true"
+                       type="checkbox"
+                       id="{bad_text_identifiers['id']}"
+                       name="{bad_text_identifiers['name']}"
+                       value="0"
+                       onclick="onlyOne(this)"
+                       validation="{validation}">
+                <label for="{bad_text_identifiers['id']}" class="shadcn-span-label">
+                    {escape_html_content(annotation_scheme["bad_text_label"]["label_content"])}
+                </label>
+            </div>
+        """
+
+        if (
+            "sequential_key_binding" in annotation_scheme
+            and annotation_scheme["sequential_key_binding"]
+            and len(annotation_scheme["labels"]) <= 10
+        ):
+            key_bindings.append(
+                (0, f"{scheme_name}: {annotation_scheme['bad_text_label']['label_content']}")
+            )
+
+    schematic += "</fieldset></form>"
+    return schematic, key_bindings
+
+def _generate_tooltip(label_data):
+    """
+    Generate tooltip HTML attribute from label data.
+
+    Args:
+        label_data (dict): Label configuration containing tooltip information
+
+    Returns:
+        str: Tooltip HTML attribute or empty string if no tooltip
+    """
+    tooltip_text = ""
+    if "tooltip" in label_data:
+        tooltip_text = label_data["tooltip"]
+    elif "tooltip_file" in label_data:
+        try:
+            with open(label_data["tooltip_file"], "rt", encoding="utf-8") as f:
+                tooltip_text = "".join(f.readlines())
+        except Exception as e:
+            logger.error(f"Failed to read tooltip file: {e}")
+            return ""
+
+    if tooltip_text:
+        escaped_tooltip = escape_html_content(tooltip_text)
+        return f'data-toggle="tooltip" data-html="true" data-placement="top" title="{escaped_tooltip}"'
+    return ""
+
+
+def generate_span_layout(annotation_scheme, horizontal=False):
+    """
+    Generate span layout HTML for the given annotation scheme.
+
+    Args:
+        annotation_scheme (dict): The annotation scheme configuration
+        horizontal (bool): Whether to display horizontally
+
+    Returns:
+        tuple: (HTML string, key bindings list)
+    """
+    return safe_generate_layout(annotation_scheme, _generate_span_layout_internal, horizontal)
+
+
+def render_span_annotations(text, span_annotations, target_field=None):
+    """
+    Render span annotations into HTML with boundary-based algorithm.
+    Supports discontinuous spans with additional_parts.
+
+    Args:
+        text (str): The original text to annotate
+        span_annotations: Dictionary of span_id -> span data, or list of SpanAnnotation objects,
+                         or field-keyed dict: {field_key: [span_list]}
+        target_field (str, optional): Filter spans to only those targeting this field
+    Returns:
+        str: HTML with span annotations rendered
+    """
+    if not span_annotations:
+        return text
+
+    # Handle field-keyed format for multi-span mode: {field_key: [spans]}
+    if isinstance(span_annotations, dict):
+        # Check if this is a field-keyed dict (values are lists)
+        first_value = next(iter(span_annotations.values()), None)
+        if isinstance(first_value, list):
+            # Field-keyed format - extract spans for target_field
+            if target_field:
+                field_spans = span_annotations.get(target_field, [])
+                return render_span_annotations(text, field_spans, target_field=None)
+            else:
+                # No target field specified, flatten all spans
+                all_spans = []
+                for field_spans in span_annotations.values():
+                    all_spans.extend(field_spans)
+                return render_span_annotations(text, all_spans, target_field=None)
+
+        # Regular dict format: span_id -> span_data
+        sorted_spans = sorted(
+            span_annotations.items(),
+            key=lambda x: x[1].get('start', 0)
+        )
+    else:
+        # Convert list of SpanAnnotation objects to list of tuples
+        spans_as_tuples = []
+        for span in span_annotations:
+            if hasattr(span, 'get_id'):
+                # SpanAnnotation object with methods
+                # Filter by target_field if specified
+                span_target = span.get_target_field() if hasattr(span, 'get_target_field') else None
+                if target_field and span_target and span_target != target_field:
+                    continue  # Skip spans not targeting this field
+
+                span_id = span.get_id()
+                # Get additional_parts for discontinuous spans
+                additional_parts = []
+                if hasattr(span, 'get_additional_parts'):
+                    additional_parts = span.get_additional_parts() or []
+                elif hasattr(span, 'additional_parts'):
+                    additional_parts = getattr(span, 'additional_parts', []) or []
+
+                # Get KB entity linking data
+                kb_id = None
+                kb_source = None
+                kb_label = None
+                if hasattr(span, 'get_kb_id'):
+                    kb_id = span.get_kb_id()
+                    kb_source = span.get_kb_source() if hasattr(span, 'get_kb_source') else None
+                    kb_label = span.get_kb_label() if hasattr(span, 'get_kb_label') else None
+                elif hasattr(span, 'kb_id'):
+                    kb_id = getattr(span, 'kb_id', None)
+                    kb_source = getattr(span, 'kb_source', None)
+                    kb_label = getattr(span, 'kb_label', None)
+
+                span_data = {
+                    'schema': span.get_schema() if hasattr(span, 'get_schema') else getattr(span, 'schema', ''),
+                    'name': span.get_name() if hasattr(span, 'get_name') else getattr(span, 'name', ''),
+                    'title': span.get_title() if hasattr(span, 'get_title') else getattr(span, 'title', ''),
+                    'start': span.get_start() if hasattr(span, 'get_start') else getattr(span, 'start', 0),
+                    'end': span.get_end() if hasattr(span, 'get_end') else getattr(span, 'end', 0),
+                    'target_field': span_target,
+                    'additional_parts': additional_parts,
+                    'kb_id': kb_id,
+                    'kb_source': kb_source,
+                    'kb_label': kb_label,
+                }
+            elif isinstance(span, dict):
+                # Filter by target_field if specified
+                span_target = span.get('target_field')
+                if target_field and span_target and span_target != target_field:
+                    continue  # Skip spans not targeting this field
+
+                span_id = span.get('id', f"span_{span.get('start', 0)}_{span.get('end', 0)}")
+                span_data = span
+            else:
+                continue
+            spans_as_tuples.append((span_id, span_data))
+        sorted_spans = sorted(spans_as_tuples, key=lambda x: x[1].get('start', 0))
+
+    # Create boundary points (including additional_parts for discontinuous spans)
+    boundaries = []
+    for span_id, span_data in sorted_spans:
+        # Add primary span boundaries
+        boundaries.append((span_data['start'], 'start', span_id, span_data))
+        boundaries.append((span_data['end'], 'end', span_id, span_data))
+
+        # Add boundaries for additional parts (discontinuous spans)
+        additional_parts = span_data.get('additional_parts', [])
+        for part in additional_parts:
+            # Create a modified span_data for this part that includes discontinuous marker
+            part_data = span_data.copy()
+            part_data['_is_discontinuous_part'] = True
+            boundaries.append((part['start'], 'start', span_id, part_data))
+            boundaries.append((part['end'], 'end', span_id, part_data))
+
+    # Sort boundaries by position
+    boundaries.sort(key=lambda x: x[0])
+
+    # Build the rendered text
+    result = ""
+    current_pos = 0
+    active_spans = []
+
+    for pos, boundary_type, span_id, span_data in boundaries:
+        # Add text before this boundary
+        if pos > current_pos:
+            result += text[current_pos:pos]
+
+        if boundary_type == 'start':
+            # Start a new span
+            active_spans.append(span_id)
+            # Get color for this span
+            color = get_span_color(span_data['schema'], span_data['name'])
+            if not color:
+                color = "(128, 128, 128)"  # Default gray
+            # Convert RGB to hex with alpha
+            color_parts = color.strip("()").split(", ")
+            r, g, b = int(color_parts[0]), int(color_parts[1]), int(color_parts[2])
+            hex_color = f"#{r:02x}{g:02x}{b:02x}66"  # 66 = 40% alpha to match label background
+
+            # Add target_field attribute if present
+            target_attr = f' data-target-field="{span_data.get("target_field", "")}"' if span_data.get("target_field") else ""
+
+            # Check if this is a discontinuous span part
+            is_discontinuous = span_data.get('_is_discontinuous_part', False) or len(span_data.get('additional_parts', [])) > 0
+            discontinuous_class = ' discontinuous-part' if is_discontinuous else ''
+            discontinuous_attr = ' data-discontinuous="true"' if is_discontinuous else ""
+
+            # Add KB entity linking attributes
+            kb_id = span_data.get('kb_id', '')
+            kb_source = span_data.get('kb_source', '')
+            kb_label = span_data.get('kb_label', '')
+            kb_attr = ""
+            kb_class = ""
+            if kb_id:
+                kb_attr = f' data-kb-id="{escape_html_content(kb_id)}" data-kb-source="{escape_html_content(kb_source)}"'
+                if kb_label:
+                    kb_attr += f' data-kb-label="{escape_html_content(kb_label)}"'
+                kb_class = ' has-entity-link'
+
+            result += f'<span class="span-highlight{discontinuous_class}{kb_class}" data-annotation-id="{span_id}" data-label="{span_data["name"]}" schema="{span_data["schema"]}"{target_attr}{discontinuous_attr}{kb_attr} style="background-color: {hex_color};">'
+        elif boundary_type == 'end':
+            # End the span
+            result += "</span>"
+            # Remove from active spans
+            active_spans = [s for s in active_spans if s != span_id]
+
+        current_pos = pos
+
+    # Add remaining text
+    if current_pos < len(text):
+        result += text[current_pos:]
+
+    return result
+
+
+def get_spans_for_field(span_annotations, target_field):
+    """
+    Extract spans for a specific target field from span annotations.
+
+    Args:
+        span_annotations: Span annotations in any format
+        target_field: The field key to filter by
+
+    Returns:
+        List of spans targeting the specified field
+    """
+    if not span_annotations:
+        return []
+
+    # Handle field-keyed format
+    if isinstance(span_annotations, dict):
+        first_value = next(iter(span_annotations.values()), None)
+        if isinstance(first_value, list):
+            return span_annotations.get(target_field, [])
+
+    # Handle list of SpanAnnotation objects
+    result = []
+    if isinstance(span_annotations, (list, tuple)):
+        for span in span_annotations:
+            if hasattr(span, 'get_target_field'):
+                if span.get_target_field() == target_field:
+                    result.append(span)
+            elif isinstance(span, dict) and span.get('target_field') == target_field:
+                result.append(span)
+
+    return result

@@ -1,0 +1,39 @@
+port: 9001
+annotation_task_name: Simple Active Learning Example
+task_dir: .
+output_annotation_dir: annotation_output/simple-active-learning/
+output_annotation_format: tsv
+annotation_codebook_url: ''
+data_files:
+- data/toy-example.json
+item_properties:
+  id_key: id
+  text_key: text
+user_config:
+  allow_all_users: true
+  users: []
+alert_time_each_instance: 10000000
+annotation_schemes:
+- annotation_type: radio
+  name: favorite_food
+  description: What food does this text make you want to eat?
+  labels:
+  - pizza
+  - bagels
+  - burgers
+  - curry
+  - tacos
+  sequential_key_binding: true
+
+# Active learning: train a classifier on incoming annotations and reorder the
+# unlabeled pool so the most informative (highest-uncertainty) items come next.
+assignment_strategy: active_learning
+active_learning:
+  enabled: true
+  query_strategy: uncertainty
+  min_instances_for_training: 5
+  update_frequency: 5
+  random_sample_percent: 0.2
+  schema_names:
+    - favorite_food
+site_dir: default

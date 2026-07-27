@@ -1,0 +1,2721 @@
+"""
+Item State Management Module
+
+This module provides the core data structures and management logic for annotation items
+in the Potato platform. It handles item storage, assignment strategies, and tracking
+of annotation progress across users.
+
+The module includes:
+- Item class: Represents individual annotation items with metadata
+- Label class: Represents annotation labels with schema information
+- SpanAnnotation class: Represents text span annotations with position data
+- AssignmentStrategy enum: Defines different strategies for assigning items to users
+- ItemStateManager: Main class for managing item state and assignments
+
+The system supports multiple assignment strategies including random, fixed order,
+active learning, and diversity-based assignment to optimize annotation efficiency.
+"""
+
+from __future__ import annotations
+
+# Need to import UserState as a type hint for the ItemStateManager
+from typing import TYPE_CHECKING, Dict, Set, List, Optional, Tuple
+if TYPE_CHECKING:
+    from potato.user_state_management import UserState
+
+from enum import Enum
+from collections import OrderedDict, deque, Counter, defaultdict
+import random
+import uuid
+import logging
+import threading
+import json
+import os
+
+# Singleton instance of the ItemStateManager with thread-safe lock
+ITEM_STATE_MANAGER = None
+_ITEM_STATE_MANAGER_LOCK = threading.Lock()
+
+def init_item_state_manager(config: dict) -> ItemStateManager:
+    """
+    Initialize the singleton ItemStateManager instance.
+
+    This function creates the global ItemStateManager that will be shared
+    across all users. It's designed to be called once during application startup.
+    Thread-safe initialization using double-checked locking pattern.
+
+    Args:
+        config: Configuration dictionary containing item management settings
+
+    Returns:
+        ItemStateManager: The initialized singleton instance
+
+    Note:
+        TODO: make the manager type configurable between in-memory and DB-backed.
+        The DB back-end is for when we have a ton of data and don't want it sitting in
+        memory all the time (or where some external process is going to be adding new items)
+    """
+    global ITEM_STATE_MANAGER
+
+    # Double-checked locking for thread safety
+    if ITEM_STATE_MANAGER is None:
+        with _ITEM_STATE_MANAGER_LOCK:
+            # Check again inside the lock
+            if ITEM_STATE_MANAGER is None:
+                ITEM_STATE_MANAGER = ItemStateManager(config)
+
+    return ITEM_STATE_MANAGER
+
+def clear_item_state_manager():
+    """
+    Clear the singleton item state manager instance (for testing).
+
+    This function is primarily used for testing purposes to reset the
+    global state between test runs. Thread-safe.
+    """
+    global ITEM_STATE_MANAGER
+    with _ITEM_STATE_MANAGER_LOCK:
+        ITEM_STATE_MANAGER = None
+
+def get_item_state_manager() -> ItemStateManager:
+    """
+    Get the singleton ItemStateManager instance.
+
+    Returns:
+        ItemStateManager: The singleton instance
+
+    Raises:
+        ValueError: If the manager has not been initialized
+
+    Note:
+        TODO: make the manager type configurable between in-memory and DB-backed.
+        The DB back-end is for when we have a ton of data and don't want it sitting in
+        memory all the time (or where some external process is going to be adding new items)
+    """
+    global ITEM_STATE_MANAGER
+
+    if ITEM_STATE_MANAGER is None:
+        raise ValueError("Item State Manager has not been initialized yet!")
+
+    return ITEM_STATE_MANAGER
+
+class Item:
+    """
+    A class for maintaining state on items that are being annotated.
+
+    The state of the annotations themselves are stored in the UserState class.
+    The item itself is largely immutable but can be updated with metadata.
+    """
+
+    def __init__(self, item_id, item_data):
+        """
+        Initialize an annotation item.
+
+        Args:
+            item_id: Unique identifier for this item
+            item_data: Dictionary containing the item's data (text, context, etc.)
+        """
+        self.item_id = item_id
+        self.item_data = item_data
+        self.metadata = {}
+
+        # This data structure keeps the label-based annotations the user has
+        # completed so far
+        self.labels = {}
+
+        # This data structure keeps the span-based annotations the user has
+        # completed so far
+        self.span_annotations = {}
+
+    def __getattr__(self, name):
+        """Expose raw data fields as attributes for template access.
+
+        F-029: dynamic-label / video_as_label schemas reference instance data
+        fields in Jinja as ``{{instance_obj.<field>[i]}}`` (e.g.
+        ``instance_obj.gifs[0]``). Without this, only fields whose name happens
+        to collide with a real Item attribute resolve, and others (gifs,
+        gifs_path, …) raise UndefinedError -> 500 at render time.
+
+        __getattr__ is only invoked when normal attribute lookup fails, so real
+        attributes (item_id, item_data, metadata, labels, span_annotations) are
+        never shadowed. Names absent from the data dict still raise
+        AttributeError so Jinja's Undefined handling and copy/pickle behave.
+        """
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        data = self.__dict__.get("item_data")
+        if isinstance(data, dict) and name in data:
+            return data[name]
+        raise AttributeError(name)
+
+    def add_metadata(self, metadata_name: str, metadata_value: str):
+        """Add metadata to this item"""
+        self.metadata[metadata_name] = metadata_value
+
+    def get_id(self):
+        """Get the item's unique identifier"""
+        return self.item_id
+
+    def get_data(self):
+        """Get the item's raw data dictionary"""
+        return self.item_data
+
+    def get_text(self):
+        """
+        Get the text content from the item data.
+
+        This method intelligently extracts text from various data structures,
+        trying common keys first, then falling back to string conversion.
+
+        Returns:
+            str: The text content for annotation
+        """
+        if isinstance(self.item_data, dict):
+            # Try to get text from common keys
+            for key in ['text', 'content', 'message', 'title']:
+                if key in self.item_data:
+                    return self.item_data[key]
+            # If no text key found, return the first string value
+            for value in self.item_data.values():
+                if isinstance(value, str):
+                    return value
+        elif isinstance(self.item_data, str):
+            return self.item_data
+        return str(self.item_data)
+
+    def get_displayed_text(self):
+        """Get the displayed text (same as get_text for now)"""
+        return self.get_text()
+
+    def get_metadata(self, metadata_name: str):
+        """Get metadata value by name"""
+        return self.metadata.get(metadata_name, None)
+
+    def __str__(self):
+        return f"Item(id:{self.item_id}, data:{self.item_data}, metadata:{self.metadata})"
+
+class Label:
+    """
+    A utility class for representing a single label in any annotation scheme.
+
+    Labels may have a integer value (likert), a string value (text), or a boolean value (binary).
+    Span annotations are represented with a different class.
+    """
+    def __init__(self, schema: str, name: str):
+        """
+        Initialize a label.
+
+        Args:
+            schema: The annotation scheme this label belongs to
+            name: The label name/value
+        """
+        self.schema = schema
+        self.name = name
+
+    def get_schema(self):
+        """Get the schema this label belongs to"""
+        return self.schema
+
+    def get_name(self):
+        """Get the label name/value"""
+        return self.name
+
+    def __str__(self):
+        return f"Label(schema:{self.schema}, name:{self.name})"
+
+    def __eq__(self, other):
+        """Check if two labels are equal"""
+        return self.schema == other.schema and self.name == other.name
+
+    def __hash__(self):
+        """Generate hash for label (enables use in sets/dicts)"""
+        return hash((self.schema, self.name))
+
+class SpanAnnotation:
+    """
+    A utility class for representing a single span annotation in any annotation scheme.
+
+    Spans are represented by a start and end index, as well as a label.
+    Optionally includes format-specific coordinates (e.g., PDF page/bbox, spreadsheet row/col).
+
+    Discontinuous spans are supported via the additional_parts parameter, which stores
+    a list of non-contiguous text ranges that are all part of the same annotation.
+    For example, "New" and "York" in "New and exciting York" can be annotated as
+    a single LOCATION entity with additional_parts.
+    """
+    def __init__(self, schema: str, name: str, title: str, start: int, end: int,
+                 id: str = None, annotation_id: str = None, target_field: str = None,
+                 format_coords: dict = None, additional_parts: list = None,
+                 kb_id: str = None, kb_source: str = None, kb_label: str = None):
+        """
+        Initialize a span annotation.
+
+        Args:
+            schema: The annotation scheme this span belongs to
+            name: The span label name
+            title: The span title/description
+            start: Start character index (inclusive)
+            end: End character index (exclusive)
+            id: Optional custom ID for the span
+            annotation_id: Alternative parameter name for ID (for compatibility)
+            target_field: The display field this span targets (for multi-span mode)
+            format_coords: Optional format-specific coordinates (e.g., PDF page/bbox,
+                          spreadsheet row/col). Structure depends on source format:
+                          - PDF: {"format": "pdf", "page": 1, "bbox": [x0, y0, x1, y1]}
+                          - Spreadsheet: {"format": "spreadsheet", "row": 1, "col": 2, "cell_ref": "B1"}
+                          - Code: {"format": "code", "line": 10, "column": 5}
+                          - Document: {"format": "document", "paragraph_id": "p_0", "local_offset": 0}
+            additional_parts: Optional list of additional text ranges for discontinuous spans.
+                             Each part is a dict with {"start": int, "end": int, "text": str}.
+                             Used for entities that span non-contiguous text, e.g.,
+                             "New" and "York" in "New and exciting York".
+            kb_id: Optional knowledge base entity ID (e.g., "Q937" for Wikidata)
+            kb_source: Optional knowledge base source name (e.g., "wikidata", "umls")
+            kb_label: Optional human-readable label from the knowledge base
+        """
+        self.schema = schema
+        self.start = start
+        self.title = title
+        self.end = end
+        self.name = name
+        self.target_field = target_field  # For multi-span support
+        self.format_coords = format_coords  # Format-specific coordinates
+        self.additional_parts = additional_parts or []  # For discontinuous spans
+        self.kb_id = kb_id  # Knowledge base entity ID
+        self.kb_source = kb_source  # Knowledge base source (e.g., "wikidata", "umls")
+        self.kb_label = kb_label  # Human-readable KB entity label
+        # Accept both id and annotation_id for compatibility
+        _id = id if id is not None else annotation_id
+        if _id is not None:
+            self._id = _id
+        else:
+            # Generate a unique ID if none provided
+            self._id = f"span_{uuid.uuid4().hex}"
+
+    def get_schema(self):
+        """Get the schema this span belongs to"""
+        return self.schema
+
+    def get_start(self):
+        """Get the start character index"""
+        return self.start
+
+    def get_end(self):
+        """Get the end character index"""
+        return self.end
+
+    def get_name(self):
+        """Get the span label name"""
+        return self.name
+
+    def get_title(self):
+        """Get the span title/description"""
+        return self.title
+
+    def get_id(self):
+        """Get the span's unique identifier"""
+        return self._id
+
+    def get_target_field(self):
+        """Get the target field key (for multi-span mode)"""
+        return self.target_field
+
+    def get_format_coords(self):
+        """Get format-specific coordinates (for document format support)"""
+        return self.format_coords
+
+    def set_format_coords(self, coords: dict):
+        """Set format-specific coordinates"""
+        self.format_coords = coords
+
+    def get_kb_id(self):
+        """Get the knowledge base entity ID"""
+        return self.kb_id
+
+    def set_kb_id(self, kb_id: str):
+        """Set the knowledge base entity ID"""
+        self.kb_id = kb_id
+
+    def get_kb_source(self):
+        """Get the knowledge base source name"""
+        return self.kb_source
+
+    def set_kb_source(self, kb_source: str):
+        """Set the knowledge base source name"""
+        self.kb_source = kb_source
+
+    def get_kb_label(self):
+        """Get the knowledge base entity label"""
+        return self.kb_label
+
+    def set_kb_label(self, kb_label: str):
+        """Set the knowledge base entity label"""
+        self.kb_label = kb_label
+
+    def has_entity_link(self) -> bool:
+        """Check if this span has a knowledge base entity link"""
+        return bool(self.kb_id and self.kb_source)
+
+    def set_entity_link(self, kb_id: str, kb_source: str, kb_label: str = None):
+        """
+        Set the knowledge base entity link for this span.
+
+        Args:
+            kb_id: Knowledge base entity ID (e.g., "Q937")
+            kb_source: Knowledge base source (e.g., "wikidata")
+            kb_label: Optional human-readable label
+        """
+        self.kb_id = kb_id
+        self.kb_source = kb_source
+        self.kb_label = kb_label
+
+    def clear_entity_link(self):
+        """Remove the knowledge base entity link from this span"""
+        self.kb_id = None
+        self.kb_source = None
+        self.kb_label = None
+
+    def get_additional_parts(self):
+        """Get additional parts for discontinuous spans"""
+        return self.additional_parts
+
+    def add_part(self, start: int, end: int, text: str = None):
+        """
+        Add an additional part to this discontinuous span.
+
+        Args:
+            start: Start character index (inclusive)
+            end: End character index (exclusive)
+            text: Optional text content of this part
+        """
+        part = {"start": start, "end": end}
+        if text is not None:
+            part["text"] = text
+        self.additional_parts.append(part)
+        # Keep parts sorted by start position
+        self.additional_parts.sort(key=lambda p: p["start"])
+
+    def remove_part(self, start: int, end: int):
+        """
+        Remove a part from this discontinuous span.
+
+        Args:
+            start: Start character index of the part to remove
+            end: End character index of the part to remove
+        """
+        self.additional_parts = [
+            p for p in self.additional_parts
+            if not (p["start"] == start and p["end"] == end)
+        ]
+
+    def is_discontinuous(self) -> bool:
+        """Check if this span has multiple parts (is discontinuous)"""
+        return len(self.additional_parts) > 0
+
+    def get_all_parts(self) -> list:
+        """
+        Get all parts of this span (primary + additional) as a sorted list.
+
+        Returns:
+            List of dicts with {"start": int, "end": int, "text": str (optional)}
+        """
+        primary = {"start": self.start, "end": self.end}
+        all_parts = [primary] + self.additional_parts
+        return sorted(all_parts, key=lambda p: p["start"])
+
+    def to_dict(self) -> dict:
+        """Convert span annotation to dictionary for serialization."""
+        result = {
+            "schema": self.schema,
+            "name": self.name,
+            "title": self.title,
+            "start": self.start,
+            "end": self.end,
+            "id": self._id,
+        }
+        if self.target_field:
+            result["target_field"] = self.target_field
+        if self.format_coords:
+            result["format_coords"] = self.format_coords
+        if self.additional_parts:
+            result["additional_parts"] = self.additional_parts
+        if self.kb_id:
+            result["kb_id"] = self.kb_id
+        if self.kb_source:
+            result["kb_source"] = self.kb_source
+        if self.kb_label:
+            result["kb_label"] = self.kb_label
+        return result
+
+    def __str__(self):
+        field_str = f", target_field:{self.target_field}" if self.target_field else ""
+        coords_str = f", format_coords:{self.format_coords}" if self.format_coords else ""
+        parts_str = f", additional_parts:{len(self.additional_parts)}" if self.additional_parts else ""
+        kb_str = f", kb:{self.kb_source}:{self.kb_id}" if self.kb_id else ""
+        return f"SpanAnnotation(schema:{self.schema}, name:{self.name}, start:{self.start}, end:{self.end}, id:{self._id}{field_str}{coords_str}{parts_str}{kb_str})"
+
+    def __eq__(self, other):
+        """Check if two span annotations are equal"""
+        if not isinstance(other, SpanAnnotation):
+            return False
+        # Convert additional_parts to comparable format (list of tuples)
+        self_parts = tuple((p["start"], p["end"]) for p in self.additional_parts)
+        other_parts = tuple((p["start"], p["end"]) for p in other.additional_parts)
+        return (
+            self.schema == other.schema
+            and self.name == other.name
+            and self.title == other.title
+            and self.start == other.start
+            and self.end == other.end
+            and self.target_field == other.target_field
+            and self_parts == other_parts
+            # Note: format_coords not included in equality check
+            # as they are derived from position, not essential identity
+        )
+
+    def __hash__(self):
+        """Generate hash for span annotation (enables use in sets/dicts)"""
+        # Include additional_parts in hash for discontinuous spans
+        parts_hash = tuple((p["start"], p["end"]) for p in self.additional_parts)
+        return hash((self.schema, self.name, self.title, self.start, self.end, self.target_field, parts_hash))
+
+
+class SpanLink:
+    """
+    A utility class for representing a link/relationship between spans.
+
+    SpanLinks connect two or more spans to represent relationships like
+    "PERSON works_for ORGANIZATION" or multi-way relationships.
+    """
+    def __init__(self, schema: str, link_type: str, span_ids: List[str],
+                 direction: str = "undirected", id: str = None, properties: dict = None):
+        """
+        Initialize a span link.
+
+        Args:
+            schema: The annotation scheme this link belongs to
+            link_type: The type of relationship (e.g., "WORKS_FOR", "KNOWS")
+            span_ids: Ordered list of span IDs that are connected by this link
+            direction: "directed" or "undirected" - for directed links, order matters
+            id: Optional custom ID for the link
+            properties: Optional dictionary of additional properties
+        """
+        self.schema = schema
+        self.link_type = link_type
+        self.span_ids = span_ids  # Ordered list for directed links
+        self.direction = direction  # "directed", "undirected"
+        self.properties = properties or {}
+        self._id = id if id else f"link_{uuid.uuid4().hex}"
+
+    def get_schema(self) -> str:
+        """Get the schema this link belongs to"""
+        return self.schema
+
+    def get_link_type(self) -> str:
+        """Get the link type/relationship name"""
+        return self.link_type
+
+    def get_span_ids(self) -> List[str]:
+        """Get the ordered list of span IDs connected by this link"""
+        return self.span_ids
+
+    def get_direction(self) -> str:
+        """Get whether this link is directed or undirected"""
+        return self.direction
+
+    def get_id(self) -> str:
+        """Get the link's unique identifier"""
+        return self._id
+
+    def get_properties(self) -> dict:
+        """Get additional properties for this link"""
+        return self.properties
+
+    def is_directed(self) -> bool:
+        """Check if this link is directed"""
+        return self.direction == "directed"
+
+    def to_dict(self) -> dict:
+        """Convert the span link to a dictionary for serialization"""
+        return {
+            "id": self._id,
+            "schema": self.schema,
+            "link_type": self.link_type,
+            "span_ids": self.span_ids,
+            "direction": self.direction,
+            "properties": self.properties
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'SpanLink':
+        """Create a SpanLink from a dictionary"""
+        return cls(
+            schema=data["schema"],
+            link_type=data["link_type"],
+            span_ids=data["span_ids"],
+            direction=data.get("direction", "undirected"),
+            id=data.get("id"),
+            properties=data.get("properties", {})
+        )
+
+    def __str__(self):
+        return f"SpanLink(schema:{self.schema}, type:{self.link_type}, spans:{self.span_ids}, direction:{self.direction}, id:{self._id})"
+
+    def __eq__(self, other):
+        """Check if two span links are equal"""
+        return (
+            isinstance(other, SpanLink)
+            and self.schema == other.schema
+            and self.link_type == other.link_type
+            and self.span_ids == other.span_ids
+            and self.direction == other.direction
+        )
+
+    def __hash__(self):
+        """Generate hash for span link (enables use in sets/dicts)"""
+        return hash((self.schema, self.link_type, tuple(self.span_ids), self.direction))
+
+
+class EventAnnotation:
+    """
+    A utility class for representing an N-ary event annotation.
+
+    Events consist of:
+    - A trigger span: The word/phrase indicating the event (e.g., "attacked", "hired")
+    - Argument spans: Entities with typed roles (e.g., attacker, target, weapon)
+
+    This enables information extraction tasks where events have multiple participants
+    with specific semantic roles.
+    """
+    def __init__(self, schema: str, event_type: str, trigger_span_id: str,
+                 arguments: List[Dict[str, str]], id: str = None, properties: dict = None):
+        """
+        Initialize an event annotation.
+
+        Args:
+            schema: The annotation scheme this event belongs to
+            event_type: The type of event (e.g., "ATTACK", "HIRE")
+            trigger_span_id: ID of the span that triggers/indicates the event
+            arguments: List of argument dicts, each with:
+                - role: The semantic role (e.g., "attacker", "target")
+                - span_id: ID of the span filling this role
+            id: Optional custom ID for the event
+            properties: Optional dictionary of additional properties
+        """
+        self.schema = schema
+        self.event_type = event_type
+        self.trigger_span_id = trigger_span_id
+        self.arguments = arguments  # [{role: "attacker", span_id: "..."}, ...]
+        self.properties = properties or {}
+        self._id = id if id else f"event_{uuid.uuid4().hex}"
+
+    def get_schema(self) -> str:
+        """Get the schema this event belongs to"""
+        return self.schema
+
+    def get_event_type(self) -> str:
+        """Get the event type"""
+        return self.event_type
+
+    def get_trigger_span_id(self) -> str:
+        """Get the trigger span ID"""
+        return self.trigger_span_id
+
+    def get_arguments(self) -> List[Dict[str, str]]:
+        """Get the list of arguments with their roles"""
+        return self.arguments
+
+    def get_argument_by_role(self, role: str) -> Optional[Dict[str, str]]:
+        """Get the argument for a specific role, or None if not found"""
+        for arg in self.arguments:
+            if arg.get('role') == role:
+                return arg
+        return None
+
+    def get_all_span_ids(self) -> List[str]:
+        """Get all span IDs involved in this event (trigger + arguments)"""
+        span_ids = [self.trigger_span_id]
+        for arg in self.arguments:
+            if 'span_id' in arg:
+                span_ids.append(arg['span_id'])
+        return span_ids
+
+    def get_id(self) -> str:
+        """Get the event's unique identifier"""
+        return self._id
+
+    def get_properties(self) -> dict:
+        """Get additional properties for this event"""
+        return self.properties
+
+    def to_dict(self) -> dict:
+        """Convert the event annotation to a dictionary for serialization"""
+        return {
+            "id": self._id,
+            "schema": self.schema,
+            "event_type": self.event_type,
+            "trigger_span_id": self.trigger_span_id,
+            "arguments": self.arguments,
+            "properties": self.properties
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EventAnnotation':
+        """Create an EventAnnotation from a dictionary"""
+        return cls(
+            schema=data["schema"],
+            event_type=data["event_type"],
+            trigger_span_id=data["trigger_span_id"],
+            arguments=data.get("arguments", []),
+            id=data.get("id"),
+            properties=data.get("properties", {})
+        )
+
+    def __str__(self):
+        args_str = ", ".join(f"{a.get('role', '?')}:{a.get('span_id', '?')}" for a in self.arguments)
+        return f"EventAnnotation(schema:{self.schema}, type:{self.event_type}, trigger:{self.trigger_span_id}, args:[{args_str}], id:{self._id})"
+
+    def __eq__(self, other):
+        """Check if two event annotations are equal"""
+        return (
+            isinstance(other, EventAnnotation)
+            and self.schema == other.schema
+            and self.event_type == other.event_type
+            and self.trigger_span_id == other.trigger_span_id
+            and self.arguments == other.arguments
+        )
+
+    def __hash__(self):
+        """Generate hash for event annotation (enables use in sets/dicts)"""
+        # Convert arguments to a hashable tuple representation
+        args_tuple = tuple((a.get('role', ''), a.get('span_id', '')) for a in self.arguments)
+        return hash((self.schema, self.event_type, self.trigger_span_id, args_tuple))
+
+
+class AssignmentStrategy(Enum):
+    """
+    Enumeration of strategies for assigning items to users.
+
+    Different strategies optimize for different goals:
+    - RANDOM: Maximizes diversity and reduces bias
+    - FIXED_ORDER: Ensures consistent ordering across users
+    - ACTIVE_LEARNING: Prioritizes items with high uncertainty
+    - LLM_CONFIDENCE: Uses AI model confidence for prioritization
+    - MAX_DIVERSITY: Prioritizes items with high disagreement
+    - LEAST_ANNOTATED: Prioritizes items with fewest annotations
+    - CATEGORY_BASED: Assigns items matching user's qualified categories
+    - DIVERSITY_CLUSTERING: Samples items round-robin from embedding clusters
+    - BATCH: Restricts assignment to configured annotator/item cohorts
+    - PRIORITY: Serves items by a triage signal (errors/low-score first)
+    - PSYCHOMETRIC: Routes items by expected information gain under a live
+      IRT model (annotator ability x item uncertainty); confident items
+      stop consuming annotation budget
+    """
+    RANDOM = 'random'
+    FIXED_ORDER = 'fixed_order'
+    ACTIVE_LEARNING = 'active_learning'
+    LLM_CONFIDENCE = 'llm_confidence'
+    MAX_DIVERSITY = 'max_diversity'
+    LEAST_ANNOTATED = 'least_annotated'
+    CATEGORY_BASED = 'category_based'
+    DIVERSITY_CLUSTERING = 'diversity_clustering'
+    BATCH = 'batch'
+    PRIORITY = 'priority'
+    PSYCHOMETRIC = 'psychometric'
+
+    def fromstr(phase: str) -> AssignmentStrategy:
+        """
+        Convert a string representation to an AssignmentStrategy enum value.
+
+        Args:
+            phase: String representation of the strategy (case-insensitive)
+
+        Returns:
+            AssignmentStrategy: The corresponding enum value
+
+        Raises:
+            ValueError: If the string doesn't match any known strategy
+        """
+        phase = phase.lower()
+        if phase == "random":
+            return AssignmentStrategy.RANDOM
+        elif phase == "fixed_order":
+            return AssignmentStrategy.FIXED_ORDER
+        elif phase == "active_learning":
+            return AssignmentStrategy.ACTIVE_LEARNING
+        elif phase == "llm_confidence":
+            return AssignmentStrategy.LLM_CONFIDENCE
+        elif phase == "max_diversity":
+            return AssignmentStrategy.MAX_DIVERSITY
+        elif phase == "least_annotated":
+            return AssignmentStrategy.LEAST_ANNOTATED
+        elif phase == "category_based":
+            return AssignmentStrategy.CATEGORY_BASED
+        elif phase == "diversity_clustering":
+            return AssignmentStrategy.DIVERSITY_CLUSTERING
+        elif phase == "batch":
+            return AssignmentStrategy.BATCH
+        elif phase == "priority":
+            return AssignmentStrategy.PRIORITY
+        elif phase == "psychometric":
+            return AssignmentStrategy.PSYCHOMETRIC
+        else:
+            raise ValueError(f"Unknown phase: {phase}")
+
+
+class ItemStateManager:
+    """
+    A class for maintaining state on the ordering and metadata of items that are being annotated.
+
+    This class aims to be a singleton that is shared across all users and provides the functionality
+    of determining which item is next to be annotated.
+    The state of the annotations themselves are stored in the UserState class.
+    """
+
+    def __init__(self, config: dict):
+        """
+        Initialize the item state manager.
+
+        Args:
+            config: Configuration dictionary containing item management settings
+        """
+        # Cache the config for later
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+
+        # Thread-safe lock for concurrent access to item data
+        self._lock = threading.RLock()
+
+        # This data structure keeps the ordering of the items that are being annotated
+        # and a mapping from item ID to the Item object
+        self.instance_id_to_instance = OrderedDict()
+
+        self.instance_id_ordering = []
+
+        # Load max annotations per item from config. Prefers the canonical
+        # `num_annotators_per_item` (int or dict.default) and falls back to the
+        # deprecated `max_annotations_per_item` for backwards compatibility.
+        try:
+            from potato.server_utils.config_module import resolve_num_annotators_per_item
+            self.max_annotations_per_item = resolve_num_annotators_per_item(config)
+        except ImportError:
+            self.max_annotations_per_item = config.get('max_annotations_per_item', -1)
+
+        # Adaptive boost: dynamically increase the per-item cap when early
+        # annotators disagree. Parsed from num_annotators_per_item.adaptive.
+        nap = config.get('num_annotators_per_item')
+        adaptive_cfg = (nap.get('adaptive') if isinstance(nap, dict) else None) or {}
+        self.adaptive_boost = {
+            'enabled': bool(adaptive_cfg.get('enabled', False)),
+            'threshold': float(adaptive_cfg.get('disagreement_threshold', 0.5)),
+            'boost_to': int(adaptive_cfg.get('boost_to', 0)),
+        }
+
+        # Minimum coverage floor; forces continued assignment even if some
+        # users have not yet rated an item.
+        self.min_annotations_per_item = None
+        if isinstance(nap, dict) and nap.get('min') is not None:
+            self.min_annotations_per_item = int(nap['min'])
+        elif config.get('min_annotators_per_instance') is not None:
+            self.min_annotations_per_item = int(config['min_annotators_per_instance'])
+
+        # Track which annotators have worked on each item
+        self.instance_annotators = defaultdict(set)
+
+        # Track assignment timestamps for stale reclamation: {instance_id: {username: timestamp}}
+        self.assignment_timestamps = defaultdict(dict)
+
+        # Instance reclamation config
+        reclaim_config = config.get('instance_reclaim', {})
+        self.reclaim_enabled = reclaim_config.get('enabled', False)
+        self.reclaim_timeout_hours = reclaim_config.get('timeout_hours', 24)
+        self.reclaim_config = reclaim_config
+
+        # Queue of remaining instances to be assigned
+        self.remaining_instance_ids = deque()
+
+        # Runtime assignment pause switch. When True, assign_instances_to_user
+        # is a no-op so admins can freeze new assignments (e.g. while curating an
+        # eval dataset or investigating). Existing assignments are untouched.
+        self._assignment_paused = False
+
+        # NOTE: We use an extra set to keep track of completed instances to allow for
+        # O(1) tests of whether an item needs to be removed from the remaining list
+        self.completed_instance_ids = set()
+
+        # Initialize item annotation counts for tracking
+        self.item_annotation_counts = defaultdict(int)
+
+        # Signal-based triage: score each item into a priority from the
+        # `triage` config block (errors / thumbs-down / low score first). The
+        # scorer runs in add_item, so it covers both statically loaded data and
+        # traces ingested at runtime. None when triage is disabled.
+        try:
+            from potato.server_utils.triage import build_scorer
+            self.triage_scorer = build_scorer(config)
+        except ImportError:
+            self.triage_scorer = None
+
+        # Load how we want to assign items to users
+        if 'assignment_strategy' in config:
+            strat = config['assignment_strategy']
+            if isinstance(strat, str):
+                self.assignment_strategy = AssignmentStrategy.fromstr(strat)
+            elif isinstance(strat, dict):
+                self.assignment_strategy = AssignmentStrategy.fromstr(strat['name'])
+            else:
+                raise ValueError("Invalid assignment_strategy in config")
+        elif self.triage_scorer is not None:
+            # Triage enabled without an explicit strategy: prioritize the queue
+            # by the triage signal (the whole point of enabling triage).
+            self.assignment_strategy = AssignmentStrategy.PRIORITY
+        else:
+            self.assignment_strategy = AssignmentStrategy.FIXED_ORDER
+
+        # Set up random seed for assignment strategies
+        self.random_seed = config.get('random_seed', 1234)
+        self.random = random.Random(self.random_seed)
+        self.logger.info(f"ItemStateManager initialized with random_seed={self.random_seed}")
+
+        # Category-based assignment support
+        item_properties = config.get('item_properties', {})
+        self.category_key = item_properties.get('category_key', None)
+
+        # Maps category name to set of instance IDs in that category
+        self.category_to_instance_ids: Dict[str, Set[str]] = defaultdict(set)
+
+        # Maps instance ID to its set of categories
+        self.instance_id_to_categories: Dict[str, Set[str]] = {}
+
+        # Instances with no category
+        self.uncategorized_instance_ids: Set[str] = set()
+
+        # Category assignment fallback behavior (loaded from category_assignment config)
+        category_assignment_config = config.get('category_assignment', {})
+        self.category_fallback = category_assignment_config.get('fallback', 'uncategorized')
+
+        # Dynamic expertise mode - uses probabilistic routing based on annotator agreement
+        dynamic_config = category_assignment_config.get('dynamic', {})
+        self.dynamic_expertise_enabled = dynamic_config.get('enabled', False)
+
+        # Batch assignment restricts items to explicit annotator cohorts. Groups
+        # can be configured centrally, or each item can carry an annotator list.
+        self.batch_assignment_config = config.get('batch_assignment') or {}
+        self.batch_assignment_annotator_key = self.batch_assignment_config.get(
+            'annotator_key',
+            'assigned_annotators',
+        )
+        self.batch_assignment_id_key = config.get('item_properties', {}).get('id_key', 'id')
+        self.batch_auto_assign_annotators = bool(
+            self.batch_assignment_config.get('auto_assign_annotators', False)
+        )
+        self.batch_user_to_instance_ids: Dict[str, List[str]] = defaultdict(list)
+        self.batch_auto_groups: List[Dict[str, object]] = []
+        self.batch_auto_user_to_group: Dict[str, int] = {}
+        self.batch_auto_group_to_users: Dict[int, Set[str]] = defaultdict(set)
+        self._load_batch_assignment_groups()
+
+    def _load_batch_assignment_groups(self) -> None:
+        """Index configured batch groups by annotator while preserving item order."""
+        groups = self.batch_assignment_config.get('groups') or []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            users = group.get('annotators', group.get('users', []))
+            instance_ids = group.get(
+                'instances',
+                group.get('items', group.get('instance_ids', [])),
+            )
+            file_entry = group.get(
+                'instances_file',
+                group.get('items_file', group.get('instance_ids_file')),
+            )
+            if not file_entry:
+                file_entry = group.get(
+                    'data_file',
+                    group.get('input_data_file', group.get('input_file')),
+                )
+            if file_entry:
+                instance_ids = list(instance_ids) if isinstance(instance_ids, list) else []
+                instance_ids.extend(self._load_batch_instance_ids_from_file(file_entry))
+            if isinstance(users, str):
+                users = [users]
+            if isinstance(instance_ids, str):
+                instance_ids = [instance_ids]
+            users = [str(user) for user in users if isinstance(user, str) and user]
+            instance_ids = [
+                str(instance_id)
+                for instance_id in instance_ids
+                if isinstance(instance_id, str) and instance_id
+            ]
+            if self.batch_auto_assign_annotators and not users:
+                self.batch_auto_groups.append(
+                    {
+                        'name': group.get('name') or f"batch_{len(self.batch_auto_groups) + 1}",
+                        'instance_ids': instance_ids,
+                        'max_annotators': self._resolve_batch_group_max_annotators(group),
+                    }
+                )
+                continue
+            for user_id in users:
+                for instance_id in instance_ids:
+                    if instance_id not in self.batch_user_to_instance_ids[user_id]:
+                        self.batch_user_to_instance_ids[user_id].append(instance_id)
+
+    def _resolve_batch_group_max_annotators(self, group: dict) -> Optional[int]:
+        for key in ('max_annotators', 'annotator_count', 'slots'):
+            value = group.get(key)
+            if value is not None:
+                return int(value)
+        return self.max_annotations_per_item if self.max_annotations_per_item > 0 else None
+
+    def _resolve_batch_file_path(self, path: str) -> str:
+        """Resolve a batch assignment file path relative to task_dir."""
+        task_dir = self.config.get('task_dir', '.')
+        raw_path = path if os.path.isabs(path) else os.path.join(task_dir, path)
+        from potato.server_utils.config_module import validate_path_security
+
+        return validate_path_security(os.path.normpath(raw_path), task_dir)
+
+    def _instance_id_from_batch_record(self, record, source: str, index: int) -> str:
+        """Extract an instance ID from a supported batch assignment record."""
+        if isinstance(record, str):
+            return record
+        if isinstance(record, dict):
+            if self.batch_assignment_id_key not in record:
+                raise KeyError(
+                    f"ID key '{self.batch_assignment_id_key}' not found in "
+                    f"batch assignment file {source} at item {index + 1}"
+                )
+            return str(record[self.batch_assignment_id_key])
+        raise ValueError(
+            f"Expected object or string in batch assignment file {source} "
+            f"at item {index + 1}, got {type(record).__name__}"
+        )
+
+    def _load_batch_instance_ids_from_file(self, file_entry) -> List[str]:
+        """
+        Load batch instance IDs from a supported Potato data file format.
+
+        Supports the same local formats as ``data_files``: JSON, JSONL, CSV,
+        TSV, and Parquet. JSON may be a list of item objects, a list of ID
+        strings, or a mapping with ``instances``/``items``/``instance_ids``.
+        """
+        if isinstance(file_entry, dict):
+            raw_path = file_entry.get('path')
+            encoding = file_entry.get('encoding', 'utf-8')
+        else:
+            raw_path = file_entry
+            encoding = 'utf-8'
+
+        if not raw_path or not isinstance(raw_path, str):
+            raise ValueError("batch assignment file entry must define a path")
+
+        path = self._resolve_batch_file_path(raw_path)
+        fmt = path.rsplit('.', 1)[-1].lower()
+        if fmt not in {'csv', 'tsv', 'json', 'jsonl', 'parquet'}:
+            raise ValueError(f"Unsupported batch assignment file format {fmt} for {path}")
+
+        if fmt == 'json':
+            with open(path, 'rt', encoding=encoding) as f:
+                parsed = json.load(f)
+            if isinstance(parsed, dict):
+                for key in ('instances', 'items', 'instance_ids'):
+                    if key in parsed:
+                        parsed = parsed[key]
+                        break
+            if not isinstance(parsed, list):
+                raise ValueError(f"Expected JSON list in batch assignment file {path}")
+            return [
+                self._instance_id_from_batch_record(record, path, idx)
+                for idx, record in enumerate(parsed)
+            ]
+
+        if fmt == 'jsonl':
+            instance_ids = []
+            with open(path, 'rt', encoding=encoding) as f:
+                for line_no, line in enumerate(f):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    instance_ids.append(
+                        self._instance_id_from_batch_record(record, path, line_no)
+                    )
+            return instance_ids
+
+        if fmt == 'parquet':
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(path)
+            df = table.to_pandas()
+        else:
+            import pandas as pd
+
+            sep = ',' if fmt == 'csv' else '\t'
+            df = pd.read_csv(path, sep=sep, encoding=encoding)
+
+        if self.batch_assignment_id_key not in df.columns:
+            raise KeyError(
+                f"ID column '{self.batch_assignment_id_key}' not found in "
+                f"batch assignment file {path}"
+            )
+        return [str(value) for value in df[self.batch_assignment_id_key].tolist()]
+
+    def _item_batch_annotators(self, instance_id: str) -> Set[str]:
+        """Return annotators allowed by an item's batch annotator key."""
+        item = self.instance_id_to_instance.get(instance_id)
+        if item is None:
+            return set()
+        item_data = item.get_data()
+        if not isinstance(item_data, dict):
+            return set()
+        annotators = item_data.get(self.batch_assignment_annotator_key)
+        if annotators is None:
+            return set()
+        if isinstance(annotators, str):
+            annotators = [annotators]
+        if not isinstance(annotators, list):
+            return set()
+        return {value for value in annotators if isinstance(value, str) and value}
+
+    def _select_auto_batch_group_for_user(
+        self, user_id: str, persist: bool = False
+    ) -> Optional[Tuple[int, Dict[str, object], bool]]:
+        """Choose an auto-batch group for a user.
+
+        Returns ``(group_index, group, newly_pinned)`` or ``None`` when
+        auto-assignment is disabled or every group is full. When ``persist`` is
+        set and the user is not already pinned, the pin is committed atomically
+        under ``self._lock`` (so concurrent new users balance correctly) and
+        ``newly_pinned`` is ``True``. Callers roll a fresh pin back via
+        :meth:`_rollback_auto_batch_pin` when it ends up yielding no items.
+        """
+        if not self.batch_auto_assign_annotators or not self.batch_auto_groups:
+            return None
+
+        with self._lock:
+            if user_id in self.batch_auto_user_to_group:
+                index = self.batch_auto_user_to_group[user_id]
+                return index, self.batch_auto_groups[index], False
+
+            available = []
+            for index, group in enumerate(self.batch_auto_groups):
+                assigned_count = len(self.batch_auto_group_to_users[index])
+                max_annotators = group.get('max_annotators')
+                if max_annotators is not None and assigned_count >= int(max_annotators):
+                    continue
+                available.append((assigned_count, index, group))
+
+            if not available:
+                return None
+
+            _, index, group = min(available, key=lambda entry: (entry[0], entry[1]))
+            newly_pinned = False
+            if persist:
+                self.batch_auto_user_to_group[user_id] = index
+                self.batch_auto_group_to_users[index].add(user_id)
+                newly_pinned = True
+            return index, group, newly_pinned
+
+    def _rollback_auto_batch_pin(self, user_id: str, group_index: int) -> None:
+        """Undo a pin created this pass when it yielded no assignable items.
+
+        Only removes the pin if it still points at ``group_index`` (so a
+        concurrent re-pin is never clobbered).
+        """
+        with self._lock:
+            if self.batch_auto_user_to_group.get(user_id) == group_index:
+                del self.batch_auto_user_to_group[user_id]
+                self.batch_auto_group_to_users[group_index].discard(user_id)
+
+    def get_group_name_for_user(self, user_id: str) -> Optional[str]:
+        """Return the batch-assignment cohort name for a user, or None.
+
+        Resolves membership from two sources (read-only; never creates a pin):
+          1. Explicit config groups: the first ``batch_assignment.groups`` entry
+             whose ``annotators``/``users`` list contains ``user_id``.
+          2. Auto-assigned pin: ``batch_auto_user_to_group`` -> the pinned
+             auto-group's name.
+
+        Used by the per-cohort schema resolver to pick a user's scheme set.
+        """
+        if not user_id:
+            return None
+
+        # Explicit config groups (may be unnamed -> synthesize a stable name).
+        for idx, group in enumerate(self.batch_assignment_config.get('groups') or []):
+            if not isinstance(group, dict):
+                continue
+            users = group.get('annotators', group.get('users', []))
+            if isinstance(users, str):
+                users = [users]
+            if user_id in (users or []):
+                return group.get('name') or f"group_{idx}"
+
+        # Auto-assigned pin (set during item assignment).
+        index = self.batch_auto_user_to_group.get(user_id)
+        if index is not None and 0 <= index < len(self.batch_auto_groups):
+            group = self.batch_auto_groups[index]
+            name = group.get('name')
+            if name:
+                return str(name)
+
+        return None
+
+    def _batch_candidate_ids_for_user(
+        self, user_id: str, assign_auto: bool = False
+    ) -> Tuple[List[str], Optional[int]]:
+        """Return ``(batch-eligible item IDs, rollback_group_index)`` for a user.
+
+        ``rollback_group_index`` is the index of an auto-group this call freshly
+        pinned the user to; the caller must roll it back if it assigns nothing.
+        It is ``None`` unless a new pin was committed this call.
+        """
+        candidate_ids = []
+        seen = set()
+
+        for instance_id in self.batch_user_to_instance_ids.get(user_id, []):
+            if instance_id not in seen:
+                candidate_ids.append(instance_id)
+                seen.add(instance_id)
+
+        rollback_group_index = None
+        selection = self._select_auto_batch_group_for_user(
+            user_id,
+            persist=assign_auto and not candidate_ids,
+        )
+        if selection is not None and not candidate_ids:
+            group_index, auto_group, newly_pinned = selection
+            if newly_pinned:
+                rollback_group_index = group_index
+            for instance_id in auto_group.get('instance_ids', []):
+                if instance_id not in seen:
+                    candidate_ids.append(instance_id)
+                    seen.add(instance_id)
+
+        for instance_id in self.remaining_instance_ids:
+            if instance_id in seen:
+                continue
+            if user_id in self._item_batch_annotators(instance_id):
+                candidate_ids.append(instance_id)
+                seen.add(instance_id)
+
+        return candidate_ids, rollback_group_index
+
+    def rebuild_auto_batch_pins_from_users(
+        self, user_id_to_instance_ids: Dict[str, Set[str]]
+    ) -> None:
+        """Reconstruct auto-batch cohort pins from persisted user assignments.
+
+        Called once at boot (after items and auto-groups are loaded, before the
+        server serves requests) so the in-memory pins survive a restart. Each
+        user is pinned to the auto-group holding the majority of their
+        assigned/annotated items (ties broken by lowest group index). Users
+        whose items match no auto-group are left unpinned and treated as new.
+
+        Existing pins are authoritative: a group may end up over ``max_annotators``
+        here, which only gates *new* users in
+        :meth:`_select_auto_batch_group_for_user`.
+        """
+        if not self.batch_auto_assign_annotators or not self.batch_auto_groups:
+            return
+
+        # Reverse index: instance_id -> group index. Warn on overlap since
+        # auto-groups are meant to be disjoint input batches.
+        instance_to_group: Dict[str, int] = {}
+        for index, group in enumerate(self.batch_auto_groups):
+            for instance_id in group.get('instance_ids', []):
+                if instance_id in instance_to_group and instance_to_group[instance_id] != index:
+                    self.logger.warning(
+                        "Auto-batch groups overlap on item %s (groups %s and %s); "
+                        "reconstruction will attribute it to the first group",
+                        instance_id,
+                        instance_to_group[instance_id],
+                        index,
+                    )
+                    continue
+                instance_to_group[instance_id] = index
+
+        with self._lock:
+            self.batch_auto_user_to_group.clear()
+            self.batch_auto_group_to_users = defaultdict(set)
+
+            for user_id, instance_ids in user_id_to_instance_ids.items():
+                counts: Dict[int, int] = defaultdict(int)
+                for instance_id in instance_ids:
+                    group_index = instance_to_group.get(instance_id)
+                    if group_index is not None:
+                        counts[group_index] += 1
+
+                if not counts:
+                    continue
+
+                if len(counts) > 1:
+                    self.logger.warning(
+                        "User %s has items spanning multiple auto-batch groups %s; "
+                        "pinning to the majority group",
+                        user_id,
+                        sorted(counts),
+                    )
+
+                # Majority group, ties broken by lowest index.
+                best_index = min(counts, key=lambda idx: (-counts[idx], idx))
+                self.batch_auto_user_to_group[str(user_id)] = best_index
+                self.batch_auto_group_to_users[best_index].add(str(user_id))
+
+    def has_item(self, instance_id: str) -> bool:
+        """Returns True if the item is in the state manager"""
+        return instance_id in self.instance_id_to_instance
+
+    def add_item(self, instance_id: str, instance_data: dict):
+        """
+        Adds a new instance to be annotated to the state manager (thread-safe).
+
+        Args:
+            instance_id: Unique identifier for the item
+            instance_data: Dictionary containing the item's data
+
+        Raises:
+            ValueError: If an item with the same ID already exists
+        """
+        with self._lock:
+            item = Item(instance_id, instance_data)
+            if instance_id in self.instance_id_to_instance:
+                raise ValueError(f"Duplicate Item ID! Item with ID {instance_id} already exists in the state manager")
+
+            self.instance_id_to_instance[instance_id] = item
+            self.instance_id_ordering.append(instance_id)
+            self.remaining_instance_ids.append(instance_id)
+
+            # Signal-based triage: store the quality-signal priority + reason on
+            # the item so the PRIORITY assignment strategy and the inline badge
+            # can read it. Runs for both static and runtime-ingested items.
+            if self.triage_scorer is not None:
+                try:
+                    score = self.triage_scorer.score(instance_data)
+                    for k, v in score.to_metadata().items():
+                        item.add_metadata(k, v)
+                except Exception as e:
+                    self.logger.warning(f"Triage scoring failed for {instance_id}: {e}")
+
+            # Index categories for this item
+            self._index_item_categories(instance_id, instance_data)
+
+        # Automation rules (Phase 4): run OUTSIDE the lock so action execution
+        # (dataset writes, notifies; heavy actions are dispatched to a worker)
+        # never holds the item-state lock. Runs after triage so add_to_queue can
+        # override the triage priority. Guarded — must never break ingestion.
+        try:
+            from potato.automation.manager import get_automation_manager
+            automation = get_automation_manager()
+            if automation is not None:
+                automation.process_item(instance_id, instance_data)
+        except Exception as e:
+            self.logger.warning(f"Automation processing failed for {instance_id}: {e}")
+
+        # Semantic curation: optionally embed the item into the search index on
+        # ingest (opt-in via curation.embed_on_ingest; guarded + lazy).
+        try:
+            from potato.curation.manager import get_curation_manager
+            curation = get_curation_manager()
+            if curation is not None and curation.embed_on_ingest:
+                curation.embed_instance(instance_id)
+        except Exception as e:
+            self.logger.warning(f"Curation embed-on-ingest failed for {instance_id}: {e}")
+
+    def update_item(self, instance_id: str, instance_data: dict) -> bool:
+        """
+        Update an existing instance's data (thread-safe).
+
+        This method updates the item_data for an existing instance while preserving
+        all existing annotations (labels, span_annotations) and metadata. This is
+        useful for dynamic data loading scenarios where file contents change.
+
+        Args:
+            instance_id: Unique identifier for the item to update
+            instance_data: New data dictionary for the item
+
+        Returns:
+            bool: True if the item was updated, False if the item doesn't exist
+        """
+        with self._lock:
+            if instance_id not in self.instance_id_to_instance:
+                return False
+            item = self.instance_id_to_instance[instance_id]
+            # Update item_data while preserving labels, span_annotations, and metadata
+            item.item_data = instance_data
+            return True
+
+    def add_items(self, instances: dict[str, dict]):
+        """
+        Given a dictionary of instance IDs to instance data, add them to the state manager.
+
+        Args:
+            instances: Dictionary mapping instance IDs to instance data dictionaries
+        """
+        for iid, instance_data in instances.items():
+            self.add_item(iid, instance_data)
+
+    # =========================================================================
+    # Category Indexing Methods
+    # =========================================================================
+
+    def _index_item_categories(self, instance_id: str, instance_data: dict) -> None:
+        """
+        Extract and index categories for an item.
+
+        Categories can be specified as a string or list of strings in the data.
+        If no category_key is configured or the item has no category, it is
+        added to uncategorized_instance_ids.
+
+        Args:
+            instance_id: The ID of the item
+            instance_data: The item's data dictionary
+        """
+        if not self.category_key:
+            # No category key configured, all items are uncategorized
+            self.uncategorized_instance_ids.add(instance_id)
+            self.instance_id_to_categories[instance_id] = set()
+            return
+
+        category_value = instance_data.get(self.category_key)
+
+        if category_value is None:
+            # Item has no category
+            self.uncategorized_instance_ids.add(instance_id)
+            self.instance_id_to_categories[instance_id] = set()
+            return
+
+        # Normalize to list
+        if isinstance(category_value, str):
+            # Treat empty/whitespace-only strings as uncategorized
+            if category_value.strip():
+                categories = [category_value]
+            else:
+                categories = []
+        elif isinstance(category_value, list):
+            categories = [c for c in category_value if isinstance(c, str) and c.strip()]
+        else:
+            self.logger.warning(
+                f"Item {instance_id} has invalid category value type: {type(category_value)}. "
+                f"Expected string or list of strings."
+            )
+            self.uncategorized_instance_ids.add(instance_id)
+            self.instance_id_to_categories[instance_id] = set()
+            return
+
+        if not categories:
+            # Empty category list
+            self.uncategorized_instance_ids.add(instance_id)
+            self.instance_id_to_categories[instance_id] = set()
+            return
+
+        # Index the categories
+        category_set = set(categories)
+        self.instance_id_to_categories[instance_id] = category_set
+
+        for category in category_set:
+            self.category_to_instance_ids[category].add(instance_id)
+
+    def get_instances_by_category(self, category: str) -> Set[str]:
+        """
+        Get all instance IDs that belong to a specific category.
+
+        Args:
+            category: The category name
+
+        Returns:
+            Set of instance IDs in that category
+        """
+        with self._lock:
+            return self.category_to_instance_ids.get(category, set()).copy()
+
+    def get_instances_by_categories(self, categories: Set[str]) -> Set[str]:
+        """
+        Get all instance IDs that belong to any of the specified categories.
+
+        Args:
+            categories: Set of category names
+
+        Returns:
+            Set of instance IDs in any of those categories
+        """
+        with self._lock:
+            result = set()
+            for category in categories:
+                result.update(self.category_to_instance_ids.get(category, set()))
+            return result
+
+    def get_categories_for_instance(self, instance_id: str) -> Set[str]:
+        """
+        Get all categories that an instance belongs to.
+
+        Args:
+            instance_id: The instance ID
+
+        Returns:
+            Set of category names (empty set if uncategorized)
+        """
+        with self._lock:
+            return self.instance_id_to_categories.get(instance_id, set()).copy()
+
+    def get_uncategorized_instances(self) -> Set[str]:
+        """
+        Get all instance IDs that have no category.
+
+        Returns:
+            Set of uncategorized instance IDs
+        """
+        with self._lock:
+            return self.uncategorized_instance_ids.copy()
+
+    def get_all_categories(self) -> Set[str]:
+        """
+        Get all unique category names in the system.
+
+        Returns:
+            Set of all category names
+        """
+        with self._lock:
+            return set(self.category_to_instance_ids.keys())
+
+    def get_category_counts(self) -> Dict[str, int]:
+        """
+        Get the count of instances per category.
+
+        Returns:
+            Dictionary mapping category names to instance counts
+        """
+        with self._lock:
+            return {cat: len(ids) for cat, ids in self.category_to_instance_ids.items()}
+
+    # =========================================================================
+    # Assignment Methods
+    # =========================================================================
+
+    def _get_annotator_cap_for_item(self, instance_id: str) -> int:
+        """
+        Resolve the annotator cap for a single item.
+
+        Looks up the per-item override (set by overlap sampling or adaptive boost
+        via ``Item.metadata['required_annotations']``) and falls back to the
+        global ``max_annotations_per_item`` when no override is set.
+
+        Returns -1 to mean unlimited (matching the legacy convention).
+        """
+        item = self.instance_id_to_instance.get(instance_id)
+        if item is not None:
+            per_item = item.get_metadata('required_annotations')
+            if per_item is not None:
+                try:
+                    return int(per_item)
+                except (TypeError, ValueError):
+                    pass
+        return self.max_annotations_per_item
+
+    def _item_is_saturated(self, instance_id: str) -> bool:
+        """True if the item has reached its annotator cap (per-item or global)."""
+        cap = self._get_annotator_cap_for_item(instance_id)
+        return cap >= 0 and len(self.instance_annotators[instance_id]) >= cap
+
+    def has_unlabeled_items_for_user(self, user_state: 'UserState') -> bool:
+        """Check whether any items remain for this user to annotate (read-only)."""
+        if self.assignment_strategy == AssignmentStrategy.BATCH:
+            user_id = getattr(user_state, 'user_id', None)
+            if not user_id:
+                return False
+            candidate_ids, _ = self._batch_candidate_ids_for_user(str(user_id))
+            for iid in candidate_ids:
+                if iid not in self.remaining_instance_ids:
+                    continue
+                if self._item_is_saturated(iid):
+                    continue
+                if not user_state.has_annotated(iid):
+                    return True
+            return False
+
+        if self.assignment_strategy == AssignmentStrategy.PSYCHOMETRIC:
+            # Early-stopped (resolved) items are excluded from assignment, so
+            # they must not count as available either — otherwise users spin
+            # on an "annotate" page that will never serve them anything.
+            candidates = [
+                iid for iid in self.remaining_instance_ids
+                if not self._item_is_saturated(iid)
+                and not user_state.has_annotated(iid)
+            ]
+            if not candidates:
+                return False
+            try:
+                from potato.psychometrics import get_psychometrics_manager
+                pm = get_psychometrics_manager()
+            except ImportError:
+                pm = None
+            if pm is None:
+                return True  # random fallback will serve these candidates
+            user_id = getattr(user_state, 'user_id', 'anonymous')
+            ranked = pm.rank_items(user_id, candidates)
+            if ranked is None:
+                return True  # cold start: random fallback serves them
+            return len(ranked) > 0
+
+        for iid in self.remaining_instance_ids:
+            if self._item_is_saturated(iid):
+                continue
+            if not user_state.has_annotated(iid):
+                return True
+        return False
+
+    def _count_assignable_batch_items(self, user_state: 'UserState') -> int:
+        """Count batch-eligible items that can still be newly assigned."""
+        user_id = getattr(user_state, 'user_id', None)
+        if not user_id:
+            return 0
+        already_assigned = user_state.get_assigned_instance_ids()
+        count = 0
+        candidate_ids, _ = self._batch_candidate_ids_for_user(str(user_id))
+        for iid in candidate_ids:
+            if iid not in self.remaining_instance_ids:
+                continue
+            if self._item_is_saturated(iid):
+                continue
+            if iid in already_assigned:
+                continue
+            if user_state.has_annotated(iid):
+                continue
+            count += 1
+        return count
+
+    def pause_assignment(self) -> None:
+        """Freeze new assignments (admin control). Idempotent."""
+        self._assignment_paused = True
+
+    def resume_assignment(self) -> None:
+        """Resume new assignments (admin control). Idempotent."""
+        self._assignment_paused = False
+
+    def is_assignment_paused(self) -> bool:
+        return self._assignment_paused
+
+    def assign_instances_to_user(self, user_state: UserState) -> int:
+        """
+        Assigns a set of instances to a user based on the current state of the system
+        and returns the number of instances assigned.
+
+        This method implements various assignment strategies to optimize annotation
+        efficiency and quality. The strategy used depends on the configuration.
+
+        If ICL verification is enabled with mix_with_regular_assignments, this method
+        may include verification tasks from the ICL labeler's queue. These appear as
+        regular annotation tasks (blind labeling) so users don't know they're verifying
+        LLM predictions.
+
+        Args:
+            user_state: The user state object to assign instances to
+
+        Returns:
+            int: Number of instances assigned to the user
+
+        Side Effects:
+            - Updates user_state with new instance assignments
+            - Updates internal tracking of item assignments
+            - May modify remaining_instance_ids queue
+        """
+        self.logger.debug(f"Assigning instances to user {getattr(user_state, 'user_id', None)} with strategy {self.assignment_strategy} and random_seed={self.random_seed}")
+
+        # Respect the runtime pause switch — freeze new assignments without
+        # disturbing anything already assigned.
+        if self._assignment_paused:
+            self.logger.info("Assignment is paused; skipping new assignments")
+            return 0
+
+        # Snapshot existing assignments so we can record timestamps for new ones
+        existing_assignments = set(user_state.get_assigned_instance_ids()) if self.reclaim_enabled else None
+
+        result = self._assign_instances_to_user_inner(user_state)
+
+        # Record timestamps for newly assigned instances
+        if self.reclaim_enabled and existing_assignments is not None:
+            import time
+            username = getattr(user_state, 'user_id', None)
+            if username:
+                now = time.time()
+                new_assignments = set(user_state.get_assigned_instance_ids()) - existing_assignments
+                for iid in new_assignments:
+                    self.assignment_timestamps[iid][username] = now
+
+        return result
+
+    def _assign_instances_to_user_inner(self, user_state: 'UserState') -> int:
+        """Inner assignment logic called by assign_instances_to_user."""
+
+        # Check if we should assign a verification task from ICL labeling
+        verification_assigned = self._maybe_assign_icl_verification(user_state)
+        if verification_assigned:
+            # Return early if we assigned a verification task
+            return verification_assigned
+
+        # Reclaim stale assignments before assigning new ones
+        if self.reclaim_enabled:
+            self._reclaim_stale_assignments()
+
+        # Decline to assign new items to users that have completed the maximum
+        if not user_state.has_remaining_assignments():
+            return 0
+
+        # Determine how many instances to assign
+        current_assignments = user_state.get_assigned_instance_count()
+        max_assignments = user_state.get_max_assignments()
+
+        if max_assignments > 0:
+            remaining_capacity = max_assignments - current_assignments
+            if remaining_capacity <= 0:
+                return 0
+            # For fixed_order strategy, assign all remaining capacity at once
+            # For other strategies, use the original incremental logic
+            if self.assignment_strategy in {AssignmentStrategy.FIXED_ORDER, AssignmentStrategy.BATCH}:
+                instances_to_assign = remaining_capacity
+            else:
+                # If user has less than 3 assignments, assign up to 3 more (or remaining capacity)
+                if current_assignments < 3:
+                    instances_to_assign = min(3, remaining_capacity)
+                else:
+                    # Otherwise, assign one at a time
+                    instances_to_assign = 1
+        else:
+            # Batch assignment should still hand out the whole eligible batch
+            # when per-user quota is unlimited.
+            if self.assignment_strategy == AssignmentStrategy.BATCH:
+                instances_to_assign = self._count_assignable_batch_items(user_state)
+            else:
+                # No maximum, assign one at a time
+                instances_to_assign = 1
+
+        # TODO: add strategy for assigning instances to users:
+        #
+        # 1) Random assignment (up to max per item/user)
+        # 2) Dynamic assignment based on user performance
+        # 3) Dynamic assignment based on item difficulty
+        # 4) Dynamic assignment based on item diversity
+        # 5) Dynamic assignment based on active learning model uncertainty
+        #
+        # NOTE: This method should probably be where we periodically
+        # check for item re-assignment where some items are assigned
+        # for a long time but never get annotated
+        #
+        # FOR NOW, just assign all instances to the user
+        if self.assignment_strategy == AssignmentStrategy.RANDOM:
+            # Random assignment strategy
+            unlabeled_items = []
+            for iid in self.remaining_instance_ids:
+                annotation_count = len(self.instance_annotators[iid])
+                cap = self._get_annotator_cap_for_item(iid)
+                self.logger.debug(f"[ASSIGNMENT] Considering {iid}: annotation_count={annotation_count}, cap={cap}")
+                # Always skip items that have reached max annotations, but do not remove here
+                if cap >= 0 and annotation_count >= cap:
+                    self.logger.debug(f"[ASSIGNMENT] Skipping {iid}: reached annotation cap")
+                    continue
+                if not user_state.has_annotated(iid):
+                    unlabeled_items.append(iid)
+                else:
+                    self.logger.debug(f"User {getattr(user_state, 'user_id', None)} already annotated {iid}, skipping.")
+            self.logger.debug(f"Unlabeled items for user: {unlabeled_items}")
+            if not unlabeled_items:
+                self.logger.info(f"No unlabeled items available for user {getattr(user_state, 'user_id', None)}")
+                return 0
+            to_assign = self.random.sample(unlabeled_items, min(instances_to_assign, len(unlabeled_items)))
+            self.logger.debug(f"Randomly assigning items {to_assign} to user {getattr(user_state, 'user_id', None)}")
+            for item_id in to_assign:
+                user_state.assign_instance(self.instance_id_to_instance[item_id])
+            return len(to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.LEAST_ANNOTATED:
+            # Least annotated strategy: prioritize items with fewest annotations
+            candidates = []
+            for iid in list(self.remaining_instance_ids):
+                annotation_count = len(self.instance_annotators[iid])
+                cap = self._get_annotator_cap_for_item(iid)
+                if cap >= 0 and annotation_count >= cap:
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if iid not in user_state.get_assigned_instance_ids():
+                    candidates.append((iid, annotation_count))
+            if not candidates:
+                return 0
+            # Sort by annotation count (fewest first), then by id for determinism
+            candidates.sort(key=lambda x: (x[1], x[0]))
+            assigned = 0
+            for item_id, _ in candidates[:instances_to_assign]:
+                user_state.assign_instance(self.instance_id_to_instance[item_id])
+                assigned += 1
+            return assigned
+        elif self.assignment_strategy == AssignmentStrategy.FIXED_ORDER:
+            # Fixed order assignment strategy
+            assigned = 0
+            for iid in list(self.remaining_instance_ids):
+                if self._item_is_saturated(iid):
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if iid not in user_state.get_assigned_instance_ids():
+                    user_state.assign_instance(self.instance_id_to_instance[iid])
+                    assigned += 1
+                    if assigned >= instances_to_assign:
+                        break
+            return assigned
+        elif self.assignment_strategy == AssignmentStrategy.MAX_DIVERSITY:
+            # Maximum diversity assignment strategy
+            unlabeled_items = []
+            for iid in list(self.remaining_instance_ids):
+                if self._item_is_saturated(iid):
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if not user_state.has_annotated(iid):
+                    unlabeled_items.append(iid)
+            if not unlabeled_items:
+                return 0
+            # Calculate disagreement scores for each item
+            item_disagreement_scores = {}
+            for iid in unlabeled_items:
+                disagreement_score = self._calculate_disagreement_score(iid)
+                item_disagreement_scores[iid] = disagreement_score
+            # Sort by disagreement score (highest first)
+            sorted_items = sorted(item_disagreement_scores.keys(), key=lambda x: item_disagreement_scores[x], reverse=True)
+            assigned = 0
+            for item_id in sorted_items[:instances_to_assign]:
+                user_state.assign_instance(self.instance_id_to_instance[item_id])
+                assigned += 1
+            return assigned
+        elif self.assignment_strategy == AssignmentStrategy.ACTIVE_LEARNING:
+            # Active learning: serve items in the current pool order. The
+            # ActiveLearningManager (when enabled) reorders remaining_instance_ids
+            # by query strategy (uncertainty/BADGE/BALD/hybrid) after each
+            # retrain, so taking items in-order surfaces the most informative
+            # unlabeled instances first. Before any retrain (cold start) this is
+            # simply the configured order.
+            unlabeled_items = []
+            for iid in list(self.remaining_instance_ids):
+                if self._item_is_saturated(iid):
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if not user_state.has_annotated(iid):
+                    unlabeled_items.append(iid)
+            if not unlabeled_items:
+                return 0
+            to_assign = unlabeled_items[:instances_to_assign]
+            self.logger.debug(f"Active learning: assigning items {to_assign} to user {getattr(user_state, 'user_id', None)}")
+            for item_id in to_assign:
+                user_state.assign_instance(self.instance_id_to_instance[item_id])
+            return len(to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.LLM_CONFIDENCE:
+            # LLM confidence assignment strategy (currently falls back to random)
+            unlabeled_items = []
+            for iid in list(self.remaining_instance_ids):
+                if self._item_is_saturated(iid):
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if not user_state.has_annotated(iid):
+                    unlabeled_items.append(iid)
+            if not unlabeled_items:
+                return 0
+            to_assign = self.random.sample(unlabeled_items, min(instances_to_assign, len(unlabeled_items)))
+            self.logger.debug(f"LLM confidence (random fallback): assigning items {to_assign} to user {getattr(user_state, 'user_id', None)}")
+            for item_id in to_assign:
+                user_state.assign_instance(self.instance_id_to_instance[item_id])
+            return len(to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.CATEGORY_BASED:
+            # Category-based assignment strategy
+            user_id = getattr(user_state, 'user_id', None)
+
+            # Check if dynamic expertise mode is enabled
+            if self.dynamic_expertise_enabled:
+                return self._assign_category_based_dynamic(user_state, instances_to_assign)
+
+            # Standard category-based assignment using qualification
+            # Assigns instances from categories the user has qualified for
+            qualified_categories = user_state.get_qualified_categories()
+
+            self.logger.debug(f"Category-based assignment for user {user_id}, qualified categories: {qualified_categories}")
+
+            # Get candidate instances from qualified categories
+            candidate_ids = set()
+            if qualified_categories:
+                for category in qualified_categories:
+                    candidate_ids.update(self.category_to_instance_ids.get(category, set()))
+
+            # If no candidates from categories, apply fallback behavior
+            if not candidate_ids:
+                self.logger.debug(f"No category matches for user {user_id}, using fallback: {self.category_fallback}")
+                if self.category_fallback == 'uncategorized':
+                    candidate_ids = self.uncategorized_instance_ids.copy()
+                elif self.category_fallback == 'random':
+                    candidate_ids = set(self.remaining_instance_ids)
+                # 'none' fallback means no assignment
+
+            # Filter candidates: not already annotated by user, not completed
+            unlabeled_items = []
+            for iid in candidate_ids:
+                # Skip if item is not in remaining (already completed)
+                if iid not in self.remaining_instance_ids:
+                    continue
+                # Skip if item has reached max annotations
+                if self._item_is_saturated(iid):
+                    continue
+                # Skip if user already annotated this item
+                if not user_state.has_annotated(iid):
+                    unlabeled_items.append(iid)
+
+            self.logger.debug(f"Category-based: {len(unlabeled_items)} unlabeled items available for user {user_id}")
+
+            if not unlabeled_items:
+                return 0
+
+            # Randomly sample from eligible items (can be combined with other sub-strategies in future)
+            to_assign = self.random.sample(unlabeled_items, min(instances_to_assign, len(unlabeled_items)))
+            self.logger.debug(f"Category-based: assigning items {to_assign} to user {user_id}")
+
+            for item_id in to_assign:
+                user_state.assign_instance(self.instance_id_to_instance[item_id])
+
+            return len(to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.DIVERSITY_CLUSTERING:
+            # Diversity clustering assignment strategy
+            from potato.diversity_manager import get_diversity_manager
+            dm = get_diversity_manager()
+
+            if dm and dm.enabled:
+                # Get user's annotated items for preservation
+                annotated_ids = set(user_state.get_annotated_instance_ids()) if hasattr(user_state, 'get_annotated_instance_ids') else set()
+
+                # Get available items (respecting per-item / global annotator caps)
+                available_ids = []
+                for iid in self.remaining_instance_ids:
+                    # Skip if item has reached annotation limit
+                    if self._item_is_saturated(iid):
+                        continue
+                    # Skip if user already annotated
+                    if user_state.has_annotated(iid):
+                        continue
+                    available_ids.append(iid)
+
+                if not available_ids:
+                    return 0
+
+                # Get user_id for diversity manager
+                user_id = getattr(user_state, 'user_id', 'anonymous')
+
+                # Generate diverse ordering with preserved positions
+                diverse_order = dm.apply_to_user_ordering(
+                    user_id, available_ids, annotated_ids
+                )
+
+                # Assign items from diverse order
+                assigned = 0
+                for item_id in diverse_order[:instances_to_assign]:
+                    user_state.assign_instance(self.instance_id_to_instance[item_id])
+                    assigned += 1
+
+                return assigned
+            else:
+                # Fallback to random if diversity manager unavailable
+                self.logger.debug("Diversity manager not available, falling back to random")
+                return self._assign_random_fallback(user_state, instances_to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.PSYCHOMETRIC:
+            # Psychometric adaptive routing: rank candidates by expected
+            # information gain for THIS annotator under the live IRT model.
+            from potato.psychometrics import get_psychometrics_manager
+            pm = get_psychometrics_manager()
+
+            if pm is not None:
+                # Get available items (respecting per-item / global annotator caps)
+                available_ids = []
+                for iid in self.remaining_instance_ids:
+                    if self._item_is_saturated(iid):
+                        continue
+                    if user_state.has_annotated(iid):
+                        continue
+                    available_ids.append(iid)
+
+                if not available_ids:
+                    return 0
+
+                user_id = getattr(user_state, 'user_id', 'anonymous')
+                ranked = pm.rank_items(user_id, available_ids)
+
+                if ranked is not None:
+                    assigned = 0
+                    for item_id in ranked[:instances_to_assign]:
+                        user_state.assign_instance(self.instance_id_to_instance[item_id])
+                        assigned += 1
+                    return assigned
+                # rank_items returned None: cold start — random assignment
+                # builds the annotator overlap the model needs to identify.
+
+            self.logger.debug(
+                "Psychometrics unavailable or in cold start, falling back to random")
+            return self._assign_random_fallback(user_state, instances_to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.BATCH:
+            return self._assign_batch(user_state, instances_to_assign)
+        elif self.assignment_strategy == AssignmentStrategy.PRIORITY:
+            # Signal-based triage: serve items by their stored triage priority
+            # (errors / thumbs-down / low score first). Mirrors MAX_DIVERSITY but
+            # sorts by the ingestion-time signal in item metadata instead of
+            # disagreement. Ties broken by the original queue order for
+            # determinism. `triage.order: asc` flips to lowest-priority-first.
+            candidates = []
+            for iid in list(self.remaining_instance_ids):
+                if self._item_is_saturated(iid):
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if iid in user_state.get_assigned_instance_ids():
+                    continue
+                if user_state.has_annotated(iid):
+                    continue
+                candidates.append(iid)
+            if not candidates:
+                return 0
+            order_index = {iid: i for i, iid in enumerate(self.instance_id_ordering)}
+
+            def _priority_of(iid):
+                p = self.instance_id_to_instance[iid].get_metadata("triage_priority")
+                return p if p is not None else 0
+
+            ascending = bool(self.triage_scorer) and self.triage_scorer.order == "asc"
+            # Sort by priority (desc by default), tie-break by original order asc.
+            candidates.sort(key=lambda iid: (
+                _priority_of(iid) if ascending else -_priority_of(iid),
+                order_index.get(iid, 0),
+            ))
+            assigned = 0
+            for iid in candidates[:instances_to_assign]:
+                user_state.assign_instance(self.instance_id_to_instance[iid])
+                assigned += 1
+            return assigned
+        else:
+            # Default fallback to fixed order
+            self.logger.warning(f"Unknown assignment strategy: {self.assignment_strategy}, falling back to fixed order")
+            assigned = 0
+            for iid in list(self.remaining_instance_ids):
+                if self._item_is_saturated(iid):
+                    if iid in self.remaining_instance_ids:
+                        self.remaining_instance_ids.remove(iid)
+                    continue
+                if iid not in user_state.get_assigned_instance_ids():
+                    user_state.assign_instance(self.instance_id_to_instance[iid])
+                    assigned += 1
+                    if assigned >= instances_to_assign:
+                        break
+            return assigned
+
+    def _assign_batch(self, user_state: 'UserState', instances_to_assign: int) -> int:
+        """
+        Assign only items explicitly batched with this annotator.
+
+        This strategy supports round-to-round cohort preservation: a round-2
+        item can either be listed in ``batch_assignment.groups`` for a cohort,
+        or carry an annotator list in item data using ``annotator_key``.
+        """
+        user_id = getattr(user_state, 'user_id', None)
+        if not user_id:
+            return 0
+
+        assigned = 0
+        already_assigned = user_state.get_assigned_instance_ids()
+
+        candidate_ids, rollback_group_index = self._batch_candidate_ids_for_user(
+            str(user_id), assign_auto=True
+        )
+        for item_id in candidate_ids:
+            if item_id not in self.instance_id_to_instance:
+                self.logger.warning(
+                    "Batch assignment references unknown item %s for user %s",
+                    item_id,
+                    user_id,
+                )
+                continue
+            if item_id not in self.remaining_instance_ids:
+                continue
+            if self._item_is_saturated(item_id):
+                if item_id in self.remaining_instance_ids:
+                    self.remaining_instance_ids.remove(item_id)
+                continue
+            if item_id in already_assigned:
+                continue
+            if user_state.has_annotated(item_id):
+                continue
+
+            user_state.assign_instance(self.instance_id_to_instance[item_id])
+            already_assigned.add(item_id)
+            assigned += 1
+            if assigned >= instances_to_assign:
+                break
+
+        # Don't consume an auto-batch slot for a user that received nothing this
+        # pass (e.g. the chosen group is fully saturated) — release the fresh pin
+        # so it stays reconstructable from real assignments after a restart.
+        if assigned == 0 and rollback_group_index is not None:
+            self._rollback_auto_batch_pin(str(user_id), rollback_group_index)
+
+        return assigned
+
+    def _assign_category_based_dynamic(self, user_state: 'UserState', instances_to_assign: int) -> int:
+        """
+        Dynamic category-based assignment using probabilistic routing.
+
+        In dynamic mode, users can receive instances from ALL categories, but are
+        more likely to get instances from categories they have demonstrated expertise
+        in (based on agreement with other annotators).
+
+        Args:
+            user_state: The user state to assign instances to
+            instances_to_assign: Number of instances to assign
+
+        Returns:
+            int: Number of instances actually assigned
+        """
+        from potato.expertise_manager import get_expertise_manager
+
+        user_id = getattr(user_state, 'user_id', None)
+        expertise_manager = get_expertise_manager()
+
+        if not expertise_manager:
+            # Fallback to random if expertise manager not available
+            self.logger.warning("ExpertiseManager not available, falling back to random assignment")
+            return self._assign_random_fallback(user_state, instances_to_assign)
+
+        assigned_count = 0
+
+        for _ in range(instances_to_assign):
+            # Find categories with available (unlabeled) instances for this user
+            available_categories = set()
+            category_to_eligible_items: Dict[str, List[str]] = {}
+
+            for category, instance_ids in self.category_to_instance_ids.items():
+                eligible_items = []
+                for iid in instance_ids:
+                    # Skip if item is not in remaining (already completed)
+                    if iid not in self.remaining_instance_ids:
+                        continue
+                    # Skip if item has reached max annotations
+                    if self._item_is_saturated(iid):
+                        continue
+                    # Skip if user already annotated this item
+                    if not user_state.has_annotated(iid):
+                        eligible_items.append(iid)
+
+                if eligible_items:
+                    available_categories.add(category)
+                    category_to_eligible_items[category] = eligible_items
+
+            # Also check uncategorized instances
+            uncategorized_eligible = []
+            for iid in self.uncategorized_instance_ids:
+                if iid not in self.remaining_instance_ids:
+                    continue
+                if self._item_is_saturated(iid):
+                    continue
+                if not user_state.has_annotated(iid):
+                    uncategorized_eligible.append(iid)
+
+            if not available_categories and not uncategorized_eligible:
+                # No more instances available
+                break
+
+            # Use ExpertiseManager to probabilistically select a category
+            if available_categories:
+                selected_category = expertise_manager.select_category_probabilistically(
+                    user_id,
+                    available_categories,
+                    random_instance=self.random
+                )
+            else:
+                selected_category = None
+
+            # Get an instance from the selected category (or uncategorized)
+            if selected_category and selected_category in category_to_eligible_items:
+                eligible_items = category_to_eligible_items[selected_category]
+                selected_item = self.random.choice(eligible_items)
+            elif uncategorized_eligible:
+                selected_item = self.random.choice(uncategorized_eligible)
+            else:
+                break
+
+            # Assign the selected instance
+            user_state.assign_instance(self.instance_id_to_instance[selected_item])
+            assigned_count += 1
+
+            self.logger.debug(
+                f"Dynamic category assignment: assigned {selected_item} "
+                f"(category={selected_category}) to user {user_id}"
+            )
+
+        return assigned_count
+
+    def _assign_random_fallback(self, user_state: 'UserState', instances_to_assign: int) -> int:
+        """Fallback to random assignment when expertise manager is not available."""
+        unlabeled_items = []
+        for iid in self.remaining_instance_ids:
+            if self._item_is_saturated(iid):
+                continue
+            if not user_state.has_annotated(iid):
+                unlabeled_items.append(iid)
+
+        if not unlabeled_items:
+            return 0
+
+        to_assign = self.random.sample(unlabeled_items, min(instances_to_assign, len(unlabeled_items)))
+        for item_id in to_assign:
+            user_state.assign_instance(self.instance_id_to_instance[item_id])
+
+        return len(to_assign)
+
+    def _calculate_disagreement_score(self, instance_id: str) -> float:
+        """
+        Calculate a disagreement score in [0, 1] for an instance.
+
+        Walks every user who has annotated this instance and, per schema,
+        computes the ratio of distinct labels (or distinct span-set
+        signatures) to the number of annotators. The result is the maximum
+        ratio across schemas — items with at least one disagreeing schema
+        get a high score.
+
+        Returns 0.0 when fewer than two annotators have rated the item or
+        when no UserStateManager is available (e.g., during tests that
+        exercise the item manager in isolation).
+        """
+        try:
+            from potato.user_state_management import get_user_state_manager
+            usm = get_user_state_manager()
+        except (ImportError, ValueError):
+            return 0.0
+        if usm is None:
+            return 0.0
+
+        annotators = list(self.instance_annotators.get(instance_id, ()))
+        if len(annotators) < 2:
+            return 0.0
+
+        # Aggregate per-schema labels + spans
+        schema_to_user_value: Dict[str, Dict[str, tuple]] = defaultdict(dict)
+        for uid in annotators:
+            ustate = usm.get_user_state(uid) if hasattr(usm, "get_user_state") else None
+            if ustate is None:
+                continue
+            for schema, labels in (ustate.get_label_annotations(instance_id) or {}).items():
+                # Represent as a tuple of label names so dict-style equality works.
+                value = tuple(sorted(
+                    str(getattr(l, "name", l.get("name") if isinstance(l, dict) else l))
+                    for l in labels
+                ))
+                schema_to_user_value[schema][uid] = value
+            for schema, spans in (ustate.get_span_annotations(instance_id) or {}).items():
+                value = tuple(sorted(
+                    (int(getattr(s, "start", s["start"] if isinstance(s, dict) else 0)),
+                     int(getattr(s, "end", s["end"] if isinstance(s, dict) else 0)),
+                     str(getattr(s, "name", s.get("name") if isinstance(s, dict) else "")))
+                    for s in spans
+                ))
+                schema_to_user_value[f"__span__{schema}"][uid] = value
+
+        if not schema_to_user_value:
+            return 0.0
+
+        scores = []
+        for values_by_user in schema_to_user_value.values():
+            if len(values_by_user) < 2:
+                continue
+            distinct = len(set(values_by_user.values()))
+            scores.append((distinct - 1) / max(1, len(values_by_user) - 1))
+        return max(scores) if scores else 0.0
+
+    def _reclaim_stale_assignments(self):
+        """
+        Reclaim instances from users who were assigned them but never annotated
+        within the configured timeout period. Reclaimed instances are returned
+        to the remaining_instance_ids pool.
+        """
+        import time
+        if not self.reclaim_enabled:
+            return
+
+        cutoff = time.time() - (self.reclaim_timeout_hours * 3600)
+        usm = None
+        reclaimed_count = 0
+
+        for iid in list(self.assignment_timestamps.keys()):
+            for username in list(self.assignment_timestamps[iid].keys()):
+                timestamp = self.assignment_timestamps[iid][username]
+                if timestamp > cutoff:
+                    continue  # Not stale yet
+
+                # Check if the user has actually annotated this instance
+                if usm is None:
+                    from potato.user_state_management import get_user_state_manager
+                    usm = get_user_state_manager()
+
+                user_state = usm.get_user_state(username)
+                if user_state and user_state.has_annotated(iid):
+                    # User annotated it — remove from tracking, not stale
+                    del self.assignment_timestamps[iid][username]
+                    continue
+
+                # Stale: reclaim the instance
+                self.logger.info(f"Reclaiming stale instance {iid} from user {username} "
+                                 f"(assigned {(time.time() - timestamp)/3600:.1f} hours ago)")
+
+                reclaimed = False
+                if user_state:
+                    reclaimed = self._reclaim_unannotated_assignment(
+                        user_state,
+                        iid,
+                        reason="stale_assignment",
+                    )
+                else:
+                    if iid not in self.completed_instance_ids and iid not in self.remaining_instance_ids:
+                        self.remaining_instance_ids.append(iid)
+                    self.instance_annotators[iid].discard(username)
+                    if iid in self.assignment_timestamps:
+                        self.assignment_timestamps[iid].pop(username, None)
+                    reclaimed = True
+
+                if reclaimed:
+                    reclaimed_count += 1
+
+            # Clean up empty entries
+            if iid in self.assignment_timestamps and not self.assignment_timestamps[iid]:
+                del self.assignment_timestamps[iid]
+
+        if reclaimed_count > 0:
+            self.logger.info(f"Reclaimed {reclaimed_count} stale instance assignments")
+
+    def _reclaim_unannotated_assignment(
+        self,
+        user_state: 'UserState',
+        instance_id: str,
+        reason: str = "assignment_reclaim",
+    ) -> bool:
+        """Reclaim one unannotated assignment from a user."""
+        user_id = getattr(user_state, 'user_id', None) or user_state.get_user_id()
+
+        if user_state.has_annotated(instance_id):
+            return False
+
+        unassigned = user_state.unassign_instance(instance_id)
+        if not unassigned:
+            return False
+
+        if instance_id not in self.completed_instance_ids and instance_id not in self.remaining_instance_ids:
+            self.remaining_instance_ids.append(instance_id)
+
+        self.instance_annotators[instance_id].discard(user_id)
+        if instance_id in self.assignment_timestamps:
+            self.assignment_timestamps[instance_id].pop(user_id, None)
+            if not self.assignment_timestamps[instance_id]:
+                del self.assignment_timestamps[instance_id]
+
+        self.logger.info(
+            "Reclaimed unannotated assignment %s from user %s (%s)",
+            instance_id,
+            user_id,
+            reason,
+        )
+        return True
+
+    def _clear_completed_assignment(
+        self,
+        user_state: 'UserState',
+        instance_id: str,
+        reason: str = "assignment_reclaim",
+    ) -> bool:
+        """Clear a completed annotation and release that assignment."""
+        user_id = getattr(user_state, 'user_id', None) or user_state.get_user_id()
+
+        if not user_state.has_annotated(instance_id):
+            return self._reclaim_unannotated_assignment(user_state, instance_id, reason)
+
+        user_state.clear_instance_annotations(instance_id)
+
+        unassigned = user_state.unassign_instance(instance_id)
+        if not unassigned:
+            return False
+
+        had_annotator_credit = user_id in self.instance_annotators[instance_id]
+        self.instance_annotators[instance_id].discard(user_id)
+        if had_annotator_credit and self.item_annotation_counts[instance_id] > 0:
+            self.item_annotation_counts[instance_id] -= 1
+
+        if instance_id in self.completed_instance_ids:
+            if not self._item_is_saturated(instance_id):
+                self.completed_instance_ids.discard(instance_id)
+
+        if instance_id not in self.completed_instance_ids and instance_id not in self.remaining_instance_ids:
+            self.remaining_instance_ids.append(instance_id)
+
+        if instance_id in self.assignment_timestamps:
+            self.assignment_timestamps[instance_id].pop(user_id, None)
+            if not self.assignment_timestamps[instance_id]:
+                del self.assignment_timestamps[instance_id]
+
+        self.logger.info(
+            "Cleared and reclaimed completed assignment %s from user %s (%s)",
+            instance_id,
+            user_id,
+            reason,
+        )
+        return True
+
+    def should_preserve_completed_annotations(self, reason: str = "assignment_reclaim") -> bool:
+        """Return whether completed annotations should survive a reclaim reason."""
+        default = self.reclaim_config.get('preserve_completed_annotations', True)
+
+        prolific_statuses = {
+            "prolific_returned": "RETURNED",
+            "prolific_timed_out": "TIMED-OUT",
+            "prolific_rejected": "REJECTED",
+        }
+        if reason in prolific_statuses:
+            prolific_config = self.reclaim_config.get("prolific", {})
+            if not isinstance(prolific_config, dict):
+                return default
+
+            prolific_default = prolific_config.get('preserve_completed_annotations', default)
+            status_policies = prolific_config.get("status_policies", {})
+            if not isinstance(status_policies, dict):
+                status_policies = {}
+            status_policy = status_policies.get(prolific_statuses[reason], {})
+            if isinstance(status_policy, dict):
+                return status_policy.get('preserve_completed_annotations', prolific_default)
+            return prolific_default
+
+        reason_to_section = {
+            "quality_control_block": ("quality_control",),
+            "stale_assignment": ("stale",),
+            "manual_admin_reclaim": ("manual",),
+            "prolific_dropped": ("prolific",),
+        }
+
+        path = reason_to_section.get(reason)
+        if not path:
+            return default
+
+        value = self.reclaim_config
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                return default
+            value = value[key]
+
+        if isinstance(value, dict):
+            return value.get('preserve_completed_annotations', default)
+        return default
+
+    def reclaim_unannotated_assignments_for_user(
+        self,
+        user_state: 'UserState',
+        reason: str = "assignment_reclaim",
+        preserve_completed_annotations: Optional[bool] = None,
+    ) -> List[str]:
+        """Reclaim assignments for a user according to the retention policy."""
+        if preserve_completed_annotations is None:
+            preserve_completed_annotations = self.should_preserve_completed_annotations(reason)
+
+        reclaimed = []
+        with self._lock:
+            for instance_id in list(user_state.get_assigned_instance_ids()):
+                if preserve_completed_annotations:
+                    did_reclaim = self._reclaim_unannotated_assignment(user_state, instance_id, reason)
+                else:
+                    did_reclaim = self._clear_completed_assignment(user_state, instance_id, reason)
+
+                if did_reclaim:
+                    reclaimed.append(instance_id)
+        return reclaimed
+
+    def reclaim_unannotated_assignments_for_users(
+        self,
+        user_ids: List[str],
+        reason: str = "assignment_reclaim",
+        preserve_completed_annotations: Optional[bool] = None,
+    ) -> Dict[str, List[str]]:
+        """Reclaim assignments for several users according to the retention policy."""
+        from potato.user_state_management import get_user_state_manager
+
+        usm = get_user_state_manager()
+        reclaimed_by_user = {}
+        for user_id in user_ids:
+            user_state = usm.get_user_state(user_id)
+            if not user_state:
+                continue
+
+            reclaimed = self.reclaim_unannotated_assignments_for_user(
+                user_state,
+                reason=reason,
+                preserve_completed_annotations=preserve_completed_annotations,
+            )
+            if not reclaimed:
+                continue
+
+            reclaimed_by_user[user_id] = reclaimed
+            try:
+                usm.save_user_state(user_state)
+            except Exception as e:
+                self.logger.warning(
+                    "Could not persist reclaimed assignments for user %s: %s",
+                    user_id,
+                    e,
+                )
+
+        return reclaimed_by_user
+
+    def _maybe_assign_icl_verification(self, user_state: 'UserState') -> int:
+        """
+        Maybe assign an ICL verification task to the user.
+
+        This implements "blind labeling" - the user receives an instance that was
+        already labeled by the LLM, but they don't know it's a verification task.
+        After they annotate it, we compare their label to the LLM's prediction.
+
+        Args:
+            user_state: The user state to potentially assign to
+
+        Returns:
+            int: Number of verification instances assigned (0 or 1)
+        """
+        # Check if ICL labeling is enabled
+        icl_config = self.config.get('icl_labeling', {})
+        if not icl_config.get('enabled', False):
+            return 0
+
+        # Check if verification is enabled with mixed assignments
+        verification_config = icl_config.get('verification', {})
+        if not verification_config.get('enabled', True):
+            return 0
+        if not verification_config.get('mix_with_regular_assignments', True):
+            return 0
+
+        # Probabilistic check - only assign verification ~20% of the time
+        # This ensures users still get regular tasks most of the time
+        verification_mix_rate = verification_config.get('assignment_mix_rate', 0.2)
+        if self.random.random() > verification_mix_rate:
+            return 0
+
+        try:
+            from potato.ai.icl_labeler import get_icl_labeler
+            icl_labeler = get_icl_labeler()
+            if icl_labeler is None:
+                return 0
+
+            # Get pending verifications that this user hasn't already annotated
+            pending = icl_labeler.get_pending_verifications(count=5)
+            user_id = getattr(user_state, 'user_id', None)
+
+            for instance_id, schema_name in pending:
+                # Skip if user already annotated this instance
+                if user_state.has_annotated(instance_id):
+                    continue
+
+                # Skip if instance is already assigned to user
+                if instance_id in user_state.get_assigned_instance_ids():
+                    continue
+
+                # Check if instance exists in our manager
+                if instance_id not in self.instance_id_to_instance:
+                    continue
+
+                # Assign the verification instance
+                item = self.instance_id_to_instance[instance_id]
+                user_state.assign_instance(item)
+
+                # Mark this as a verification task in the user's metadata
+                # This is stored privately so we can record verification after annotation
+                user_state.mark_instance_as_verification(instance_id, schema_name)
+
+                self.logger.info(
+                    f"Assigned ICL verification task {instance_id} to user {user_id}"
+                )
+                return 1
+
+        except ImportError:
+            # ICL labeler module not available
+            pass
+        except Exception as e:
+            self.logger.warning(f"Error assigning ICL verification: {e}")
+
+        return 0
+
+    def generate_id_order_mapping(self):
+        """Generate a mapping from instance IDs to their order"""
+        return {iid: idx for idx, iid in enumerate(self.instance_id_ordering)}
+
+    def get_next_instance_id(self, user_state: UserState) -> str:
+        """
+        Get the next instance ID for a user based on the assignment strategy.
+
+        Args:
+            user_state: The user state to get the next instance for
+
+        Returns:
+            str: The next instance ID, or None if no more instances available
+        """
+        # This method would implement the logic to determine which instance
+        # should be next for a given user based on the assignment strategy
+        # For now, it's a placeholder
+        return None
+
+    def get_instance_ids(self) -> list[str]:
+        """Get all instance IDs in the manager"""
+        return list(self.instance_id_to_instance.keys())
+
+    def get_item(self, instance_id: str) -> Item:
+        """Get an item by its ID"""
+        return self.instance_id_to_instance[instance_id]
+
+    def get_annotators_for_item(self, instance_id: str) -> set[str]:
+        """Get the set of annotators who have worked on this item"""
+        return self.instance_annotators[instance_id]
+
+    def get_total_assignable_items_for_user(self, user_state: UserState) -> int:
+        """
+        Get the total number of items that can be assigned to a user.
+
+        This takes into account:
+        - Items the user hasn't already annotated
+        - Items that haven't reached their annotation limit
+        - Items that are still available for assignment
+
+        Args:
+            user_state: The user state to check assignments for
+
+        Returns:
+            int: Number of items that can be assigned
+        """
+        count = 0
+        for iid in self.remaining_instance_ids:
+            # Check if item has reached annotation limit (per-item override or global)
+            if self._item_is_saturated(iid):
+                continue
+            # Check if user has already annotated this item
+            if user_state.has_annotated(iid):
+                continue
+            count += 1
+        return count
+
+    def items(self) -> list[Item]:
+        """Get all items in the manager"""
+        return list(self.instance_id_to_instance.values())
+
+    def register_annotator(self, instance_id: str, user_id: str):
+        """
+        Register that a user has annotated an instance.
+
+        This method updates the tracking of which users have worked on which
+        items, and may trigger cleanup of completed items.
+
+        Args:
+            instance_id: The ID of the instance that was annotated
+            user_id: The ID of the user who did the annotation
+
+        Side Effects:
+            - Updates instance_annotators tracking
+            - May remove items from remaining_instance_ids if they reach limits
+            - Updates item_annotation_counts
+        """
+        # Add user to the set of annotators for this item
+        self.instance_annotators[instance_id].add(user_id)
+
+        # Update annotation count
+        self.item_annotation_counts[instance_id] += 1
+
+        # Adaptive boost: when an item has begun gathering annotations under
+        # the default cap and shows real disagreement, raise its per-item cap
+        # so we keep gathering votes. The boost is one-shot per item.
+        if self.adaptive_boost.get('enabled') and self.adaptive_boost.get('boost_to', 0) >= 2:
+            current_count = len(self.instance_annotators[instance_id])
+            current_cap = self._get_annotator_cap_for_item(instance_id)
+            boost_to = self.adaptive_boost['boost_to']
+            if 2 <= current_count and current_cap >= 0 and current_cap < boost_to:
+                threshold = self.adaptive_boost.get('threshold', 0.5)
+                if self._calculate_disagreement_score(instance_id) >= threshold:
+                    item = self.instance_id_to_instance.get(instance_id)
+                    if item is not None:
+                        item.add_metadata('required_annotations', boost_to)
+                        self.logger.info(
+                            "Adaptive boost: %s raised to %d annotators (current=%d)",
+                            instance_id, boost_to, current_count,
+                        )
+                        if instance_id in self.completed_instance_ids:
+                            self.completed_instance_ids.discard(instance_id)
+                            if instance_id not in self.remaining_instance_ids:
+                                self.remaining_instance_ids.append(instance_id)
+
+        # Check if this item has reached its annotation limit
+        if self._item_is_saturated(instance_id):
+            # Remove from remaining instances if it's there
+            if instance_id in self.remaining_instance_ids:
+                self.remaining_instance_ids.remove(instance_id)
+            # Mark as completed
+            self.completed_instance_ids.add(instance_id)
+            # If this was an overlap-sample item (cap >= 2), check whether
+            # annotators disagreed enough to route the item to adjudication.
+            cap = self._get_annotator_cap_for_item(instance_id)
+            if cap >= 2:
+                try:
+                    from potato.adjudication import get_adjudication_manager
+                    adj_mgr = get_adjudication_manager()
+                    if adj_mgr is not None:
+                        adj_mgr.try_enqueue_item(instance_id)
+                except Exception as exc:
+                    self.logger.debug("Adjudication auto-route skipped: %s", exc)
+
+    def update_annotation_count(self, instance_id: str, delta=1):
+        """
+        Update the annotation count for an instance.
+
+        Args:
+            instance_id: The ID of the instance to update
+            delta: The change in annotation count (default: +1)
+        """
+        self.item_annotation_counts[instance_id] += delta
+
+    def reorder_instances(self, new_order: List[str]):
+        """
+        Reorder instances based on active learning predictions.
+
+        Args:
+            new_order: List of instance IDs in the new desired order
+
+        Note:
+            This method preserves instances that are not in the new_order list
+            by appending them to the end of the ordering.
+        """
+        # Create a set of instances in the new order for efficient lookup
+        new_order_set = set(new_order)
+
+        # Filter out instances that don't exist in our manager
+        valid_new_order = [instance_id for instance_id in new_order if instance_id in self.instance_id_to_instance]
+
+        # Find instances that are not in the new order
+        remaining_instances = [instance_id for instance_id in self.instance_id_ordering if instance_id not in new_order_set]
+
+        # Combine the new order with remaining instances
+        self.instance_id_ordering = valid_new_order + remaining_instances
+
+        # Update the remaining_instance_ids queue to match the new ordering
+        self.remaining_instance_ids.clear()
+        for instance_id in self.instance_id_ordering:
+            if instance_id not in self.completed_instance_ids:
+                self.remaining_instance_ids.append(instance_id)
+
+        self.logger.info(f"Reordered {len(valid_new_order)} instances, {len(remaining_instances)} instances preserved")
+
+    def clear(self):
+        """Clear all data from the manager (for testing)"""
+        self.instance_id_to_instance.clear()
+        self.instance_id_ordering.clear()
+        self.remaining_instance_ids.clear()
+        self.completed_instance_ids.clear()
+        self.instance_annotators.clear()
+        self.item_annotation_counts.clear()

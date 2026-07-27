@@ -1,0 +1,229 @@
+"""
+Radio Layout
+
+Generates a form interface with mutually exclusive radio button options.
+Features include:
+- Vertical or horizontal layout options
+- Keyboard shortcuts
+- Required/optional validation
+- Tooltip support
+- Free response option
+"""
+
+import logging
+from collections.abc import Mapping
+
+from potato.ai.ai_help_wrapper import get_ai_wrapper, get_dynamic_ai_help
+from potato.server_utils.config_module import config
+from .identifier_utils import (
+    safe_generate_layout,
+    generate_element_identifier,
+    generate_validation_attribute,
+    escape_html_content,
+    generate_layout_attributes,
+    display_label_text,
+)
+
+
+logger = logging.getLogger(__name__)
+
+def generate_radio_layout(annotation_scheme, horizontal=False):
+    """
+    Generate HTML for a radio button selection interface.
+
+    Args:
+        annotation_scheme (dict): Configuration including:
+            - name: Schema identifier
+            - description: Display description
+            - labels: List of label configurations, each either:
+                - str: Simple label text
+                - dict: Complex label with:
+                    - name: Label identifier
+                    - tooltip: Hover text description
+                    - tooltip_file: Path to tooltip text file
+                    - key_value: Keyboard shortcut key
+            - label_requirement (dict): Optional validation settings
+                - required (bool): Whether selection is mandatory
+            - horizontal (bool): Whether to arrange options horizontally
+            - has_free_response (dict): Optional free text input configuration
+                - instruction: Label for free response field
+
+        horizontal (bool): Override horizontal layout setting
+
+    Returns:
+        tuple: (html_string, key_bindings)
+            html_string: Complete HTML for the radio interface
+            key_bindings: List of (key, description) tuples for keyboard shortcuts
+    """
+    return safe_generate_layout(annotation_scheme, _generate_radio_layout_internal, horizontal)
+
+def _generate_radio_layout_internal(annotation_scheme, horizontal=False):
+    """
+    Internal function to generate radio layout after validation.
+    """
+    logger.debug(f"Generating radio layout for schema: {annotation_scheme['name']}")
+
+    # Check for horizontal layout override
+    if annotation_scheme.get("horizontal"):
+        horizontal = True
+        logger.debug("Using horizontal layout")
+
+    # Get layout attributes for grid positioning
+    layout_attrs = generate_layout_attributes(annotation_scheme)
+
+    # Initialize form wrapper
+    schema_name = annotation_scheme["name"]
+    schematic = f"""
+    <form id="{escape_html_content(schema_name)}" class="annotation-form radio shadcn-radio-container" action="javascript:void(0)" data-annotation-id="{escape_html_content(str(annotation_scheme.get("annotation_id", "")))}" data-annotation-type="radio" data-schema-name="{escape_html_content(schema_name)}" {layout_attrs}>
+        {get_ai_wrapper()}
+        <fieldset schema="{escape_html_content(schema_name)}">
+            <legend class="shadcn-radio-title">{escape_html_content(annotation_scheme['description'])}</legend>
+            <div class="shadcn-radio-options{' horizontal' if horizontal else ''}">
+    """
+
+    # Initialize keyboard shortcut mappings
+    key2label = {}
+    label2key = {}
+    key_bindings = []
+
+    # Check for pre-allocated keys from the centralized allocator
+    allocated_keys = annotation_scheme.get("_allocated_keys", None)
+    allocated_map = {}
+    if allocated_keys:
+        for entry in allocated_keys:
+            if entry.get("key"):
+                allocated_map[entry["label"]] = entry["key"]
+
+    # Generate radio inputs for each label
+    for i, label_data in enumerate(annotation_scheme["labels"], 1):
+        # Extract label information
+        label = label_data if isinstance(label_data, str) else label_data["name"]
+
+        # Generate consistent identifiers
+        identifiers = generate_element_identifier(schema_name, label, "radio")
+        label_value = label  # Use label name as value for annotation storage
+        validation = generate_validation_attribute(annotation_scheme, label)
+
+        # Debug logging
+        logger.debug(f"Schema: {schema_name}, Label: {label}, Validation: '{validation}'")
+        logger.debug(f"Label requirement: {annotation_scheme.get('label_requirement', 'NOT_FOUND')}")
+
+        # Handle tooltips and explicit per-label keyboard shortcuts
+        tooltip = ""
+        if isinstance(label_data, Mapping):
+            tooltip = _generate_tooltip(label_data)
+
+            # Handle explicit keyboard shortcuts
+            if "key_value" in label_data:
+                shortcut_key = str(label_data["key_value"])
+                if shortcut_key in key2label:
+                    logger.warning(f"Keyboard input conflict: {shortcut_key}")
+                    continue
+                key2label[shortcut_key] = label
+                label2key[label] = shortcut_key
+                key_bindings.append((shortcut_key, f"{identifiers['schema']}: {label}"))
+                logger.debug(f"Added key binding '{shortcut_key}' for label '{label}'")
+
+        # Use pre-allocated keys if available
+        if label in allocated_map and label not in label2key:
+            shortcut_key = allocated_map[label]
+            key2label[shortcut_key] = label
+            label2key[label] = shortcut_key
+            key_bindings.append((shortcut_key, f"{identifiers['schema']}: {label}"))
+            logger.debug(f"Added allocated key binding '{shortcut_key}' for label '{label}'")
+        elif not allocated_keys and label not in label2key:
+            # Fallback: sequential key bindings when no allocator was used
+            num_schemas = len(config.get("annotation_schemes", []))
+            num_labels = len(annotation_scheme["labels"])
+            auto_sequential = (num_schemas == 1 and num_labels <= 10)
+            explicit_sequential = annotation_scheme.get("sequential_key_binding", False)
+
+            if (auto_sequential or explicit_sequential) and num_labels <= 10:
+                shortcut_key = str(i % 10)
+                key2label[shortcut_key] = label
+                label2key[label] = shortcut_key
+                key_bindings.append((shortcut_key, f"{identifiers['schema']}: {label}"))
+                logger.debug(f"Added sequential key binding '{shortcut_key}' for label '{label}'")
+
+        # Visible text is humanized (or an explicit displayed_label);
+        # the stored value (label_value) remains the raw label name.
+        label_content = escape_html_content(
+            display_label_text(label_data, annotation_scheme)
+        )
+        data_key_attr = ""
+        key_badge = ""
+        if label in label2key:
+            key_badge = f' <span class="keybinding-badge">{label2key[label].upper()}</span>'
+            data_key_attr = f'data-key="{label2key[label]}"'
+
+        # Generate radio input
+        schematic += f"""
+            <div class="shadcn-radio-option">
+                <input class="{identifiers['schema']} shadcn-radio-input annotation-input"
+                       type="radio"
+                       id="{identifiers['id']}"
+                       name="{identifiers['name']}"
+                       value="{escape_html_content(label_value)}"
+                       selection_constraint="single"
+                       schema="{identifiers['schema']}"
+                       label_name="{identifiers['label_name']}"
+                       onclick="onlyOne(this);registerAnnotation(this);"
+                       validation="{validation}"
+                       {data_key_attr}>
+                <label for="{identifiers['id']}" class="shadcn-radio-label" {tooltip}>{label_content}{key_badge}</label>
+            </div>
+        """
+
+    schematic += "</div>"
+
+    # Add optional free response field
+    if annotation_scheme.get("has_free_response"):
+        logger.debug("Adding free response field")
+        free_response_identifiers = generate_element_identifier(schema_name, "free_response", "text")
+        free_response_config = annotation_scheme["has_free_response"]
+        instruction = free_response_config.get("instruction", "Other (please specify)") if isinstance(free_response_config, dict) else "Other (please specify)"
+
+        schematic += f"""
+            <div class="shadcn-radio-free-response">
+                <span class="shadcn-radio-label">{escape_html_content(instruction)}</span>
+                <input class="{free_response_identifiers['schema']} shadcn-radio-free-input annotation-input"
+                       type="text"
+                       id="{free_response_identifiers['id']}"
+                       name="{free_response_identifiers['name']}"
+                       schema="{free_response_identifiers['schema']}"
+                       label_name="{free_response_identifiers['label_name']}">
+                <label for="{free_response_identifiers['id']}"></label>
+            </div>
+        """
+
+    schematic += "</fieldset></form>"
+
+    logger.info(f"Successfully generated radio layout for {schema_name} "
+                f"with {len(annotation_scheme['labels'])} options")
+    return schematic, key_bindings
+
+def _generate_tooltip(label_data):
+    """
+    Generate tooltip HTML attribute from label data.
+
+    Args:
+        label_data (dict): Label configuration containing tooltip information
+
+    Returns:
+        str: Tooltip HTML attribute or empty string if no tooltip
+    """
+    tooltip_text = ""
+    if "tooltip" in label_data:
+        tooltip_text = label_data["tooltip"]
+    elif "tooltip_file" in label_data:
+        try:
+            with open(label_data["tooltip_file"], "rt", encoding="utf-8") as f:
+                tooltip_text = "".join(f.readlines())
+        except Exception as e:
+            logger.error(f"Failed to read tooltip file: {e}")
+            return ""
+
+    if tooltip_text:
+        escaped_tooltip = escape_html_content(tooltip_text)
+        return f'data-toggle="tooltip" data-html="true" data-placement="top" title="{escaped_tooltip}"'
+    return ""
