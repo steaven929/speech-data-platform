@@ -493,6 +493,82 @@
     }
 }
 
+/* ==================== ASR transcript split layout ==================== */
+
+/* The ASR correction workspace is intentionally wide: waveform editing stays
+   on the left while transcript segments remain visible on the right. */
+body > .container-fluid:has(#transcript_segments) {
+    max-width: none;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+}
+
+#transcript_segments,
+#transcript_segments > fieldset,
+#transcript_segments .audio-annotation-container {
+    width: 100%;
+    max-width: none;
+}
+
+#transcript_segments .audio-annotation-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(420px, 1fr);
+    grid-template-rows: auto auto 1fr;
+    column-gap: 1rem;
+    align-items: start;
+}
+
+#transcript_segments .waveform-wrapper,
+#transcript_segments .audio-annotation-toolbar,
+#transcript_segments .help-panel {
+    grid-column: 1;
+    min-width: 0;
+}
+
+#transcript_segments .waveform-wrapper {
+    grid-row: 1;
+}
+
+#transcript_segments .audio-annotation-toolbar {
+    grid-row: 2;
+}
+
+#transcript_segments .help-panel {
+    grid-row: 3;
+}
+
+#transcript_segments .segment-list-container {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+    min-width: 0;
+    margin-top: 0 !important;
+}
+
+#transcript_segments .segment-list {
+    max-height: calc(100vh - 190px);
+    overflow-y: auto;
+    padding-right: 0.25rem;
+}
+
+#transcript_segments .segment-questions-panel {
+    grid-column: 2;
+}
+
+@media (max-width: 1100px) {
+    #transcript_segments .audio-annotation-container {
+        display: block;
+    }
+
+    #transcript_segments .segment-list-container {
+        margin-top: 12px !important;
+    }
+
+    #transcript_segments .segment-list {
+        max-height: 300px;
+        padding-right: 0;
+    }
+}
+
 /* ==================== Spectrogram ==================== */
 
 .spectrogram-section {

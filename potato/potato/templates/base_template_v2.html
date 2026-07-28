@@ -39,7 +39,7 @@
 
     <!-- Audio Annotation Styles -->
     {% if frontend_assets.audio_annotation | default(false) %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='audio-annotation.css') }}?v=6">
+    <link rel="stylesheet" href="{{ url_for('static', filename='audio-annotation.css') }}?v=7">
     {% endif %}
 
     <!-- Video Annotation Styles -->
@@ -703,7 +703,7 @@
     {% endif %}
     <!-- Audio annotation manager -->
     {% if frontend_assets.audio_annotation | default(false) %}
-    <script src="{{ url_for('static', filename='audio-annotation.js') }}?v=6"></script>
+    <script src="{{ url_for('static', filename='audio-annotation.js') }}?v=7"></script>
     {% endif %}
     <!-- Video annotation manager -->
     {% if frontend_assets.video_annotation | default(false) %}

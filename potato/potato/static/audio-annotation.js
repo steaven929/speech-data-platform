@@ -1778,23 +1778,17 @@ class AudioAnnotationManager {
     }
 
     _localizeLabel(label) {
-    // 优先读取 config.yaml 中配置的中文显示名
-    const configuredLabel = (this.config.labels || [])
-        .find(item => item.name === label);
-
-    if (configuredLabel && configuredLabel.display_name) {
-        return configuredLabel.display_name;
+        const configuredLabel = (this.config.labels || []).find(item => item.name === label);
+        if (configuredLabel) {
+            return configuredLabel.display_name || configuredLabel.displayName || configuredLabel.name;
+        }
+        const labelMap = {
+            caller: '来电人',
+            agent: '座席',
+            unlabeled: '未标注'
+        };
+        return labelMap[label] || label;
     }
-
-    // 没有配置显示名时使用默认中文
-    const labelMap = {
-        caller: '来电人',
-        agent: '座席',
-        unlabeled: '未标注'
-    };
-
-    return labelMap[label] || label;
-}
 
     _escapeAttribute(text) {
         return String(text)
