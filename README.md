@@ -220,14 +220,6 @@ potato start examples/classification/single-choice/config.yaml -p 8080
 
 本地示例主要用于开发和验证。对局域网或公网提供服务时，还需要正确配置监听地址、防火墙、反向代理、HTTPS 和身份验证。不要在没有访问控制的情况下公开标注数据。
 
-## 文档
-
-- [快速入门](docs/quick-start.md)
-- [配置说明](docs/configuration/configuration.md)
-- [标注类型与模板](docs/annotation-types/schemas_and_templates.md)
-- [数据导出](docs/data-export/export_formats.md)
-- [部署说明](docs/deployment/)
-
 ## 许可证
 
 本项目采用 [GNU General Public License v3.0 or later](LICENSE) 许可证。使用、修改或分发本项目时，请遵守许可证条款。
