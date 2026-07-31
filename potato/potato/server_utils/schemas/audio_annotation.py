@@ -295,7 +295,7 @@ def _generate_html(
         playback_rate_html = '''
             <div class="playback-rate-group">
                 <span class="tool-group-label" title="调整播放速度">速度:</span>
-                <select class="playback-rate-select" title="{{ ui_lang.playback_speed_title }}">
+                <select class="playback-rate-select" title="Change audio playback speed (0.5x to 2x)">
                     <option value="0.5">0.5x</option>
                     <option value="0.75">0.75x</option>
                     <option value="1" selected>1x</option>

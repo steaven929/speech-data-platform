@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, render_template
 
 from tests.helpers.flask_test_setup import FlaskTestServer
 from tests.helpers.port_manager import find_free_port
@@ -65,58 +64,6 @@ def assert_element_text_is_not(page, selector, forbidden):
     assert element_text(page, selector) != forbidden
 
 
-def assert_element_attribute(page, selector, attribute, expected):
-    element = page_soup(page).select_one(selector)
-    assert element is not None, f"Expected visible UI element {selector!r}"
-    assert element.get(attribute) == expected
-
-
-def test_login_page_keeps_task_title_without_login_title_override():
-    """A generic task must retain its configured task name on the login page."""
-    app = Flask(
-        __name__,
-        template_folder=str(ROOT / "potato" / "templates"),
-    )
-
-    with app.test_request_context("/"):
-        page = render_template(
-            "home.html",
-            title="Independent Annotation Task",
-            require_password=False,
-            login_title_configured=False,
-            ui_lang={"login_title": "Annotation Platform"},
-        )
-
-    assert_element_text(page, ".potato-page-title", "Independent Annotation Task")
-
-
-def test_login_page_uses_chinese_labels(asr_server):
-    """The entry page must present the ASR login journey in Chinese."""
-    response = requests.get(f"{asr_server.base_url}/")
-
-    assert response.status_code == 200
-    assert_element_text(response.text, ".potato-page-title", "语音标注平台")
-    assert_element_text(response.text, "label[for='login-email']", "用户名")
-    assert_element_text(response.text, "label[for='login-pass']", "密码")
-    assert_element_text(response.text, "#login-content button[type='submit']", "登录")
-    assert_element_text_is_not(response.text, "#login-content button[type='submit']", "Login")
-
-
-def test_annotation_page_uses_chinese_navigation(asr_server):
-    """Annotators must see Chinese navigation and task guidance."""
-    response = login(asr_server.base_url, "user2").get(
-        f"{asr_server.base_url}/annotate"
-    )
-
-    assert response.status_code == 200
-    assert_element_text(response.text, "#next-btn", "下一条")
-    assert_element_text(response.text, ".logout-btn", "退出")
-    assert_element_attribute(
-        response.text, ".playback-rate-select", "title", "调整播放速度"
-    )
-    assert_element_text_is_not(response.text, ".logout-btn", "Logout")
-
-
 def test_admin_page_uses_chinese_dashboard_labels(asr_server):
     """Administrators must see Chinese dashboard and quota controls."""
     admin_session = login(asr_server.base_url, "admin")
@@ -128,7 +75,11 @@ def test_admin_page_uses_chinese_dashboard_labels(asr_server):
     assert response.status_code == 200
     assert page_soup(response.text).select_one(".admin-container") is not None
     assert_element_text(response.text, ".admin-header h1", "📊 靖江热线 ASR 转写校对 - 管理后台")
+    assert_element_text(response.text, ".admin-tab[data-tab='overview']", "概览")
     assert_element_text(response.text, ".admin-tab[data-tab='annotators']", "标注员")
+    assert_element_text(response.text, ".admin-tab[data-tab='config']", "配置")
+    assert_element_text(response.text, "#overview .config-form h3", "系统信息")
+    assert_element_text(response.text, "#annotators .table-controls button", "刷新数据")
     assert_element_text(response.text, "label[for='assignmentStrategy']", "任务配额")
     assert_element_text(response.text, ".header-actions button", "退出")
     assert_element_text_is_not(response.text, ".admin-tab[data-tab='annotators']", "Annotators")

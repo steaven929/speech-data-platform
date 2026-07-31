@@ -198,6 +198,7 @@ KNOWN_CONFIG_KEYS = {
     # the "_base" control key, which selects a bundled catalog to layer inline
     # overrides on top of. Adding a UI string in i18n.py auto-updates this.
     "ui_language": {"_base", *_UI_LANG_KEYS},
+    "admin_ui_language": None,
     "base_css": None,
     "ui_debug": None,
     "hide_navbar": None,

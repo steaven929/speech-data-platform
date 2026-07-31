@@ -5583,13 +5583,26 @@ def admin():
     Returns:
         flask.Response: Rendered admin dashboard template or login form
     """
+    from potato.server_utils.i18n import UI_LANG_DEFAULTS, resolve_ui_language
+
+    admin_language = config.get("admin_ui_language")
+    project_ui_language = config.get("ui_language")
+    admin_overrides = (
+        dict(project_ui_language)
+        if isinstance(project_ui_language, dict)
+        else {}
+    )
+    admin_overrides["_base"] = admin_language
+    admin_ui_lang = resolve_ui_language(admin_overrides, UI_LANG_DEFAULTS)
+
     # Check if admin API key is provided in session or headers
     api_key = request.headers.get('X-API-Key') or session.get('admin_api_key')
 
     if not validate_admin_api_key(api_key):
         # Show API key entry form
         return render_template("admin_login.html",
-                             title=config.get("annotation_task_name", "Admin Dashboard"))
+                             title=config.get("annotation_task_name", "Admin Dashboard"),
+                             ui_lang=admin_ui_lang)
 
     # Store API key in session for future requests
     session['admin_api_key'] = api_key
@@ -5613,6 +5626,7 @@ def admin():
         "automation_enabled": config.get("automation", {}).get("enabled", False),
         "curation_enabled": config.get("curation", {}).get("enabled", False),
         "arena_enabled": config.get("arena", {}).get("enabled", False),
+        "ui_lang": admin_ui_lang,
     }
 
     return render_template("admin.html", **context)
