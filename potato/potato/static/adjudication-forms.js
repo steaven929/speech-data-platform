@@ -49,7 +49,7 @@ window.AdjudicationForms = (function () {
      */
     function createChip(annotatorId, timing, showName, fastWarningMs) {
         var colorClass = getAnnotatorColor(annotatorId);
-        var name = showName ? annotatorId : 'Annotator';
+        var name = showName ? annotatorId : '标注员';
         var timeStr = formatTime(timing);
         var isWarning = fastWarningMs > 0 && timing > 0 && timing < fastWarningMs;
 
@@ -233,7 +233,7 @@ window.AdjudicationForms = (function () {
 
         html += '</div>';
         html += '<div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">';
-        html += '<label style="font-size: 0.85rem; font-weight: 500;">Your rating:</label>';
+        html += '<label style="font-size: 0.85rem; font-weight: 500;">你的评分：</label>';
         html += '<input type="range" class="adj-likert-input form-range" ' +
             'name="adj-likert-' + schemaName + '" ' +
             'min="' + minVal + '" max="' + maxVal + '" step="1" ' +
@@ -273,7 +273,7 @@ window.AdjudicationForms = (function () {
                 '<input type="checkbox" class="adj-text-select-cb" data-annotator="' + userId + '" data-schema="' + schemaName + '">' +
                 '</label>';
             html += '<span class="adj-annotator-name">' +
-                (config.show_annotator_names ? userId : 'Annotator') + '</span>';
+                (config.show_annotator_names ? userId : '标注员') + '</span>';
             if (timeStr) {
                 html += '<span class="adj-annotator-timing"><i class="fas fa-clock"></i> ' + timeStr + '</span>';
             }
@@ -285,13 +285,13 @@ window.AdjudicationForms = (function () {
         html += '</div>';
         html += '<div class="adj-text-merge-bar" data-schema="' + schemaName + '">';
         html += '<button type="button" class="adj-text-merge-btn" data-action="select" data-schema="' + schemaName + '">' +
-            '<i class="fas fa-check"></i> Use Selected</button>';
+            '<i class="fas fa-check"></i> 使用所选内容</button>';
         html += '<button type="button" class="adj-text-merge-btn" data-action="merge" data-schema="' + schemaName + '">' +
-            '<i class="fas fa-code-merge"></i> Merge Selected</button>';
+            '<i class="fas fa-code-merge"></i> 合并所选内容</button>';
         html += '</div>';
         html += '<div class="adj-text-decision-area">';
         html += '<textarea name="adj-text-' + schemaName + '" data-schema="' + schemaName + '" ' +
-            'placeholder="Enter your decision, select a response above, or use the merge button..."></textarea>';
+            'placeholder="输入审核结果，或选择、合并上方标注员结果……"></textarea>';
         html += '</div>';
 
         return html;
@@ -322,8 +322,8 @@ window.AdjudicationForms = (function () {
         var html = '<div class="adj-span-form" data-schema="' + schemaName + '">';
         html += '<div class="adj-span-instructions">' +
             '<i class="fas fa-info-circle"></i> ' +
-            'Annotator spans are shown as dashed highlights on the text above. ' +
-            'Click "Adopt" to accept a span, or select text to create your own.' +
+            '标注员片段会以虚线高亮显示在上方文本中。' +
+            '点击“采用”接受片段，也可以自行选择文本创建片段。' +
             '</div>';
 
         // List each annotator's spans
@@ -343,11 +343,11 @@ window.AdjudicationForms = (function () {
             html += '<div class="adj-span-annotator-group">';
             html += '<div class="adj-span-annotator-header">';
             html += '<span class="adj-annotator-chip ' + colorClass + '">' +
-                (config.show_annotator_names ? userId : 'Annotator') +
+                (config.show_annotator_names ? userId : '标注员') +
                 (timeStr ? ' <span class="adj-chip-timing">' + timeStr + '</span>' : '') +
                 '</span>';
             html += '<button type="button" class="adj-span-adopt-all-btn" data-annotator="' + userId +
-                '" data-schema="' + schemaName + '"><i class="fas fa-check-double"></i> Adopt All</button>';
+                '" data-schema="' + schemaName + '"><i class="fas fa-check-double"></i> 全部采用</button>';
             html += '</div>';
 
             schemaSpans.forEach(function(span, idx) {
@@ -360,7 +360,7 @@ window.AdjudicationForms = (function () {
                 html += '<button type="button" class="adj-span-adopt-btn" ' +
                     'data-annotator="' + userId + '" data-span-idx="' + idx +
                     '" data-schema="' + schemaName + '">' +
-                    '<i class="fas fa-check"></i> Adopt</button>';
+                    '<i class="fas fa-check"></i> 采用</button>';
                 html += '</div>';
             });
             html += '</div>';
@@ -368,9 +368,9 @@ window.AdjudicationForms = (function () {
 
         // Adopted spans list
         html += '<div class="adj-adopted-spans" data-schema="' + schemaName + '">';
-        html += '<div class="adj-adopted-header"><strong>Your Decision Spans:</strong></div>';
+        html += '<div class="adj-adopted-header"><strong>审核片段：</strong></div>';
         html += '<div class="adj-adopted-list" id="adj-adopted-list-' + schemaName + '">';
-        html += '<span class="text-muted" style="font-size:0.8rem;">No spans adopted yet</span>';
+        html += '<span class="text-muted" style="font-size:0.8rem;">尚未采用片段</span>';
         html += '</div>';
         html += '</div>';
         html += '</div>';
@@ -412,12 +412,12 @@ window.AdjudicationForms = (function () {
             html += '<div class="adj-complex-annotator-group">';
             html += '<div class="adj-complex-annotator-header">';
             html += '<span class="adj-annotator-chip ' + colorClass + '">' +
-                (config.show_annotator_names ? userId : 'Annotator') +
+                (config.show_annotator_names ? userId : '标注员') +
                 (timeStr ? ' <span class="adj-chip-timing">' + timeStr + '</span>' : '') +
                 '</span>';
             html += '<button type="button" class="adj-complex-adopt-all-btn" data-annotator="' + userId +
                 '" data-schema="' + schemaName + '" data-type="image">' +
-                '<i class="fas fa-check-double"></i> Adopt All</button>';
+                '<i class="fas fa-check-double"></i> 全部采用</button>';
             html += '</div>';
 
             boxes.forEach(function(box, idx) {
@@ -452,7 +452,7 @@ window.AdjudicationForms = (function () {
         var html = '<div class="adj-media-form" data-schema="' + schemaName + '" data-media-type="' + mediaType + '">';
         html += '<div class="adj-complex-instructions">' +
             '<i class="fas fa-info-circle"></i> ' +
-            'Each annotator\'s ' + mediaType + ' segments are listed below. Select segments to include in your decision.' +
+            '下方列出每位标注员的音视频片段，请选择需要纳入审核结果的片段。' +
             '</div>';
 
         Object.keys(annotations).forEach(function(userId) {
@@ -476,12 +476,12 @@ window.AdjudicationForms = (function () {
             html += '<div class="adj-complex-annotator-group">';
             html += '<div class="adj-complex-annotator-header">';
             html += '<span class="adj-annotator-chip ' + colorClass + '">' +
-                (config.show_annotator_names ? userId : 'Annotator') +
+                (config.show_annotator_names ? userId : '标注员') +
                 (timeStr ? ' <span class="adj-chip-timing">' + timeStr + '</span>' : '') +
                 '</span>';
             html += '<button type="button" class="adj-complex-adopt-all-btn" data-annotator="' + userId +
                 '" data-schema="' + schemaName + '" data-type="' + mediaType + '">' +
-                '<i class="fas fa-check-double"></i> Adopt All</button>';
+                '<i class="fas fa-check-double"></i> 全部采用</button>';
             html += '</div>';
 
             segments.forEach(function(seg, idx) {
@@ -737,7 +737,7 @@ window.AdjudicationForms = (function () {
 
                 var selected = container.querySelectorAll('.adj-text-select-cb:checked');
                 if (selected.length === 0) {
-                    alert('Please select at least one response.');
+                    alert('请至少选择一条标注结果。');
                     return;
                 }
 
@@ -874,7 +874,7 @@ window.AdjudicationForms = (function () {
 
         var spans = (window._adjAdoptedSpans && window._adjAdoptedSpans[schema]) || [];
         if (spans.length === 0) {
-            listEl.innerHTML = '<span class="text-muted" style="font-size:0.8rem;">No spans adopted yet</span>';
+            listEl.innerHTML = '<span class="text-muted" style="font-size:0.8rem;">尚未采用片段</span>';
             return;
         }
 
@@ -885,7 +885,7 @@ window.AdjudicationForms = (function () {
             html += '<span class="adj-span-label-badge" style="background:#dbeafe;color:#1d4ed8;">' +
                 escapeHtml(span.name || 'span') + '</span>';
             html += '<span class="adj-span-text">' + escapeHtml(span.title || ('chars ' + span.start + '-' + span.end)) + '</span>';
-            html += '<span class="text-muted" style="font-size:0.7rem;">from ' + escapeHtml(source) + '</span>';
+            html += '<span class="text-muted" style="font-size:0.7rem;">来自 ' + escapeHtml(source) + '</span>';
             html += '<button type="button" class="adj-span-remove-btn" onclick="AdjudicationForms.removeAdoptedSpan(\'' +
                 schema + '\', ' + idx + ')"><i class="fas fa-times"></i></button>';
             html += '</div>';

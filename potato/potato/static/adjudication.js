@@ -77,7 +77,7 @@
 
         if (queue.length === 0) {
             queueList.innerHTML = '<div class="text-center text-muted p-3" style="font-size: 0.85rem;">' +
-                'No items in queue</div>';
+                '队列中暂无录音</div>';
             return;
         }
 
@@ -93,7 +93,7 @@
             el.innerHTML = '<div class="adj-queue-item-id">' +
                 AdjudicationForms.escapeHtml(item.instance_id) + '</div>' +
                 '<div class="adj-queue-item-meta">' +
-                '<span>' + item.num_annotators + ' annotators</span>' +
+                '<span>' + item.num_annotators + ' 位标注员</span>' +
                 agBadge +
                 '</div>';
 
@@ -131,7 +131,7 @@
                 }
                 if (text) {
                     text.textContent = stats.completed + '/' + stats.total +
-                        ' completed (' + Math.round(stats.completion_rate * 100) + '%)';
+                        ' 已完成（' + Math.round(stats.completion_rate * 100) + '%）';
                 }
             });
     }
@@ -222,7 +222,7 @@
 
         // Item header
         var idEl = document.getElementById('adj-item-id');
-        if (idEl) idEl.textContent = 'Item: ' + item.instance_id;
+        if (idEl) idEl.textContent = '录音：' + item.instance_id;
 
         var agEl = document.getElementById('adj-item-agreement');
         if (agEl) {
@@ -230,7 +230,7 @@
         }
 
         var annEl = document.getElementById('adj-item-annotators');
-        if (annEl) annEl.textContent = item.num_annotators + ' annotators';
+        if (annEl) annEl.textContent = item.num_annotators + ' 位标注员';
 
         // Check if any schema is a span type
         var hasSpans = schemes.some(function(s) {
@@ -462,8 +462,8 @@
 
                     responseHtml += '<div class="adj-annotator-card" data-annotator="' + userId + '">';
                     responseHtml += '<div class="adj-annotator-name">' +
-                        (config.show_annotator_names ? AdjudicationForms.escapeHtml(userId) : 'Annotator') + '</div>';
-                    responseHtml += '<div class="adj-annotator-value">' + schemaSpans.length + ' span(s)</div>';
+                        (config.show_annotator_names ? AdjudicationForms.escapeHtml(userId) : '标注员') + '</div>';
+                    responseHtml += '<div class="adj-annotator-value">' + schemaSpans.length + ' 个片段</div>';
                     schemaSpans.forEach(function(span) {
                         responseHtml += '<div class="adj-span-summary">' +
                             '<span class="adj-span-label-badge" style="font-size:0.7rem;">' +
@@ -495,7 +495,7 @@
 
                     responseHtml += '<div class="adj-annotator-card" data-annotator="' + userId + '">';
                     responseHtml += '<div class="adj-annotator-name">' +
-                        (config.show_annotator_names ? AdjudicationForms.escapeHtml(userId) : 'Annotator') + '</div>';
+                        (config.show_annotator_names ? AdjudicationForms.escapeHtml(userId) : '标注员') + '</div>';
                     responseHtml += '<div class="adj-annotator-value">' + summary + '</div>';
                     if (config.show_timing_data && timing) {
                         responseHtml += '<div class="adj-annotator-timing">';
@@ -525,7 +525,7 @@
 
                     responseHtml += '<div class="adj-annotator-card" data-annotator="' + userId + '">';
                     responseHtml += '<div class="adj-annotator-name">' +
-                        (config.show_annotator_names ? AdjudicationForms.escapeHtml(userId) : 'Annotator') + '</div>';
+                        (config.show_annotator_names ? AdjudicationForms.escapeHtml(userId) : '标注员') + '</div>';
                     responseHtml += '<div class="adj-annotator-value">' + AdjudicationForms.escapeHtml(valueStr) + '</div>';
 
                     if (config.show_timing_data && timing) {
@@ -559,15 +559,15 @@
         try {
             var data = typeof val === 'string' ? JSON.parse(val) : val;
             if (schemaType === 'image_annotation') {
-                if (Array.isArray(data)) return data.length + ' annotation(s)';
-                return '1 annotation';
+                if (Array.isArray(data)) return data.length + ' 条标注';
+                return '1 条标注';
             }
             if (schemaType === 'audio_annotation' || schemaType === 'video_annotation') {
-                if (data.segments) return data.segments.length + ' segment(s)';
-                return 'annotated';
+                if (data.segments) return data.segments.length + ' 个片段';
+                return '已标注';
             }
         } catch(e) { /* ignore */ }
-        return 'annotated';
+        return '已标注';
     }
 
     /**
@@ -695,7 +695,7 @@
 
         var result = AdjudicationForms.collectDecisions();
         if (Object.keys(result.decisions).length === 0) {
-            alert('Please make at least one annotation decision before submitting.');
+            alert('请至少填写一项审核结果后再提交。');
             return;
         }
 
@@ -728,7 +728,7 @@
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (data.error) {
-                    alert('Error: ' + data.error);
+                    alert('错误：' + data.error);
                     return;
                 }
                 // Move to next item
@@ -738,7 +738,7 @@
             })
             .catch(function (err) {
                 console.error('Failed to submit decision:', err);
-                alert('Failed to submit decision. Please try again.');
+                alert('提交审核结果失败，请重试。');
             });
     }
 
@@ -777,8 +777,8 @@
                         if (emptyState) {
                             emptyState.style.display = 'flex';
                             emptyState.innerHTML = '<i class="fas fa-check-circle" style="color: #16a34a;"></i>' +
-                                '<h5>All Done!</h5>' +
-                                '<p>No more items to adjudicate.</p>';
+                                '<h5>全部完成</h5>' +
+                                '<p>没有更多待审核录音。</p>';
                         }
                         if (navBar) navBar.style.display = 'none';
                     }
@@ -870,9 +870,9 @@
         panel.style.display = 'block';
 
         var html = '<div class="adj-similar-header">' +
-            '<h5><i class="fas fa-link"></i> Similar Items</h5>' +
+            '<h5><i class="fas fa-link"></i> 相似录音</h5>' +
             '<span class="text-muted" style="font-size:0.8rem;">' +
-            similarItems.length + ' found</span></div>';
+            '找到 ' + similarItems.length + ' 条</span></div>';
 
         html += '<div class="adj-similar-items-list">';
 
@@ -884,7 +884,7 @@
 
             var metaHtml = '';
             if (si.decision === 'completed') {
-                metaHtml += '<span class="adj-badge adj-badge-success">Decided</span>';
+                metaHtml += '<span class="adj-badge adj-badge-success">已审核</span>';
             } else if (si.consensus_label) {
                 metaHtml += '<span class="adj-badge adj-badge-info">' +
                     AdjudicationForms.escapeHtml(si.consensus_label) + '</span>';

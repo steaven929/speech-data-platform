@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ annotation_task_name }} - Adjudication</title>
+    <title>{{ annotation_task_name }} - 审核</title>
 
     <!-- Bootstrap CSS (vendored at /static/vendor/bootstrap-5.3.3.min.css) -->
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap-5.3.3.min.css') }}">
@@ -23,16 +23,16 @@
     <nav class="potato-navbar" role="navigation" style="margin-bottom: 0;">
         <div class="navbar-inner">
             <div class="navbar-brand">
-                <span class="task-name">{{ annotation_task_name }} — Adjudication</span>
+                <span class="task-name">{{ annotation_task_name }} — 审核</span>
             </div>
             <div class="navbar-end" style="margin-left: auto;">
                 <a href="/annotate" class="adjudicate-btn">
-                    <i class="fas fa-edit" aria-hidden="true"></i> Annotate
+                    <i class="fas fa-edit" aria-hidden="true"></i> 标注
                 </a>
                 <div class="user-pill">
                     <i class="fas fa-gavel" aria-hidden="true" style="font-size: 0.7rem;"></i>
                     <span class="username">{{ username }}</span>
-                    <a href="/logout" class="logout-btn">Logout</a>
+                    <a href="/logout" class="logout-btn">退出</a>
                 </div>
             </div>
         </div>
@@ -42,16 +42,16 @@
         <!-- Sidebar: Queue -->
         <div class="adj-sidebar">
             <div class="adj-sidebar-header">
-                <h5><i class="fas fa-list-check" aria-hidden="true"></i> Queue</h5>
+                <h5><i class="fas fa-list-check" aria-hidden="true"></i> 审核队列</h5>
                 <div class="adj-progress-bar">
                     <div class="adj-progress-fill" id="adj-progress-fill" style="width: 0%"></div>
                 </div>
-                <div class="adj-progress-text" id="adj-progress-text">Loading...</div>
+                <div class="adj-progress-text" id="adj-progress-text">正在加载……</div>
             </div>
             <div class="adj-queue-filters">
-                <button class="adj-filter-btn active" data-filter="pending">Pending</button>
-                <button class="adj-filter-btn" data-filter="all">All</button>
-                <button class="adj-filter-btn" data-filter="completed">Done</button>
+                <button class="adj-filter-btn active" data-filter="pending">待审核</button>
+                <button class="adj-filter-btn" data-filter="all">审核中</button>
+                <button class="adj-filter-btn" data-filter="completed">已完成</button>
             </div>
             <div class="adj-queue-list" id="adj-queue-list">
                 <!-- Populated by JS -->
@@ -64,8 +64,8 @@
                 <!-- Empty state -->
                 <div class="adj-empty-state" id="adj-empty-state">
                     <i class="fas fa-gavel" aria-hidden="true"></i>
-                    <h5>Adjudication Mode</h5>
-                    <p>Select an item from the queue to begin adjudicating.</p>
+                    <h5>审核模式</h5>
+                    <p>请从审核队列中选择一条录音开始审核。</p>
                 </div>
 
                 <!-- Item view (hidden initially) -->
@@ -85,7 +85,7 @@
                     <!-- Annotator Responses -->
                     <div class="adj-responses-section">
                         <div class="adj-responses-header">
-                            <h5><i class="fas fa-users" aria-hidden="true"></i> Annotator Responses</h5>
+                            <h5><i class="fas fa-users" aria-hidden="true"></i> 标注员结果</h5>
                         </div>
                         <div id="adj-responses-container">
                             <!-- Populated by JS per schema -->
@@ -98,7 +98,7 @@
                     <!-- Decision Section -->
                     <div class="adj-decision-section">
                         <div class="adj-decision-header">
-                            <h5><i class="fas fa-check-circle" aria-hidden="true"></i> Your Decision</h5>
+                            <h5><i class="fas fa-check-circle" aria-hidden="true"></i> 审核结果</h5>
                         </div>
                         <div id="adj-decision-forms">
                             <!-- Populated by JS per schema -->
@@ -106,15 +106,15 @@
 
                         <!-- Metadata: Confidence, Error Taxonomy, Notes -->
                         <div class="adj-metadata-section">
-                            <h6>Decision Metadata</h6>
+                            <h6>审核信息</h6>
                             <div class="adj-metadata-row">
                                 {% if adj_config.require_confidence %}
                                 <div class="adj-metadata-field">
-                                    <label for="adj-confidence">Confidence</label>
+                                    <label for="adj-confidence">置信度</label>
                                     <select id="adj-confidence">
-                                        <option value="high">High</option>
-                                        <option value="medium" selected>Medium</option>
-                                        <option value="low">Low</option>
+                                        <option value="high">高</option>
+                                        <option value="medium" selected>中</option>
+                                        <option value="low">低</option>
                                     </select>
                                 </div>
                                 {% endif %}
@@ -122,7 +122,7 @@
 
                             <div class="adj-metadata-row">
                                 <div class="adj-metadata-field" style="flex: 2;">
-                                    <label>Error Type</label>
+                                    <label>错误类型</label>
                                     <div class="adj-error-taxonomy" id="adj-error-taxonomy">
                                         {% for tag in adj_config.error_taxonomy %}
                                         <label class="adj-error-tag" data-tag="{{ tag }}">
@@ -136,8 +136,8 @@
 
                             <div class="adj-metadata-row">
                                 <div class="adj-metadata-field" style="flex: 1;">
-                                    <label for="adj-notes">Notes</label>
-                                    <textarea id="adj-notes" placeholder="Optional notes about this decision..."></textarea>
+                                    <label for="adj-notes">备注</label>
+                                    <textarea id="adj-notes" placeholder="可选：填写本次审核的备注……"></textarea>
                                 </div>
                             </div>
 
@@ -145,12 +145,12 @@
                             <div class="adj-guideline-section">
                                 <label class="adj-guideline-check">
                                     <input type="checkbox" id="adj-guideline-flag">
-                                    Flag for guideline update
+                                    标记为需要更新标注规范
                                 </label>
                                 <div class="adj-guideline-notes" id="adj-guideline-notes">
                                     <div class="adj-metadata-field">
-                                        <label for="adj-guideline-text">What needs updating?</label>
-                                        <textarea id="adj-guideline-text" placeholder="Describe the guideline issue..."></textarea>
+                                        <label for="adj-guideline-text">需要更新什么？</label>
+                                        <textarea id="adj-guideline-text" placeholder="请描述标注规范存在的问题……"></textarea>
                                     </div>
                                 </div>
                             </div>
@@ -162,14 +162,14 @@
             <!-- Bottom Navigation -->
             <div class="adj-nav-bar" id="adj-nav-bar" style="display: none;">
                 <button class="btn btn-outline-secondary" id="adj-btn-prev">
-                    <i class="fas fa-arrow-left" aria-hidden="true"></i> Previous
+                    <i class="fas fa-arrow-left" aria-hidden="true"></i> 上一条
                 </button>
                 <div class="d-flex gap-2">
                     <button class="btn btn-outline-secondary" id="adj-btn-skip">
-                        Skip
+                        跳过
                     </button>
                     <button class="btn btn-primary" id="adj-btn-submit">
-                        Submit and continue <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                        提交并继续 <i class="fas fa-arrow-right" aria-hidden="true"></i>
                     </button>
                 </div>
             </div>
