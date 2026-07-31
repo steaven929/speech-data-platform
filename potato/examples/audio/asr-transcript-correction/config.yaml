@@ -1,6 +1,7 @@
 annotation_task_name: "靖江热线 ASR 转写校对"
 
 ui_language:
+  _base: "zh"
   html_lang: "zh-CN"
   html_dir: "ltr"
  
@@ -44,6 +45,9 @@ ui_language:
   create_password_placeholder: "请设置密码"
   sign_in_with: "使用以下方式登录"
   or_divider: "或"
+  admin_page_title: "管理后台"
+  admin_tab_annotators: "标注员"
+  admin_label_assignment_strategy: "任务配额"
 
 task_dir: .
 host: 127.0.0.1

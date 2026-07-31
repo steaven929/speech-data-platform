@@ -103,7 +103,7 @@
               onclick="refreshAnnotators()"
               class="shadcn-button shadcn-button-primary"
             >
-              Refresh Data
+              {{ ui_lang.admin_btn_refresh_data|default('Refresh Data') }}
             </button>
           </div>
 
@@ -165,7 +165,7 @@
               onclick="refreshInstances()"
               class="shadcn-button shadcn-button-primary"
             >
-              Refresh
+              {{ ui_lang.admin_btn_refresh|default('Refresh') }}
             </button>
           </div>
 
@@ -202,7 +202,7 @@
               onclick="refreshQuestions()"
               class="shadcn-button shadcn-button-primary"
             >
-              Refresh Data
+              {{ ui_lang.admin_btn_refresh_data|default('Refresh Data') }}
             </button>
           </div>
 
@@ -219,7 +219,7 @@
               onclick="loadDevices()"
               class="shadcn-button shadcn-button-primary"
             >
-              Refresh Data
+              {{ ui_lang.admin_btn_refresh_data|default('Refresh Data') }}
             </button>
           </div>
 
@@ -258,7 +258,7 @@
               onclick="refreshBehavioral()"
               class="shadcn-button shadcn-button-primary"
             >
-              Refresh Data
+              {{ ui_lang.admin_btn_refresh_data|default('Refresh Data') }}
             </button>
           </div>
 
@@ -316,7 +316,7 @@
               onclick="refreshCrowdsourcing()"
               class="shadcn-button shadcn-button-primary"
             >
-              Refresh Data
+              {{ ui_lang.admin_btn_refresh_data|default('Refresh Data') }}
             </button>
           </div>
 
@@ -519,7 +519,7 @@
                   min="-1"
                   value="-1"
                 />
-                <small>Use -1 for unlimited</small>
+                <small>{{ ui_lang.admin_hint_unlimited|default('Use -1 for unlimited') }}</small>
               </div>
 
               <div class="config-group">
@@ -679,67 +679,69 @@
         // Display overview cards
         overviewGrid.innerHTML = `
                 <div class="dashboard-card">
-                    <h3>Total Users</h3>
+                    <h3>${L.admin_card_total_users || "Total Users"}</h3>
                     <div class="value">${data.overview.total_users}</div>
-                    <div class="description">Registered annotators</div>
+                    <div class="description">${L.admin_card_total_users_desc || "Registered annotators"}</div>
                 </div>
                 <div class="dashboard-card">
-                    <h3>Active Users</h3>
+                    <h3>${L.admin_card_active_users || "Active Users"}</h3>
                     <div class="value">${data.overview.active_users}</div>
-                    <div class="description">Currently annotating</div>
+                    <div class="description">${L.admin_card_active_users_desc || "Currently annotating"}</div>
                 </div>
                 <div class="dashboard-card">
-                    <h3>Total Annotations</h3>
+                    <h3>${L.admin_card_total_annotations || "Total Annotations"}</h3>
                     <div class="value">${data.overview.total_annotations}</div>
-                    <div class="description">Completed annotations</div>
+                    <div class="description">${L.admin_card_total_annotations_desc || "Completed annotations"}</div>
                 </div>
                 <div class="dashboard-card">
-                    <h3>Completion</h3>
+                    <h3>${L.admin_card_completion || "Completion"}</h3>
                     <div class="value">${data.overview.completion_percentage}%</div>
-                    <div class="description">Items with annotations</div>
+                    <div class="description">${L.admin_card_completion_desc || "Items with annotations"}</div>
                 </div>
                 <div class="dashboard-card">
-                    <h3>Total Items</h3>
+                    <h3>${L.admin_card_total_items || "Total Items"}</h3>
                     <div class="value">${data.overview.total_items}</div>
-                    <div class="description">Items in dataset</div>
+                    <div class="description">${L.admin_card_total_items_desc || "Items in dataset"}</div>
                 </div>
                 <div class="dashboard-card">
-                    <h3>Working Time</h3>
+                    <h3>${L.admin_card_working_time || "Working Time"}</h3>
                     <div class="value">${data.overview.total_working_time}</div>
-                    <div class="description">Total time spent</div>
+                    <div class="description">${L.admin_card_working_time_desc || "Total time spent"}</div>
                 </div>
             `;
 
         // Display system info
         systemInfo.innerHTML = `
                 <div class="config-group">
-                    <label>Task Name</label>
+                    <label>${L.admin_label_task_name || "Task Name"}</label>
                     <input type="text" value="${
                       data.config.annotation_task_name
                     }" readonly>
                 </div>
                 <div class="config-group">
-                    <label>Max Annotations per User</label>
+                    <label>${L.admin_label_max_per_user || "Max Annotations per User"}</label>
                     <input type="text" value="${
                       data.config.max_annotations_per_user
                     }" readonly>
                 </div>
                 <div class="config-group">
-                    <label>Max Annotations per Item</label>
+                    <label>${L.admin_label_max_per_item || "Max Annotations per Item"}</label>
                     <input type="text" value="${
                       data.config.max_annotations_per_item
                     }" readonly>
                 </div>
                 <div class="config-group">
-                    <label>Assignment Strategy</label>
+                    <label>${L.admin_label_assignment_strategy || "Assignment Strategy"}</label>
                     <input type="text" value="${
                       data.config.assignment_strategy
                     }" readonly>
                 </div>
                 <div class="config-group">
-                    <label>Debug Mode</label>
+                    <label>${L.admin_label_debug_mode || "Debug Mode"}</label>
                     <input type="text" value="${
-                      data.config.debug_mode ? "Enabled" : "Disabled"
+                      data.config.debug_mode
+                        ? (L.admin_enabled || "Enabled")
+                        : (L.admin_disabled || "Disabled")
                     }" readonly>
                 </div>
             `;
@@ -813,8 +815,8 @@
               annotator.phase
             }</span></td>
                     <td>${annotator.total_annotations}</td>
-                    <td>${annotator.total_working_time || "N/A"}</td>
-                    <td>${annotator.average_time_per_annotation || "N/A"}</td>
+                    <td>${annotator.total_working_time || (L.admin_na || "N/A")}</td>
+                    <td>${annotator.average_time_per_annotation || (L.admin_na || "N/A")}</td>
                     <td>${annotator.annotations_per_hour}/hr</td>
                     <td>${annotator.completion_percentage.toFixed(1)}%</td>
                     <td>
@@ -827,7 +829,7 @@
                     <td>${
                       annotator.last_activity
                         ? new Date(annotator.last_activity).toLocaleString()
-                        : "N/A"
+                        : (L.admin_na || "N/A")
                     }</td>
                 </tr>
             `

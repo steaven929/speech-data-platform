@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ title }} - Admin Access</title>
+    <title>{{ title }} - {{ ui_lang.admin_login_title|default('Admin Access') }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <style>
         .admin-login-container {
@@ -119,11 +119,10 @@
         <div class="admin-login-card">
             <h1 class="admin-login-title"><span aria-hidden="true">🔐</span> {{ ui_lang.admin_login_title|default('Admin Access') }}</h1>
             <p class="admin-login-description">
-                This area requires administrator privileges. Enter your API key to access the admin dashboard.
+                {{ ui_lang.admin_login_description|default('This area requires administrator privileges. Enter your API key to access the admin dashboard.') }}
             </p>
             <p class="admin-login-description" style="font-size: 0.85em; opacity: 0.8;">
-                Your admin key is saved to <code>admin_api_key.txt</code> in the task
-                directory (it is also printed in the server log at startup).
+                {{ ui_lang.admin_login_storage_hint|default('Your admin key is saved to admin_api_key.txt in the task directory (it is also printed in the server log at startup).') }}
             </p>
 
             <form class="admin-login-form" id="adminLoginForm">
@@ -139,7 +138,7 @@
                     required
                 >
                 <p id="apiKeyHint" class="admin-login-hint">
-                    The key is stored in <code>admin_api_key.txt</code> in your task directory.
+                    {{ ui_lang.admin_login_help|default('The admin API key is stored in admin_api_key.txt in your task directory.') }}
                 </p>
                 <button type="submit" class="admin-login-button" id="adminLoginSubmit">
                     {{ ui_lang.admin_login_submit|default('Access Dashboard') }}
@@ -174,7 +173,7 @@
                 submitBtn.setAttribute('aria-busy', 'true');
                 submitBtn.disabled = true;
                 const originalLabel = submitBtn.textContent;
-                submitBtn.textContent = 'Verifying key…';
+                submitBtn.textContent = {{ ui_lang.admin_login_verifying|default('Verifying key…')|tojson }};
 
                 fetch('/admin', {
                     method: 'GET',
@@ -186,17 +185,20 @@
                         return;
                     }
                     if (response.status === 401 || response.status === 403) {
-                        showError("That API key wasn't recognized. Double-check the value in admin_api_key.txt.");
+                        showError({{ ui_lang.admin_login_invalid_key|default("That API key wasn't recognized. Double-check the value in admin_api_key.txt.")|tojson }});
                     } else if (response.status === 429) {
-                        showError("Too many sign-in attempts. Wait a moment and try again.");
+                        showError({{ ui_lang.admin_login_rate_limited|default('Too many sign-in attempts. Wait a moment and try again.')|tojson }});
                     } else if (response.status >= 500) {
-                        showError("Something went wrong on the server. Try again in a moment.");
+                        showError({{ ui_lang.admin_login_server_error|default('Something went wrong on the server. Try again in a moment.')|tojson }});
                     } else {
-                        showError("Sign-in failed (HTTP " + response.status + "). Try again.");
+                        showError(
+                            {{ ui_lang.admin_login_failed_http|default('Sign-in failed (HTTP {status}). Try again.')|tojson }}
+                                .replace('{status}', response.status)
+                        );
                     }
                 })
                 .catch(function () {
-                    showError("Couldn't reach the server. Check your connection and try again.");
+                    showError({{ ui_lang.admin_login_unreachable|default("Couldn't reach the server. Check your connection and try again.")|tojson }});
                 })
                 .finally(function () {
                     submitBtn.removeAttribute('aria-busy');
