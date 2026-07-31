@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import requests
 from bs4 import BeautifulSoup
+from flask import Flask, render_template
 
 from tests.helpers.flask_test_setup import FlaskTestServer
 from tests.helpers.port_manager import find_free_port
@@ -68,6 +69,25 @@ def assert_element_attribute(page, selector, attribute, expected):
     element = page_soup(page).select_one(selector)
     assert element is not None, f"Expected visible UI element {selector!r}"
     assert element.get(attribute) == expected
+
+
+def test_login_page_keeps_task_title_without_login_title_override():
+    """A generic task must retain its configured task name on the login page."""
+    app = Flask(
+        __name__,
+        template_folder=str(ROOT / "potato" / "templates"),
+    )
+
+    with app.test_request_context("/"):
+        page = render_template(
+            "home.html",
+            title="Independent Annotation Task",
+            require_password=False,
+            login_title_configured=False,
+            ui_lang={"login_title": "Annotation Platform"},
+        )
+
+    assert_element_text(page, ".potato-page-title", "Independent Annotation Task")
 
 
 def test_login_page_uses_chinese_labels(asr_server):
