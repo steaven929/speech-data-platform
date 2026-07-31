@@ -1,3 +1,7 @@
 # Keep call recordings and transcripts local.
 data/
 media/
+annotation_output/
+waveform_cache/
+project.sqlite
+admin_api_key.txt

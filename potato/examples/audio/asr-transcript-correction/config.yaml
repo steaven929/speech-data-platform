@@ -46,20 +46,51 @@ ui_language:
 
 task_dir: .
 host: 127.0.0.1
-require_password: false
+require_password: true
+authentication:
+  method: in_memory
+  user_config_path: users.jsonl
 data_files:
   - data/items.json
 media_directory: media
 output_annotation_dir: annotation_output
-output_annotation_format: json
+export_annotation_format: json
 
 item_properties:
   id_key: id
   text_key: audio_url
 
 user_config:
-  allow_all_users: true
-  users: []
+  allow_all_users: false
+  users:
+    - admin
+    - user2
+    - tester_a
+    - tester_b
+
+assignment_strategy: least_annotated
+num_annotators_per_item: 2
+
+rbac:
+  enabled: true
+  user_role_assignments:
+    admin: admin
+    user2: annotator
+    tester_a: annotator
+    tester_b: annotator
+
+adjudication:
+  enabled: true
+  adjudicator_users:
+    - admin
+  min_annotations: 2
+  agreement_threshold: 1.0
+  show_all_items: true
+  show_annotator_names: true
+  show_timing_data: true
+  show_agreement_scores: true
+  require_confidence: true
+  output_subdir: adjudication
 
 audio_annotation:
   waveform_cache_dir: waveform_cache
