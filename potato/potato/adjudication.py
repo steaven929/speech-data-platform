@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import threading
+from copy import deepcopy
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -663,6 +664,7 @@ class AdjudicationManager:
         """
         with self._lock:
             instance_id = str(decision.instance_id)
+            self._resolve_audio_adoptions(decision)
             self.decisions[instance_id] = decision
 
             # Update queue status
@@ -678,6 +680,59 @@ class AdjudicationManager:
                 f"by {decision.adjudicator_id}"
             )
             return True
+
+    def _resolve_audio_adoptions(
+        self, decision: AdjudicationDecision
+    ) -> None:
+        """Replace audio adoption references with exportable segment data."""
+        item = self.queue.get(str(decision.instance_id))
+        if item is None:
+            return
+
+        audio_schemes = {
+            scheme.get("name")
+            for scheme in self.config.get("annotation_schemes", [])
+            if scheme.get("annotation_type") == "audio_annotation"
+        }
+        for schema_name in audio_schemes:
+            schema_decision = decision.label_decisions.get(schema_name)
+            if not isinstance(schema_decision, dict):
+                continue
+
+            adopted = schema_decision.get("adopted_annotations")
+            if not isinstance(adopted, list):
+                continue
+
+            resolved_segments = []
+            for reference in adopted:
+                if not isinstance(reference, dict):
+                    continue
+                annotator = reference.get("annotator")
+                try:
+                    segment_index = int(reference.get("idx"))
+                except (TypeError, ValueError):
+                    continue
+
+                annotation = item.annotations.get(annotator, {}).get(schema_name)
+                if isinstance(annotation, str):
+                    try:
+                        annotation = json.loads(annotation)
+                    except json.JSONDecodeError:
+                        continue
+                if not isinstance(annotation, dict):
+                    continue
+
+                segments = annotation.get("segments", [])
+                if (
+                    isinstance(segments, list)
+                    and 0 <= segment_index < len(segments)
+                    and isinstance(segments[segment_index], dict)
+                ):
+                    resolved_segments.append(deepcopy(segments[segment_index]))
+
+            decision.label_decisions[schema_name] = {
+                "segments": resolved_segments
+            }
 
     def get_stats(self) -> Dict[str, Any]:
         """Get adjudication progress statistics."""
