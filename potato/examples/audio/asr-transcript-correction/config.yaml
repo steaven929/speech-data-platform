@@ -22,6 +22,7 @@ ui_language:
   text_to_annotate: "待标注文本："
   video_to_annotate: "待标注视频："
   audio_to_annotate: "待标注音频："
+  playback_speed_title: "调整播放速度"
   adjudicate: "仲裁"
   codebook: "标注手册"
   powered_by: "技术支持"

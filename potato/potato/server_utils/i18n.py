@@ -67,6 +67,7 @@ UI_LANG_DEFAULTS = {
     'text_to_annotate': 'Text to Annotate:',
     'video_to_annotate': 'Video to Annotate:',
     'audio_to_annotate': 'Audio to Annotate:',
+    'playback_speed_title': 'Change audio playback speed (0.5x to 2x)',
     # Login / registration page
     'login_title': 'Annotation Platform',
     'login_subtitle_password': 'Sign in to continue',
