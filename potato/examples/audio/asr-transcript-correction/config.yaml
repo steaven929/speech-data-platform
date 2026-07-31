@@ -70,6 +70,9 @@ user_config:
 
 assignment_strategy: least_annotated
 num_annotators_per_item: 2
+per_annotator_quota:
+  by_user:
+    admin: 0
 
 rbac:
   enabled: true

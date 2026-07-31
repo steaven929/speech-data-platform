@@ -24,6 +24,7 @@ def test_asr_admin_workflow_config_is_closed_and_reviewable():
     assert config["authentication"]["user_config_path"].endswith("users.jsonl")
     assert config["assignment_strategy"] == "least_annotated"
     assert config["num_annotators_per_item"] == 2
+    assert config["per_annotator_quota"]["by_user"]["admin"] == 0
     assert config["adjudication"]["enabled"] is True
     assert config["adjudication"]["show_all_items"] is True
     assert config["adjudication"]["min_annotations"] == 2

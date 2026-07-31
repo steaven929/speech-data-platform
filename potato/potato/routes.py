@@ -335,6 +335,7 @@ from potato.server_utils.admin_key import (
     get_admin_api_key as _get_admin_api_key,
     validate_admin_api_key as _validate_admin_api_key,
 )
+from potato.server_utils.rbac import Permission, require_permission
 
 def get_admin_api_key():
     """Get the admin API key. See potato.server_utils.admin_key for details."""
@@ -2818,6 +2819,7 @@ def admin_api_overview():
 
 
 @app.route("/admin/api/annotators", methods=["GET"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
 def admin_api_annotators():
     """
     Get detailed annotator data including timing information.
@@ -2908,6 +2910,7 @@ def admin_api_config():
 
 
 @app.route("/admin/api/user/<username>/set_instances", methods=["POST"])
+@require_permission(Permission.MANAGE_ASSIGNMENT)
 def admin_api_set_user_instances(username):
     """
     Set the maximum number of instances for a specific user.
