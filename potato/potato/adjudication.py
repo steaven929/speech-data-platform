@@ -465,6 +465,14 @@ class AdjudicationManager:
             if hasattr(key, 'get_schema'):
                 schema = key.get_schema()
                 name = key.get_name()
+                if name == "_data" and self._is_audio_schema(schema):
+                    try:
+                        result[schema] = (
+                            json.loads(value) if isinstance(value, str) else value
+                        )
+                    except json.JSONDecodeError:
+                        result[schema] = value
+                    continue
                 if schema not in result:
                     result[schema] = {}
                 result[schema][name] = value
@@ -473,6 +481,13 @@ class AdjudicationManager:
             else:
                 result[str(key)] = value
         return result
+
+    def _is_audio_schema(self, schema_name: str) -> bool:
+        return any(
+            scheme.get("name") == schema_name
+            and scheme.get("annotation_type") == "audio_annotation"
+            for scheme in self.config.get("annotation_schemes", [])
+        )
 
     def _serialize_spans(self, span_data: Dict) -> List[Dict]:
         """Convert span annotation data to serializable list."""

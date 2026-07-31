@@ -109,3 +109,38 @@ def test_audio_adoption_is_saved_as_complete_segments(tmp_path):
     assert persisted["decisions"][0]["label_decisions"]["transcript_segments"] == {
         "segments": user2_segments
     }
+
+
+def test_audio_data_label_is_unwrapped_for_the_review_page(tmp_path):
+    manager = make_manager(tmp_path)
+    segments = [
+        {
+            "id": "segment_1",
+            "start_time": 0.0,
+            "end_time": 1.2,
+            "label": "caller",
+            "text": "你好",
+        }
+    ]
+
+    serialized = manager._serialize_labels(
+        {
+            FakeLabel("transcript_segments", "_data"): json.dumps(
+                {"segments": segments}, ensure_ascii=False
+            )
+        }
+    )
+
+    assert serialized["transcript_segments"] == {"segments": segments}
+
+
+class FakeLabel:
+    def __init__(self, schema, name):
+        self.schema = schema
+        self.name = name
+
+    def get_schema(self):
+        return self.schema
+
+    def get_name(self):
+        return self.name
