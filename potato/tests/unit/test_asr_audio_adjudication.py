@@ -1,10 +1,15 @@
 import json
+import subprocess
+from pathlib import Path
 
 from potato.adjudication import (
     AdjudicationDecision,
     AdjudicationItem,
     AdjudicationManager,
 )
+
+
+ROOT = Path(__file__).parents[2]
 
 
 def make_manager(tmp_path):
@@ -144,3 +149,53 @@ class FakeLabel:
 
     def get_name(self):
         return self.name
+
+
+def test_audio_review_form_renders_segment_transcript_text():
+    forms_script = ROOT / "potato" / "static" / "adjudication-forms.js"
+    node_script = r"""
+const fs = require("fs");
+global.window = {};
+global.document = {
+  createElement: function () {
+    return {
+      innerHTML: "",
+      set textContent(value) {
+        this.innerHTML = String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+      }
+    };
+  }
+};
+eval(fs.readFileSync(process.argv[1], "utf8"));
+const html = window.AdjudicationForms.renderForm(
+  {name: "transcript_segments", annotation_type: "audio_annotation"},
+  {
+    user2: {
+      transcript_segments: {
+        segments: [{
+          label: "caller",
+          start_time: 1.2,
+          end_time: 2.8,
+          text: "需要显示的转写文本"
+        }]
+      }
+    }
+  },
+  {},
+  {show_annotator_names: true, fast_decision_warning_ms: 0},
+  {}
+);
+process.stdout.write(html);
+"""
+
+    result = subprocess.run(
+        ["node", "-e", node_script, str(forms_script)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "需要显示的转写文本" in result.stdout

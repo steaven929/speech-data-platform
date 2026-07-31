@@ -493,6 +493,9 @@ window.AdjudicationForms = (function () {
                     '" data-idx="' + idx + '" data-schema="' + schemaName + '" data-type="' + mediaType + '">';
                 html += ' <span class="adj-span-label-badge ' + colorClass + '">' + escapeHtml(label) + '</span>';
                 html += ' <span class="adj-complex-detail">' + startT + ' - ' + endT + '</span>';
+                if (seg.text) {
+                    html += ' <span class="adj-segment-transcript">' + escapeHtml(seg.text) + '</span>';
+                }
                 html += '</label></div>';
             });
 

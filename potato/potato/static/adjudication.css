@@ -944,6 +944,14 @@
 .adj-complex-detail {
     font-size: 0.75rem;
     color: #9ca3af;
+    white-space: nowrap;
+}
+
+.adj-segment-transcript {
+    flex: 1;
+    color: #374151;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .adj-complex-sub-section {
