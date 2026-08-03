@@ -38,7 +38,36 @@
         </div>
     </nav>
 
-    <div class="adjudication-container">
+    {% if adj_config.direct_edit_audio_annotations %}
+    <div class="direct-review-shell" id="direct-review-app">
+        <aside class="direct-review-sidebar">
+            <h5><i class="fas fa-list-check"></i> 审核队列</h5>
+            <div class="direct-review-filters">
+                <button data-status="pending" class="active">待审核</button>
+                <button data-status="in_progress">审核中</button>
+                <button data-status="completed">已完成</button>
+            </div>
+            <div id="direct-review-list">正在加载……</div>
+        </aside>
+        <main class="direct-review-main">
+            <div id="direct-review-empty">请选择一条标注结果开始审核。</div>
+            <div id="direct-review-editor" hidden>
+                <h4 id="direct-review-title"></h4>
+                <audio id="direct-review-audio" controls preload="metadata"></audio>
+                <div id="direct-review-status"></div>
+                <div id="direct-review-segments"></div>
+                <div class="direct-review-actions">
+                    <button id="direct-review-claim" class="btn btn-primary">分配给自己</button>
+                    <button id="direct-review-save" class="btn btn-primary">保存修改</button>
+                    <button id="direct-review-complete" class="btn btn-success">审核通过</button>
+                    <button id="direct-review-reopen" class="btn btn-outline-secondary">重新编辑</button>
+                </div>
+            </div>
+        </main>
+    </div>
+    {% endif %}
+
+    <div class="adjudication-container" {% if adj_config.direct_edit_audio_annotations %}style="display:none"{% endif %}>
         <!-- Sidebar: Queue -->
         <div class="adj-sidebar">
             <div class="adj-sidebar-header">
@@ -183,7 +212,12 @@
     </script>
 
     <!-- Adjudication JS -->
+    {% if adj_config.direct_edit_audio_annotations %}
+    <script>window.DIRECT_REVIEW_ADMIN = {{ username | tojson }};</script>
+    <script src="{{ url_for('static', filename='direct-audio-review.js') }}?v=2"></script>
+    {% else %}
     <script src="{{ url_for('static', filename='adjudication-forms.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='adjudication.js') }}?v=4"></script>
+    {% endif %}
 </body>
 </html>

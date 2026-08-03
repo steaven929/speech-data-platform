@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,43 @@ def test_admin_can_open_admin_and_set_annotator_quota(server):
     assert response.json()["max_instances"] == 2
 
 
+def test_admin_page_contains_annotation_data_controls(server):
+    admin = login(server.base_url, "admin")
+    response = admin.get(f"{server.base_url}/admin")
+    assert response.status_code == 200
+    for text in (
+        "标注数据",
+        "按标注员筛选",
+        "录音编号",
+        "片段文本",
+        "导出 JSON",
+        "导出 SQLite",
+    ):
+        assert text in response.text
+
+
+def test_admin_and_review_pages_do_not_ship_known_english_ui_labels(server):
+    admin = login(server.base_url, "admin")
+    dashboard = admin.get(f"{server.base_url}/admin")
+    review = admin.get(f"{server.base_url}/adjudicate")
+
+    for text in (
+        "Total Annotations",
+        "Items with Annotations",
+        "Unsupported annotation type",
+        "Users with Data",
+        "Total Interactions",
+        "Total Workers",
+        "No crowdsourcing workers detected",
+        "System Configuration",
+        "Configuration updated successfully",
+    ):
+        assert text not in dashboard.text
+
+    for text in ("审核队列", "待审核", "保存修改", "审核通过"):
+        assert text in review.text
+
+
 def test_annotator_cannot_set_quota(server):
     worker = login(server.base_url, "user2")
     assert (
@@ -103,3 +141,74 @@ def test_admin_has_zero_annotation_quota(server):
         if annotator["user_id"] == "admin"
     )
     assert admin_row["max_assignments"] == 0
+
+
+def test_admin_can_view_and_download_saved_audio_annotations(server, tmp_path):
+    worker = login(server.base_url, "user2")
+    worker.get(f"{server.base_url}/annotate")
+    saved_data = (
+        '{"segments":[{"id":"seg-1","start_time":1.5,"end_time":3.25,'
+        '"label":"agent","text":"管理员可见文本","annotations":{"dialect":true}}]}'
+    )
+    save_response = worker.post(
+        f"{server.base_url}/updateinstance",
+        json={
+            "instance_id": "20260720151516032",
+            "annotations": {
+                "transcript_segments:::_data": saved_data,
+            },
+            "span_annotations": {},
+        },
+    )
+    assert save_response.status_code == 200
+
+    admin = login(server.base_url, "admin")
+    list_response = admin.get(
+        f"{server.base_url}/admin/api/annotation-data",
+        params={"annotator": "user2", "recording_id": "20260720151516032"},
+    )
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert payload["summary"] == {
+        "recording_count": 1,
+        "annotation_count": 1,
+        "segment_count": 1,
+    }
+    assert payload["annotations"][0]["segments"][0]["text"] == "管理员可见文本"
+
+    json_response = admin.get(
+        f"{server.base_url}/admin/api/annotation-data/export/json"
+    )
+    assert json_response.status_code == 200
+    assert "attachment" in json_response.headers["Content-Disposition"]
+    assert json_response.json()["annotations"][0]["annotator"] == "user2"
+
+    sqlite_response = admin.get(
+        f"{server.base_url}/admin/api/annotation-data/export/sqlite"
+    )
+    assert sqlite_response.status_code == 200
+    database_path = tmp_path / "download.sqlite"
+    database_path.write_bytes(sqlite_response.content)
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT a.recording_id, a.annotator, s.text
+            FROM annotations a
+            JOIN segments s ON s.annotation_id = a.id
+            """
+        ).fetchone()
+    assert row == ("20260720151516032", "user2", "管理员可见文本")
+
+
+def test_annotator_cannot_view_or_export_annotation_data(server):
+    worker = login(server.base_url, "tester_a")
+    assert (
+        worker.get(f"{server.base_url}/admin/api/annotation-data").status_code
+        == 403
+    )
+    assert (
+        worker.get(
+            f"{server.base_url}/admin/api/annotation-data/export/json"
+        ).status_code
+        == 403
+    )

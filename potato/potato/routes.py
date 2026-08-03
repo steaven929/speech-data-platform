@@ -2803,6 +2803,97 @@ def admin_api_test_reset_state():
 
 # New Admin Dashboard API Endpoints
 
+@app.route("/admin/api/annotation-data", methods=["GET"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_api_annotation_data():
+    """Return persisted audio annotations for the admin dashboard."""
+    from potato.admin_annotation_data import collect_audio_annotation_records
+
+    records = collect_audio_annotation_records(get_user_state_manager())
+    records = _get_direct_audio_review_store().list_reviews(records)
+    available_annotators = sorted({
+        record["annotator"] for record in records
+    })
+    annotator = request.args.get("annotator", "").strip()
+    recording_id = request.args.get("recording_id", "").strip()
+    if annotator:
+        records = [
+            record for record in records
+            if record["annotator"] == annotator
+        ]
+    if recording_id:
+        records = [
+            record for record in records
+            if recording_id.lower() in record["recording_id"].lower()
+        ]
+    return jsonify({
+        "annotations": records,
+        "annotators": available_annotators,
+        "summary": {
+            "recording_count": len({
+                record["recording_id"] for record in records
+            }),
+            "annotation_count": len(records),
+            "segment_count": sum(
+                record["segment_count"] for record in records
+            ),
+        },
+    })
+
+
+@app.route("/admin/api/annotation-data/export/json", methods=["GET"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_export_annotation_data_json():
+    """Download all persisted audio annotations as UTF-8 JSON."""
+    from potato.admin_annotation_data import (
+        build_annotation_export_payload,
+        collect_audio_annotation_records,
+    )
+
+    records = collect_audio_annotation_records(get_user_state_manager())
+    records = _get_direct_audio_review_store().list_reviews(records)
+    payload = build_annotation_export_payload(records)
+    response = make_response(json.dumps(payload, ensure_ascii=False, indent=2))
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.headers["Content-Disposition"] = (
+        'attachment; filename="audio-annotations.json"'
+    )
+    return response
+
+
+@app.route("/admin/api/annotation-data/export/sqlite", methods=["GET"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_export_annotation_data_sqlite():
+    """Download all persisted audio annotations as a standalone SQLite DB."""
+    import tempfile
+    from flask import after_this_request, send_file
+    from potato.admin_annotation_data import (
+        collect_audio_annotation_records,
+        write_annotation_sqlite,
+    )
+
+    records = collect_audio_annotation_records(get_user_state_manager())
+    records = _get_direct_audio_review_store().list_reviews(records)
+    handle, path = tempfile.mkstemp(suffix=".sqlite")
+    os.close(handle)
+    write_annotation_sqlite(records, path)
+
+    @after_this_request
+    def remove_export_file(response):
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning("Could not remove temporary SQLite export: %s", path)
+        return response
+
+    return send_file(
+        path,
+        mimetype="application/vnd.sqlite3",
+        as_attachment=True,
+        download_name="audio-annotations.sqlite",
+    )
+
+
 @app.route("/admin/api/overview", methods=["GET"])
 def admin_api_overview():
     """
@@ -7663,6 +7754,9 @@ def configure_routes(flask_app, app_config):
     # New admin dashboard API routes
     app.add_url_rule("/admin/api/overview", "admin_api_overview", admin_api_overview, methods=["GET"])
     app.add_url_rule("/admin/api/annotators", "admin_api_annotators", admin_api_annotators, methods=["GET"])
+    app.add_url_rule("/admin/api/annotation-data", "admin_api_annotation_data", admin_api_annotation_data, methods=["GET"])
+    app.add_url_rule("/admin/api/annotation-data/export/json", "admin_export_annotation_data_json", admin_export_annotation_data_json, methods=["GET"])
+    app.add_url_rule("/admin/api/annotation-data/export/sqlite", "admin_export_annotation_data_sqlite", admin_export_annotation_data_sqlite, methods=["GET"])
     app.add_url_rule("/admin/api/instances", "admin_api_instances", admin_api_instances, methods=["GET"])
     app.add_url_rule("/admin/api/config", "admin_api_config", admin_api_config, methods=["GET", "POST"])
     app.add_url_rule("/admin/api/user/<username>/set_instances", "admin_api_set_user_instances", admin_api_set_user_instances, methods=["POST"])
@@ -7731,6 +7825,11 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/adjudicate/api/skip/<instance_id>", "adjudicate_api_skip", adjudicate_api_skip, methods=["POST"])
     app.add_url_rule("/adjudicate/api/next", "adjudicate_api_next", adjudicate_api_next, methods=["GET"])
     app.add_url_rule("/adjudicate/api/similar/<instance_id>", "adjudicate_api_similar", adjudicate_api_similar, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/audio-reviews", "direct_audio_review_queue", direct_audio_review_queue, methods=["GET"])
+    app.add_url_rule("/adjudicate/api/audio-reviews/claim", "direct_audio_review_claim", direct_audio_review_claim, methods=["POST"])
+    app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>", "direct_audio_review_update", direct_audio_review_update, methods=["PUT"])
+    app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>/complete", "direct_audio_review_complete", direct_audio_review_complete, methods=["POST"])
+    app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>/reopen", "direct_audio_review_reopen", direct_audio_review_reopen, methods=["POST"])
     app.add_url_rule("/admin/api/adjudication", "admin_api_adjudication", admin_api_adjudication, methods=["GET"])
 
     # BWS scoring admin API routes
@@ -7960,6 +8059,133 @@ def _is_authorized_adjudicator(username, adj_mgr):
     return get_rbac_manager().check(Permission.ADJUDICATE, request, session)
 
 
+def _get_direct_audio_review_store():
+    from potato.direct_audio_review import DirectAudioReviewStore
+    return DirectAudioReviewStore(config.get("output_annotation_dir", "annotation_output"))
+
+
+def _direct_review_state_response(state):
+    result = dict(state)
+    result["review_status"] = result.pop("status")
+    return result
+
+
+@app.route('/adjudicate/api/audio-reviews', methods=['GET'])
+def direct_audio_review_queue():
+    authorized, _, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+    from potato.admin_annotation_data import collect_audio_annotation_records
+    records = collect_audio_annotation_records(get_user_state_manager())
+    records = _get_direct_audio_review_store().list_reviews(records)
+    status = request.args.get("status")
+    if status and status != "all":
+        records = [row for row in records if row["review_status"] == status]
+    return jsonify({"items": records, "total": len(records)})
+
+
+@app.route('/adjudicate/api/audio-reviews/claim', methods=['POST'])
+def direct_audio_review_claim():
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+    from potato.direct_audio_review import ReviewConflict
+    data = request.get_json(silent=True) or {}
+    try:
+        state = _get_direct_audio_review_store().claim(
+            str(data.get("recording_id", "")), str(data.get("annotator", "")), username)
+    except ReviewConflict as exc:
+        return jsonify({"error": str(exc)}), 409
+    return jsonify(_direct_review_state_response(state))
+
+
+def _validated_audio_segments(data):
+    segments = data.get("segments") if isinstance(data, dict) else None
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("至少需要一个标注片段")
+    normalised = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            raise ValueError("片段格式错误")
+        start = float(segment.get("start_time"))
+        end = float(segment.get("end_time"))
+        if start < 0 or end <= start:
+            raise ValueError("片段结束时间必须大于开始时间，且开始时间不能小于零")
+        normalised.append({
+            "id": str(segment.get("id") or f"seg_{index + 1:04d}"),
+            "start_time": start,
+            "end_time": end,
+            "label": str(segment.get("label", "")),
+            "text": str(segment.get("text", "")),
+            "annotations": {
+                "dialect": bool((segment.get("annotations") or {}).get("dialect", False))
+            },
+        })
+    normalised.sort(key=lambda row: (row["start_time"], row["end_time"]))
+    return normalised
+
+
+@app.route('/adjudicate/api/audio-reviews/<recording_id>/<annotator>', methods=['PUT'])
+def direct_audio_review_update(recording_id, annotator):
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+    from potato.direct_audio_review import ReviewConflict
+    store = _get_direct_audio_review_store()
+    try:
+        review_state = store.require_editable(recording_id, annotator, username)
+        segments = _validated_audio_segments(request.get_json(silent=True) or {})
+    except ReviewConflict as exc:
+        return jsonify({"error": str(exc)}), 409
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    user_state = get_user_state_manager().get_user_state(annotator)
+    if not user_state:
+        return jsonify({"error": "标注员不存在"}), 404
+    labels = user_state.instance_id_to_label_to_value.get(str(recording_id), {})
+    target_label = next((label for label in labels
+                         if getattr(label, "get_schema", lambda: None)() == "transcript_segments"
+                         and getattr(label, "get_name", lambda: None)() == "_data"), None)
+    if target_label is None:
+        return jsonify({"error": "没有找到对应的音频标注"}), 404
+    old_value = labels[target_label]
+    store.record_snapshot(recording_id, annotator, username, old_value)
+    new_value = json.dumps({"segments": segments}, ensure_ascii=False, separators=(",", ":"))
+    user_state.add_label_annotation(str(recording_id), target_label, new_value)
+    get_user_state_manager().save_user_state(user_state)
+    _write_readable_audio_annotation(
+        annotator, str(recording_id), {"transcript_segments:::_data": new_value})
+    return jsonify({"recording_id": recording_id, "annotator": annotator,
+                    "segments": segments, "review_status": review_state["status"]})
+
+
+@app.route('/adjudicate/api/audio-reviews/<recording_id>/<annotator>/complete', methods=['POST'])
+def direct_audio_review_complete(recording_id, annotator):
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+    from potato.direct_audio_review import ReviewConflict
+    try:
+        state = _get_direct_audio_review_store().complete(recording_id, annotator, username)
+    except ReviewConflict as exc:
+        return jsonify({"error": str(exc)}), 409
+    return jsonify(_direct_review_state_response(state))
+
+
+@app.route('/adjudicate/api/audio-reviews/<recording_id>/<annotator>/reopen', methods=['POST'])
+def direct_audio_review_reopen(recording_id, annotator):
+    authorized, username, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+    from potato.direct_audio_review import ReviewConflict
+    try:
+        state = _get_direct_audio_review_store().reopen(recording_id, annotator, username)
+    except ReviewConflict as exc:
+        return jsonify({"error": str(exc)}), 409
+    return jsonify(_direct_review_state_response(state))
+
+
 @app.route('/adjudicate', methods=['GET'])
 def adjudicate():
     """Main adjudication page."""
@@ -7994,6 +8220,9 @@ def adjudicate():
             'require_notes_on_override': adj_mgr.adj_config.require_notes_on_override,
             'error_taxonomy': adj_mgr.adj_config.error_taxonomy,
             'similarity_enabled': adj_mgr.adj_config.similarity_enabled,
+            'direct_edit_audio_annotations': bool(
+                (config.get('adjudication') or {}).get('direct_edit_audio_annotations', False)
+            ),
         },
     )
 

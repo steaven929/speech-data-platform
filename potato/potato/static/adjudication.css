@@ -1122,3 +1122,18 @@
     background: #eff6ff;
     color: #3b82f6;
 }
+.direct-review-shell { display:grid; grid-template-columns:320px minmax(0,1fr); min-height:calc(100vh - 58px); }
+.direct-review-sidebar { border-right:1px solid #ddd; padding:18px; background:#fafafa; overflow:auto; }
+.direct-review-filters { display:flex; gap:6px; margin:14px 0; }
+.direct-review-filters button { border:1px solid #ccc; background:white; border-radius:6px; padding:6px 10px; }
+.direct-review-filters button.active { background:#0d6efd; color:white; border-color:#0d6efd; }
+.direct-review-item { display:flex; width:100%; flex-direction:column; text-align:left; gap:3px; padding:12px; margin-bottom:8px; border:1px solid #ddd; border-radius:8px; background:white; }
+.direct-review-item span { color:#666; font-size:13px; }
+.direct-review-main { padding:24px; overflow:auto; }
+.direct-review-main audio { width:100%; margin:14px 0; }
+.direct-review-table { width:100%; border-collapse:collapse; margin:16px 0; }
+.direct-review-table th,.direct-review-table td { border:1px solid #ddd; padding:8px; vertical-align:top; }
+.direct-review-table input[type=number] { width:100px; }
+.direct-review-table textarea { width:100%; min-height:64px; }
+.direct-review-actions { display:flex; gap:10px; justify-content:flex-end; position:sticky; bottom:0; padding:14px 0; background:white; }
+@media (max-width:800px) { .direct-review-shell { grid-template-columns:1fr; } .direct-review-sidebar { border-right:0; border-bottom:1px solid #ddd; } }
