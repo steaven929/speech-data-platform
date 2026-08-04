@@ -53,3 +53,4 @@ mammoth>=1.6.0          # DOCX to HTML conversion
 mistune>=3.0.0          # Markdown parsing
 pygments>=2.17.0        # Syntax highlighting for code and Markdown
 openpyxl>=3.1.0         # Excel file support
+xlrd>=2.0.1             # Legacy .xls support for admin audio import

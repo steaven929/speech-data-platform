@@ -35,6 +35,11 @@ from datetime import timedelta
 from flask import Flask, session, render_template, request, redirect, url_for, jsonify, make_response
 import time
 import uuid
+from pathlib import Path
+import shutil
+import tempfile
+import threading
+from werkzeug.utils import secure_filename
 
 # Import from the main flask_server.py module
 from potato.flask_server import (
@@ -2894,6 +2899,154 @@ def admin_export_annotation_data_sqlite():
     )
 
 
+_audio_import_batches = {}
+_audio_import_batches_lock = threading.RLock()
+_AUDIO_IMPORT_MAX_FILES = 200
+_AUDIO_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_AUDIO_IMPORT_TOKEN_TTL_SECONDS = 30 * 60
+
+
+def _audio_import_task_path(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return Path(config.get("task_dir", ".")) / path
+
+
+def _audio_import_data_file():
+    entries = config.get("data_files") or []
+    if not entries:
+        raise ValueError("当前项目未配置 data_files")
+    first = entries[0]
+    if isinstance(first, dict):
+        first = first.get("path")
+    if not first or Path(str(first)).suffix.lower() != ".json":
+        raise ValueError("批量导入需要首个 data_files 为 JSON 文件")
+    return _audio_import_task_path(first)
+
+
+def _cleanup_expired_audio_imports():
+    cutoff = time.time() - _AUDIO_IMPORT_TOKEN_TTL_SECONDS
+    expired = []
+    with _audio_import_batches_lock:
+        for token, batch in list(_audio_import_batches.items()):
+            if batch["created_at"] < cutoff:
+                expired.append(_audio_import_batches.pop(token))
+    for batch in expired:
+        shutil.rmtree(batch["temp_dir"], ignore_errors=True)
+
+
+def _fill_and_persist_coverage_assignments():
+    """Fill all configured user capacity and persist users that changed."""
+    user_manager = get_user_state_manager()
+    users = user_manager.get_all_users()
+    report = get_item_state_manager().fill_assignments_to_coverage(users)
+    changed = set(report.get("assignments_by_user", {}))
+    if changed and hasattr(user_manager, "save_user_state"):
+        for user_state in users:
+            user_id = str(getattr(user_state, "user_id", user_state.get_user_id()))
+            if user_id in changed:
+                user_manager.save_user_state(user_state)
+    return report
+
+
+@app.route("/admin/api/audio-import/preview", methods=["POST"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_audio_import_preview():
+    """Stage and validate one legacy XLS plus matching WAV uploads."""
+    from potato import admin_audio_import
+
+    _cleanup_expired_audio_imports()
+    excel = request.files.get("excel")
+    audio_files = request.files.getlist("audio")
+    if excel is None or not excel.filename:
+        return jsonify({"error": "请选择原始 .xls 文件"}), 400
+    if Path(excel.filename).suffix.lower() != ".xls":
+        return jsonify({"error": "Excel 必须是原始 .xls 格式"}), 400
+    if not audio_files:
+        return jsonify({"error": "请至少选择一条 WAV 音频"}), 400
+    if len(audio_files) > _AUDIO_IMPORT_MAX_FILES:
+        return jsonify({"error": f"一次最多导入 {_AUDIO_IMPORT_MAX_FILES} 条音频"}), 400
+    if request.content_length and request.content_length > _AUDIO_IMPORT_MAX_BYTES:
+        return jsonify({"error": "上传文件总体积超过 2 GB"}), 413
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="potato-audio-import-"))
+    try:
+        excel_path = temp_dir / "transcript.xls"
+        excel.save(excel_path)
+        saved_audio = []
+        seen_names = set()
+        for uploaded in audio_files:
+            filename = secure_filename(uploaded.filename or "")
+            if not filename or Path(filename).suffix.lower() != ".wav":
+                raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
+            if filename in seen_names:
+                raise ValueError(f"上传列表中存在重名音频：{filename}")
+            seen_names.add(filename)
+            destination = temp_dir / filename
+            uploaded.save(destination)
+            saved_audio.append(destination)
+
+        rows = admin_audio_import.parse_legacy_xls(excel_path)
+        item_manager = get_item_state_manager()
+        preview = admin_audio_import.preview_rows(
+            rows,
+            saved_audio,
+            set(item_manager.get_instance_ids()),
+            _audio_import_task_path(config.get("media_directory", "media")),
+        )
+        token = uuid.uuid4().hex
+        with _audio_import_batches_lock:
+            _audio_import_batches[token] = {
+                "created_at": time.time(),
+                "temp_dir": temp_dir,
+                "preview": preview,
+            }
+        return jsonify({"token": token, "preview": preview.to_dict()})
+    except (ValueError, RuntimeError) as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logger.exception("Failed to preview admin audio import")
+        return jsonify({"error": "解析导入文件失败，请检查文件格式"}), 500
+
+
+@app.route("/admin/api/audio-import/confirm", methods=["POST"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_audio_import_confirm():
+    """Commit a previously validated batch exactly once."""
+    from potato.admin_audio_import import commit_preview
+
+    token = str((request.get_json(silent=True) or {}).get("token", "")).strip()
+    with _audio_import_batches_lock:
+        batch = _audio_import_batches.pop(token, None)
+    if batch is None:
+        return jsonify({"error": "导入预览已失效，请重新预览"}), 404
+
+    try:
+        imported = commit_preview(
+            batch["preview"],
+            _audio_import_data_file(),
+            _audio_import_task_path(config.get("media_directory", "media")),
+            get_item_state_manager(),
+        )
+        coverage = _fill_and_persist_coverage_assignments()
+        return jsonify({
+            "success": True,
+            "imported_ids": [item["id"] for item in imported],
+            "imported_count": len(imported),
+            "coverage": coverage,
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logger.exception("Failed to commit admin audio import")
+        return jsonify({"error": "导入失败，未完成写入"}), 500
+    finally:
+        shutil.rmtree(batch["temp_dir"], ignore_errors=True)
+
+
 @app.route("/admin/api/overview", methods=["GET"])
 def admin_api_overview():
     """
@@ -2957,6 +3110,16 @@ def admin_api_instances():
     )
     if isinstance(result, tuple):
         return jsonify(result[0]), result[1]
+    coverage = get_item_state_manager().get_assignment_coverage(
+        get_user_state_manager().get_all_users()
+    )
+    for instance in result.get("instances", []):
+        row = coverage["items"].get(instance["id"], {})
+        instance["assigned_annotators"] = row.get("assigned_users", [])
+        instance["assignment_target"] = row.get("target", -1)
+        instance["assignment_missing"] = row.get("missing", 0)
+    result.setdefault("summary", {})["assignment_shortfall"] = coverage["total_shortfall"]
+    result["summary"]["items_below_assignment_target"] = coverage["items_below_target"]
     return jsonify(result)
 
 
@@ -2974,9 +3137,10 @@ def admin_api_config():
     """
     if request.method == "GET":
         # Return current configuration
+        item_manager = get_item_state_manager()
         response_data = {
             "max_annotations_per_user": config.get("max_annotations_per_user", -1),
-            "max_annotations_per_item": config.get("max_annotations_per_item", -1),
+            "max_annotations_per_item": item_manager.max_annotations_per_item,
             "assignment_strategy": config.get("assignment_strategy", "fixed_order"),
             "annotation_task_name": config.get("annotation_task_name", "Unknown"),
             "debug_mode": config.get("debug", False)
@@ -2997,6 +3161,24 @@ def admin_api_config():
         result = admin_dashboard.update_config(config_updates)
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
+        if result.get("status") == "success":
+            item_manager = get_item_state_manager()
+            if "max_annotations_per_item" in config_updates:
+                target = int(config_updates["max_annotations_per_item"])
+                item_manager.max_annotations_per_item = target
+                item_manager.config["max_annotations_per_item"] = target
+                item_manager.config["num_annotators_per_item"] = target
+                config["num_annotators_per_item"] = target
+            if "max_annotations_per_user" in config_updates:
+                item_manager.config["max_annotations_per_user"] = int(
+                    config_updates["max_annotations_per_user"]
+                )
+            if "assignment_strategy" in config_updates:
+                from potato.item_state_management import AssignmentStrategy
+                item_manager.assignment_strategy = AssignmentStrategy.fromstr(
+                    config_updates["assignment_strategy"]
+                )
+            result["coverage"] = _fill_and_persist_coverage_assignments()
         return jsonify(result)
 
 
@@ -3030,12 +3212,14 @@ def admin_api_set_user_instances(username):
         max_instances = current_count
 
     user_state.set_max_assignments(max_instances)
+    coverage = _fill_and_persist_coverage_assignments()
 
     return jsonify({
         "success": True,
         "username": username,
         "max_instances": max_instances,
-        "current_annotations": current_count
+        "current_annotations": current_count,
+        "coverage": coverage,
     })
 
 
@@ -7697,6 +7881,18 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/poststudy", "poststudy", poststudy, methods=["GET", "POST"])
     app.add_url_rule("/done", "done", done, methods=["GET", "POST"])
     app.add_url_rule("/admin", "admin", admin, methods=["GET"])
+    app.add_url_rule(
+        "/admin/api/audio-import/preview",
+        "admin_audio_import_preview",
+        admin_audio_import_preview,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/admin/api/audio-import/confirm",
+        "admin_audio_import_confirm",
+        admin_audio_import_confirm,
+        methods=["POST"],
+    )
     app.add_url_rule("/progress", "annotator_progress", annotator_progress, methods=["GET"])
     app.add_url_rule("/progress/api/summary", "annotator_progress_summary", annotator_progress_summary, methods=["GET"])
 

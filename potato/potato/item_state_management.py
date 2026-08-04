@@ -31,6 +31,7 @@ import logging
 import threading
 import json
 import os
+import time
 
 # Singleton instance of the ItemStateManager with thread-safe lock
 ITEM_STATE_MANAGER = None
@@ -1645,6 +1646,167 @@ class ItemStateManager:
                     self.assignment_timestamps[iid][username] = now
 
         return result
+
+    def fill_assignments_to_coverage(self, user_states: list[UserState]) -> dict:
+        """Assign all currently available capacity toward per-item coverage.
+
+        Unlike the interactive incremental strategy, this admin-oriented pass
+        fills each user's configured maximum in one operation while prioritizing
+        items with the largest coverage deficit. Existing assignments and
+        completed annotations are preserved.
+        """
+        if self._assignment_paused:
+            return {
+                "target_per_item": self.max_annotations_per_item,
+                "new_assignments": 0,
+                "total_shortfall": 0,
+                "items_below_target": [],
+                "assignments_by_user": {},
+                "paused": True,
+            }
+
+        users = []
+        assigned_by_item = defaultdict(set)
+        used_by_user = {}
+        capacity_by_user = {}
+        global_user_max = int(self.config.get("max_annotations_per_user", -1))
+
+        for user_state in user_states:
+            user_id = str(getattr(user_state, "user_id", user_state.get_user_id()))
+            assigned_ids = set(user_state.get_assigned_instance_ids())
+            try:
+                assigned_ids.update(user_state.get_annotated_instance_ids())
+            except (AttributeError, NotImplementedError):
+                pass
+            assigned_ids.intersection_update(self.instance_id_to_instance)
+            for item_id in assigned_ids:
+                assigned_by_item[item_id].add(user_id)
+
+            user_max = int(user_state.get_max_assignments())
+            if user_max < 0:
+                user_max = global_user_max
+            if user_max == 0:
+                continue
+            used = len(assigned_ids)
+            capacity = (
+                max(0, user_max - used)
+                if user_max > 0
+                else max(0, len(self.instance_id_to_instance) - used)
+            )
+            users.append((user_id, user_state))
+            used_by_user[user_id] = used
+            capacity_by_user[user_id] = capacity
+
+        new_by_user = defaultdict(list)
+        new_assignments = 0
+        with self._lock:
+            items_by_need = []
+            for item_id in self.instance_id_ordering:
+                target = self._get_annotator_cap_for_item(item_id)
+                if target <= 0:
+                    continue
+                deficit = max(0, target - len(assigned_by_item[item_id]))
+                items_by_need.append((deficit, item_id, target))
+            items_by_need.sort(key=lambda value: (-value[0], value[1]))
+
+            for _, item_id, target in items_by_need:
+                while len(assigned_by_item[item_id]) < target:
+                    candidates = [
+                        (used_by_user[user_id], user_id, user_state)
+                        for user_id, user_state in users
+                        if capacity_by_user[user_id] > 0
+                        and user_id not in assigned_by_item[item_id]
+                    ]
+                    if not candidates:
+                        break
+                    _, user_id, user_state = min(candidates, key=lambda value: (value[0], value[1]))
+                    user_state.assign_instance(self.instance_id_to_instance[item_id])
+                    assigned_by_item[item_id].add(user_id)
+                    used_by_user[user_id] += 1
+                    capacity_by_user[user_id] -= 1
+                    new_by_user[user_id].append(item_id)
+                    new_assignments += 1
+                    if self.reclaim_enabled:
+                        self.assignment_timestamps[item_id][user_id] = time.time()
+
+            # Once every reachable item has its minimum coverage, continue
+            # filling each user's one-time quota. Extra assignments are spread
+            # over the least-covered recordings and never duplicate an item for
+            # the same user.
+            for user_id, user_state in sorted(users, key=lambda value: value[0]):
+                while capacity_by_user[user_id] > 0:
+                    candidates = [
+                        item_id
+                        for item_id in self.instance_id_ordering
+                        if user_id not in assigned_by_item[item_id]
+                    ]
+                    if not candidates:
+                        break
+                    item_id = min(
+                        candidates,
+                        key=lambda value: (len(assigned_by_item[value]), value),
+                    )
+                    user_state.assign_instance(self.instance_id_to_instance[item_id])
+                    assigned_by_item[item_id].add(user_id)
+                    used_by_user[user_id] += 1
+                    capacity_by_user[user_id] -= 1
+                    new_by_user[user_id].append(item_id)
+                    new_assignments += 1
+                    if self.reclaim_enabled:
+                        self.assignment_timestamps[item_id][user_id] = time.time()
+
+        shortages = []
+        for item_id in self.instance_id_ordering:
+            target = self._get_annotator_cap_for_item(item_id)
+            if target <= 0:
+                continue
+            assigned_count = len(assigned_by_item[item_id])
+            if assigned_count < target:
+                shortages.append({
+                    "item_id": item_id,
+                    "assigned": assigned_count,
+                    "target": target,
+                    "missing": target - assigned_count,
+                })
+
+        return {
+            "target_per_item": self.max_annotations_per_item,
+            "new_assignments": new_assignments,
+            "total_shortfall": sum(row["missing"] for row in shortages),
+            "items_below_target": shortages,
+            "assignments_by_user": dict(new_by_user),
+            "paused": False,
+        }
+
+    def get_assignment_coverage(self, user_states: list[UserState]) -> dict:
+        """Return current assignment coverage, including pending assignments."""
+        assigned_by_item = defaultdict(set)
+        for user_state in user_states:
+            user_id = str(getattr(user_state, "user_id", user_state.get_user_id()))
+            assigned_ids = set(user_state.get_assigned_instance_ids())
+            try:
+                assigned_ids.update(user_state.get_annotated_instance_ids())
+            except (AttributeError, NotImplementedError):
+                pass
+            for item_id in assigned_ids.intersection(self.instance_id_to_instance):
+                assigned_by_item[item_id].add(user_id)
+
+        items = {}
+        for item_id in self.instance_id_ordering:
+            target = self._get_annotator_cap_for_item(item_id)
+            users = sorted(assigned_by_item[item_id])
+            missing = max(0, target - len(users)) if target > 0 else 0
+            items[item_id] = {
+                "assigned_users": users,
+                "assigned": len(users),
+                "target": target,
+                "missing": missing,
+            }
+        return {
+            "items": items,
+            "total_shortfall": sum(row["missing"] for row in items.values()),
+            "items_below_target": sum(1 for row in items.values() if row["missing"] > 0),
+        }
 
     def _assign_instances_to_user_inner(self, user_state: 'UserState') -> int:
         """Inner assignment logic called by assign_instances_to_user."""

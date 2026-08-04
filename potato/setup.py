@@ -34,6 +34,7 @@ _CORE_DEPS = [
     "tqdm>=4.62.3",
     "ujson>=5.4.0",
     "Werkzeug>=3.0.6",
+    "xlrd>=2.0.1",
 ]
 
 # Optional dependency groups for specific features.

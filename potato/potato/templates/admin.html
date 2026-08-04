@@ -66,6 +66,7 @@
           <div class="admin-tab active" data-tab="overview">{{ ui_lang.admin_tab_overview|default('Overview') }}</div>
           <div class="admin-tab" data-tab="annotators">{{ ui_lang.admin_tab_annotators|default('Annotators') }}</div>
           <div class="admin-tab" data-tab="annotation-data">标注数据</div>
+          <div class="admin-tab" data-tab="audio-import">批量导入</div>
           <div class="admin-tab" data-tab="instances">{{ ui_lang.admin_tab_instances|default('Instances') }}</div>
           <div class="admin-tab" data-tab="questions">{{ ui_lang.admin_tab_questions|default('Questions') }}</div>
           <div class="admin-tab" data-tab="behavioral">{{ ui_lang.admin_tab_behavioral|default('Behavioral') }}</div>
@@ -180,6 +181,34 @@
           </table>
         </div>
 
+        <!-- Batch Audio Import Tab -->
+        <div class="admin-tab-content" id="audio-import">
+          <div class="config-form">
+            <h3>批量导入音频和转写</h3>
+            <p>选择原始旧版 Excel（.xls）和与录音地址同名的 WAV 文件。系统会先校验预览，确认后才写入任务。</p>
+            <div class="table-controls" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:end;">
+              <label>
+                <span style="display:block;margin-bottom:.4rem;">原始 Excel</span>
+                <input id="audioImportExcel" type="file" accept=".xls">
+              </label>
+              <label>
+                <span style="display:block;margin-bottom:.4rem;">WAV 音频（可多选）</span>
+                <input id="audioImportFiles" type="file" accept=".wav,audio/wav" multiple>
+              </label>
+              <button id="audioImportPreviewButton" type="button" onclick="previewAudioImport()" class="shadcn-button shadcn-button-primary">
+                校验并预览
+              </button>
+              <button id="audioImportConfirm" type="button" onclick="confirmAudioImport()" class="shadcn-button shadcn-button-outline" disabled>
+                确认导入
+              </button>
+            </div>
+            <div id="audioImportStatus" style="padding:1rem 0;color:var(--muted-foreground);">
+              尚未选择文件。
+            </div>
+            <div id="audioImportPreview"></div>
+          </div>
+        </div>
+
         <!-- Instances Tab -->
         <div class="admin-tab-content" id="instances">
           <div class="table-controls">
@@ -216,6 +245,8 @@
             </button>
           </div>
 
+          <div id="assignmentCoverageStatus" style="padding:.75rem 0;color:var(--muted-foreground);"></div>
+
           <div class="admin-table-container">
             <table class="admin-table" id="instancesTable">
               <thead>
@@ -227,7 +258,7 @@
                   <th>{{ ui_lang.admin_th_most_frequent_label|default('Most Frequent Label') }}</th>
                   <th>{{ ui_lang.admin_th_disagreement|default('Disagreement') }}</th>
                   <th>{{ ui_lang.admin_th_avg_time|default('Avg Time') }}</th>
-                  <th>{{ ui_lang.admin_th_annotators|default('Annotators') }}</th>
+                  <th>已分配标注员 / 目标</th>
                   <th>{{ ui_lang.admin_th_num_ai_used|default('Num AI Used') }}</th>
                 </tr>
               </thead>
@@ -660,6 +691,8 @@
           case "annotation-data":
             loadAnnotationData();
             break;
+          case "audio-import":
+            break;
           case "instances":
             loadInstances();
             break;
@@ -916,6 +949,9 @@
 
           if (response.success) {
             span.textContent = response.max_instances < 0 ? '∞' : response.max_instances;
+            const coverage = response.coverage || {};
+            showSuccess(`配额已更新，本次新增分配 ${coverage.new_assignments || 0} 条，仍缺 ${coverage.total_shortfall || 0} 个标注名额。`);
+            loadInstances();
           }
         } catch (err) {
           console.error('Failed to adjust instances:', err);
@@ -1041,6 +1077,98 @@
           }).join("");
       }
 
+      // Batch audio import
+      let audioImportToken = null;
+
+      function setAudioImportBusy(isBusy) {
+        document.getElementById("audioImportPreviewButton").disabled = isBusy;
+        if (isBusy) document.getElementById("audioImportConfirm").disabled = true;
+      }
+
+      function renderAudioImportPreview(preview) {
+        const rows = [
+          ["可以导入", preview.ready || []],
+          ["未选择（已忽略）", preview.ignored_ids || []],
+          ["重复录音", preview.duplicate_ids || []],
+          ["Excel 中无对应记录", preview.unmatched_audio || []],
+          ["格式错误", preview.invalid_rows || []],
+        ];
+        document.getElementById("audioImportPreview").innerHTML = `
+          <div class="admin-table-container">
+            <table class="admin-table">
+              <thead><tr><th>校验结果</th><th>数量</th><th>详细内容</th></tr></thead>
+              <tbody>${rows.map(([label, values]) => `
+                <tr>
+                  <td>${label}</td>
+                  <td>${values.length}</td>
+                  <td>${values.length ? values.map(escapeAnnotationDataHtml).join("、") : "—"}</td>
+                </tr>
+              `).join("")}</tbody>
+            </table>
+          </div>`;
+      }
+
+      async function previewAudioImport() {
+        const excel = document.getElementById("audioImportExcel").files[0];
+        const audioFiles = Array.from(document.getElementById("audioImportFiles").files);
+        const status = document.getElementById("audioImportStatus");
+        audioImportToken = null;
+        document.getElementById("audioImportConfirm").disabled = true;
+        if (!excel || !audioFiles.length) {
+          status.textContent = "请选择一个原始 .xls 文件和至少一条 WAV 音频。";
+          return;
+        }
+
+        const body = new FormData();
+        body.append("excel", excel);
+        audioFiles.forEach((file) => body.append("audio", file));
+        setAudioImportBusy(true);
+        status.textContent = "正在上传并校验，请稍候……";
+        try {
+          const response = await fetch("/admin/api/audio-import/preview", {
+            method: "POST",
+            headers: {"X-API-Key": "{{ admin_api_key }}"},
+            body,
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "校验失败");
+          renderAudioImportPreview(data.preview);
+          audioImportToken = data.preview.can_confirm ? data.token : null;
+          document.getElementById("audioImportConfirm").disabled = !data.preview.can_confirm;
+          status.textContent = data.preview.can_confirm
+            ? `校验通过，共 ${data.preview.ready.length} 条录音可以导入。`
+            : "校验未通过，请根据下表补齐或移除有问题的文件后重新预览。";
+        } catch (error) {
+          status.textContent = error.message || "校验失败，请重试。";
+          document.getElementById("audioImportPreview").innerHTML = "";
+        } finally {
+          setAudioImportBusy(false);
+          document.getElementById("audioImportConfirm").disabled = !audioImportToken;
+        }
+      }
+
+      async function confirmAudioImport() {
+        if (!audioImportToken) return;
+        const status = document.getElementById("audioImportStatus");
+        const confirmButton = document.getElementById("audioImportConfirm");
+        confirmButton.disabled = true;
+        status.textContent = "正在导入，请勿关闭页面……";
+        try {
+          const data = await makeApiRequest("/admin/api/audio-import/confirm", {
+            method: "POST",
+            body: JSON.stringify({token: audioImportToken}),
+          });
+          audioImportToken = null;
+          status.textContent = `导入完成，共新增 ${data.imported_count} 条录音。现在可以在任务页面进行分配。`;
+          document.getElementById("audioImportExcel").value = "";
+          document.getElementById("audioImportFiles").value = "";
+          document.getElementById("audioImportPreview").innerHTML = "";
+        } catch (error) {
+          audioImportToken = null;
+          status.textContent = "导入失败，预览已失效，请重新选择文件并预览。";
+        }
+      }
+
       // Instances functions
       async function loadInstances() {
         try {
@@ -1072,6 +1200,12 @@
       function displayInstances(data) {
         const tbody = document.getElementById("instancesTableBody");
         const pagination = document.getElementById("instancesPagination");
+        const coverageStatus = document.getElementById("assignmentCoverageStatus");
+        const shortfall = data.summary?.assignment_shortfall || 0;
+        const belowTarget = data.summary?.items_below_assignment_target || 0;
+        coverageStatus.textContent = shortfall
+          ? `有 ${belowTarget} 条录音未达到目标，共缺少 ${shortfall} 个标注名额。`
+          : "所有录音均已达到分配目标。";
         console.log(data.instances);
         // Display instances
         tbody.innerHTML = data.instances
@@ -1085,7 +1219,7 @@
                     <td>${instance.most_frequent_label || "N/A"}</td>
                     <td>${instance.label_disagreement}</td>
                     <td>${instance.average_time_per_annotation || "N/A"}</td>
-                    <td>${instance.annotators.join(", ") || "无"}</td>
+                    <td>${(instance.assigned_annotators || []).join(", ") || "无"}（${(instance.assigned_annotators || []).length}/${instance.assignment_target < 0 ? "∞" : instance.assignment_target}）</td>
                     <td>${instance.num_ai_instance}</td>
                 </tr>
             `
@@ -1947,8 +2081,10 @@
               body: JSON.stringify(formData),
             });
 
-            showSuccess(L.admin_ok_config_saved || "配置更新成功");
+            const coverage = result.coverage || {};
+            showSuccess(`配置更新成功，本次新增分配 ${coverage.new_assignments || 0} 条，仍缺 ${coverage.total_shortfall || 0} 个标注名额。`);
             loadOverview(); // Refresh overview to show updated stats
+            loadInstances();
           } catch (error) {
             console.error("Error updating config:", error);
             showError(L.admin_err_config || "配置更新失败");
