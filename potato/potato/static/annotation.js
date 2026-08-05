@@ -1389,7 +1389,7 @@ function generateAnnotationForms() {
     validateRequiredFields();
 }
 
-async function saveAnnotations() {
+async function saveAnnotations(options = {}) {
     if (!currentInstance || !currentInstance.id) {
         return;
     }
@@ -1442,7 +1442,8 @@ async function saveAnnotations() {
             body: JSON.stringify({
                 instance_id: currentInstance.id,
                 annotations: labelAnnotations,
-                span_annotations: spanAnnotations
+                span_annotations: spanAnnotations,
+                submit: options.submit === true
             })
         });
 
@@ -1453,23 +1454,108 @@ async function saveAnnotations() {
                 const result = JSON.parse(responseText);
                 debugLog('[DEBUG] saveAnnotations: annotations saved:', result);
                 handleQualityControlResponse(result);
+                if (window.config?.explicit_submission_required && result.annotation_status) {
+                    const badge = document.getElementById('annotation-status-badge');
+                    if (badge) {
+                        badge.className = `status-badge ${result.annotation_status}`;
+                        badge.textContent = result.annotation_status === 'labeled'
+                            ? '已标注'
+                            : (result.annotation_status === 'in_progress' ? '标注中' : '未标注');
+                    }
+                }
+                return result;
             } catch (jsonError) {
                 console.error('[DEBUG] saveAnnotations: JSON parse error:', jsonError);
                 console.error('[DEBUG] saveAnnotations: Response text (first 500 chars):', responseText.substring(0, 500));
                 // Don't throw - the save may have succeeded even if response parsing failed
             }
         } else {
-            console.warn('[DEBUG] saveAnnotations: failed to save annotations:', await response.text());
+            const errorText = await response.text();
+            console.warn('[DEBUG] saveAnnotations: failed to save annotations:', errorText);
+            try {
+                saveAnnotations.lastError = JSON.parse(errorText).message;
+            } catch (_) {
+                saveAnnotations.lastError = errorText;
+            }
             return false;
         }
-
-        return true;
 
     } catch (error) {
         console.error('Error saving annotations:', error);
         showError(true, 'Failed to save annotations: ' + error.message);
         return false;
     }
+}
+
+let currentInstanceSubmitted = Boolean(window.config?.is_submitted);
+
+function blockUnsubmittedForwardNavigation() {
+    if (window.config?.explicit_submission_required && !currentInstanceSubmitted) {
+        showNotification('请先提交当前标注，再前往下一条。', 'warning');
+        return true;
+    }
+    return false;
+}
+
+async function submitCurrentAnnotation() {
+    if (isLoading || !window.config?.explicit_submission_required) return;
+
+    const managers = Array.from(document.querySelectorAll('.audio-annotation-container'))
+        .map(container => container.audioAnnotationManager)
+        .filter(Boolean);
+    for (const manager of managers) {
+        if (manager.segments.length < Number(manager.config.minSegments || 0)) {
+            showNotification(`至少需要 ${manager.config.minSegments} 个音频片段才能提交。`, 'error');
+            return;
+        }
+        manager.prepareForSubmit();
+    }
+
+    setLoading(true);
+    clearTimeout(textSaveTimer);
+    textSaveTimer = null;
+    const result = await saveAnnotations({ submit: true });
+    setLoading(false);
+    if (!result) {
+        showNotification(saveAnnotations.lastError || '提交失败，请重试。', 'error');
+        return;
+    }
+
+    if (result.submission_rejected) {
+        currentInstanceSubmitted = false;
+        window.config.is_submitted = false;
+        const badge = document.getElementById('annotation-status-badge');
+        if (badge) {
+            badge.className = 'status-badge in_progress';
+            badge.textContent = '标注中';
+        }
+        showNotification(result.message || '当前标注已被系统打回并移至任务队列末尾。', 'warning');
+        setLoading(true);
+        window.setTimeout(() => window.location.assign('/annotate'), 1200);
+        return;
+    }
+
+    currentInstanceSubmitted = Boolean(result.submitted);
+    window.config.is_submitted = currentInstanceSubmitted;
+    const badge = document.getElementById('annotation-status-badge');
+    if (badge) {
+        badge.className = 'status-badge labeled';
+        badge.textContent = '已标注';
+    }
+    const submitBtn = document.getElementById('submit-btn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '已提交';
+    }
+    const nextBtn = document.getElementById('next-btn');
+    if (nextBtn) nextBtn.disabled = false;
+    const progress = document.getElementById('progress-counter');
+    if (progress && Number.isInteger(result.submitted_count)) {
+        const total = progress.textContent.split('/')[1] || '';
+        progress.textContent = `${result.submitted_count}/${total}`;
+    }
+    const autoCompleted = result.auto_review?.action === 'auto_completed';
+    showNotification(autoCompleted ? '提交成功，文本一致性达标，系统已自动审核通过。' : '提交成功。', 'success');
 }
 
 async function navigateToPrevious() {
@@ -1630,6 +1716,7 @@ async function navigateToNext() {
         debugLog('[DEEP DEBUG NAV] navigateToNext - Navigation blocked, still loading');
         return;
     }
+    if (blockUnsubmittedForwardNavigation()) return;
 
     // Client-side required field validation
     hasAttemptedForwardValidation = true;
@@ -1750,6 +1837,7 @@ async function navigateToInstance(instanceIndex) {
     // Client-side validation for forward navigation
     const currentIdx = currentInstance ? currentInstance.index : 0;
     if (instanceIndex > currentIdx) {
+        if (blockUnsubmittedForwardNavigation()) return;
         hasAttemptedForwardValidation = true;
         if (!validateRequiredFields({ showErrors: true })) {
             debugLog('[NAV] navigateToInstance - blocked by client-side validation');
@@ -1961,19 +2049,22 @@ function setLoading(loading) {
     const mainContent = document.getElementById('main-content');
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
+    const submitBtn = document.getElementById('submit-btn');
 
     if (loading) {
         loadingState.style.display = 'block';
         mainContent.style.display = 'none';
         if (prevBtn) prevBtn.disabled = true;
         nextBtn.disabled = true;
+        if (submitBtn) submitBtn.disabled = true;
     } else {
         loadingState.style.display = 'none';
         mainContent.style.display = 'block';
         if (prevBtn) prevBtn.disabled = false;
         // Re-enable next button, then run validation which may re-disable it
         // if required fields are unfilled
-        nextBtn.disabled = false;
+        nextBtn.disabled = Boolean(window.config?.explicit_submission_required && !currentInstanceSubmitted);
+        if (submitBtn) submitBtn.disabled = currentInstanceSubmitted;
         validateRequiredFields();
     }
 }
@@ -4486,6 +4577,7 @@ async function jumpToUnannotated() {
         debugLog('[NAV] jumpToUnannotated - Navigation blocked, still loading');
         return;
     }
+    if (blockUnsubmittedForwardNavigation()) return;
 
     // Client-side required field validation
     hasAttemptedForwardValidation = true;
@@ -4612,6 +4704,7 @@ function showNotification(message, type = 'info') {
 // Make the function available globally for debugging
 window.testAggressiveFirefoxFix = testAggressiveFirefoxFix;
 window.navigateToNext = navigateToNext;
+window.submitCurrentAnnotation = submitCurrentAnnotation;
 window.navigateToPrevious = navigateToPrevious;
 window.jumpToUnannotated = jumpToUnannotated;
 window.jumpToUnannotatedPrev = jumpToUnannotatedPrev;

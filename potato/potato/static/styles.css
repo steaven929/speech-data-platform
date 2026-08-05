@@ -3987,6 +3987,12 @@ body > .container-fluid {
   padding: var(--space-md) 0;
 }
 
+.potato-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ===== PROMO BANNER (HF Spaces demos) ===== */
 
 .potato-promo-banner {
@@ -6570,4 +6576,3 @@ body > .container-fluid {
 .pairwise-rationale-counter.insufficient {
   color: hsl(0 84% 50%);
 }
-

@@ -1,4 +1,4 @@
-"""Persistent claim and audit state for direct administrator audio review."""
+"""Persistent state and audit history for direct administrator audio review."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 class ReviewConflict(ValueError):
-    """Raised when a review is owned by a different administrator."""
+    """Raised when a review operation is invalid for the current state."""
 
 
 def _now() -> str:
@@ -39,7 +39,12 @@ class DirectAudioReviewStore:
             return {}
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            for state in data.values():
+                if isinstance(state, dict) and state.get("status") == "pending":
+                    state["status"] = "in_progress"
+            return data
         except (OSError, ValueError):
             return {}
 
@@ -56,10 +61,13 @@ class DirectAudioReviewStore:
                 os.unlink(temp_path)
 
     def get(self, recording_id: str, annotator: str) -> Dict[str, Any]:
-        return dict(self._state.get(self.key(recording_id, annotator), {
-            "status": "pending", "assigned_to": None, "assigned_at": None,
+        state = dict(self._state.get(self.key(recording_id, annotator), {
+            "status": "in_progress", "assigned_to": None, "assigned_at": None,
             "reviewed_by": None, "reviewed_at": None,
         }))
+        if state.get("status") == "pending":
+            state["status"] = "in_progress"
+        return state
 
     def list_reviews(self, records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result = []
@@ -72,58 +80,98 @@ class DirectAudioReviewStore:
                 "assigned_at": state.get("assigned_at"),
                 "reviewed_by": state.get("reviewed_by"),
                 "reviewed_at": state.get("reviewed_at"),
+                "review_method": state.get("review_method"),
+                "cer_score": state.get("cer_score"),
+                "qc_reason": state.get("qc_reason"),
             })
             result.append(row)
         return result
 
-    def claim(self, recording_id: str, annotator: str, admin: str) -> Dict[str, Any]:
-        with self._lock:
-            state = self.get(recording_id, annotator)
-            owner = state.get("assigned_to")
-            if owner and owner != admin:
-                raise ReviewConflict("该审核任务已分配给其他管理员")
-            state.update({"status": "in_progress", "assigned_to": admin,
-                          "assigned_at": state.get("assigned_at") or _now()})
-            self._state[self.key(recording_id, annotator)] = state
-            self._save()
-            return dict(state)
-
-    def _require_owner(self, recording_id: str, annotator: str, admin: str) -> Dict[str, Any]:
-        state = self.get(recording_id, annotator)
-        if state.get("assigned_to") != admin:
-            raise ReviewConflict("请先把该审核任务分配给自己")
-        return state
-
     def require_editable(self, recording_id: str, annotator: str, admin: str) -> Dict[str, Any]:
         state = self.get(recording_id, annotator)
-        owner = state.get("assigned_to")
-        if state.get("status") == "pending" and not owner:
+        if state.get("status") == "in_progress":
             return state
-        if state.get("status") == "in_progress" and owner == admin:
-            return state
-        if owner and owner != admin:
-            raise ReviewConflict("该审核任务已分配给其他管理员")
         raise ReviewConflict("当前审核状态不能修改")
 
     def complete(self, recording_id: str, annotator: str, admin: str) -> Dict[str, Any]:
         with self._lock:
             state = self.require_editable(recording_id, annotator, admin)
             state.update({"status": "completed", "reviewed_by": admin,
-                          "reviewed_at": _now()})
+                          "reviewed_at": _now(), "review_method": "manual",
+                          "cer_score": None, "qc_reason": None})
             self._state[self.key(recording_id, annotator)] = state
             self._save()
             return dict(state)
 
+    def record_auto_rejection(self, recording_id: str, annotator: str,
+                              reason: str) -> Dict[str, Any]:
+        """Persist a zero-change rejection without exposing it as review work."""
+        with self._lock:
+            state = self.get(recording_id, annotator)
+            state.update({
+                "status": "in_progress",
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "review_method": "system_rejected",
+                "cer_score": 0.0,
+                "qc_reason": reason,
+                "rejected_at": _now(),
+                "reject_count": int(state.get("reject_count", 0)) + 1,
+            })
+            self._state[self.key(recording_id, annotator)] = state
+            self._save()
+            return dict(state)
+
+    def reconcile_auto_matches(self, recording_id: str, annotators: Iterable[str],
+                               comparisons: Iterable[Dict[str, Any]],
+                               threshold: float) -> List[str]:
+        """Apply system completion to exactly the annotators in passing pairs."""
+        recording_id = str(recording_id)
+        matched = {str(annotator) for annotator in annotators}
+        comparison_rows = list(comparisons)
+        with self._lock:
+            prefix = f"{recording_id}::"
+            for key, state in self._state.items():
+                if (key.startswith(prefix) and state.get("status") == "completed"
+                        and state.get("review_method") == "cer"):
+                    state.update({
+                        "status": "in_progress", "reviewed_by": None,
+                        "reviewed_at": None, "review_method": None,
+                        "cer_score": None, "qc_reason": None,
+                    })
+
+            completed_at = _now()
+            for annotator in matched:
+                relevant_scores = [
+                    float(row["cer"]) for row in comparison_rows
+                    if row.get("passed") and annotator in row.get("annotators", [])
+                ]
+                state = self.get(recording_id, annotator)
+                if (state.get("status") == "completed"
+                        and state.get("review_method") == "manual"):
+                    continue
+                state.update({
+                    "status": "completed",
+                    "reviewed_by": "system:cer",
+                    "reviewed_at": completed_at,
+                    "review_method": "cer",
+                    "cer_score": min(relevant_scores) if relevant_scores else None,
+                    "cer_threshold": float(threshold),
+                    "qc_reason": "两名及以上标注员文本一致性达标，系统自动通过",
+                })
+                self._state[self.key(recording_id, annotator)] = state
+            self._save()
+        return sorted(matched)
+
     def reopen(self, recording_id: str, annotator: str, admin: str) -> Dict[str, Any]:
         with self._lock:
             state = self.get(recording_id, annotator)
-            if state.get("assigned_to") not in (None, admin):
-                raise ReviewConflict("该审核任务已分配给其他管理员")
-            if state.get("reviewed_by") != admin:
-                raise ReviewConflict("只有原审核人可以重新编辑")
-            state.update({"status": "in_progress", "assigned_to": admin,
-                          "assigned_at": state.get("assigned_at") or _now(),
-                          "reviewed_at": None})
+            if state.get("status") != "completed":
+                raise ReviewConflict("只有已完成的审核可以重新编辑")
+            state.update({"status": "in_progress", "reviewed_at": None,
+                          "review_method": None, "cer_score": None,
+                          "qc_reason": None, "reopened_by": admin,
+                          "reopened_at": _now()})
             self._state[self.key(recording_id, annotator)] = state
             self._save()
             return dict(state)

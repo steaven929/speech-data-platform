@@ -157,7 +157,7 @@
 
             <div class="navbar-center">
                 <div class="annotation-status-indicator" id="annotation-status">
-                    <span class="status-badge {{ annotation_status }}">
+                    <span class="status-badge {{ annotation_status }}" id="annotation-status-badge">
                         {% if annotation_status == 'labeled' %}
                             {{ ui_lang.labeled_badge }}
                         {% elif annotation_status == 'in_progress' %}
@@ -451,9 +451,18 @@
             {% else %}
             <div id="prev-btn-placeholder"></div>
             {% endif %}
-            <button class="shadcn-button shadcn-button-primary" id="next-btn" onclick="navigateToNext()">
-                {{ ui_lang.next_button }}<i class="fas fa-arrow-right ms-2"></i>
-            </button>
+            <div class="potato-nav-actions">
+                {% if explicit_submission_required | default(false) %}
+                <button class="shadcn-button shadcn-button-outline" id="submit-btn"
+                        onclick="submitCurrentAnnotation()" {% if is_submitted %}disabled{% endif %}>
+                    {{ '已提交' if is_submitted else '提交' }}
+                </button>
+                {% endif %}
+                <button class="shadcn-button shadcn-button-primary" id="next-btn" onclick="navigateToNext()"
+                        {% if explicit_submission_required | default(false) and not is_submitted %}disabled{% endif %}>
+                    {{ ui_lang.next_button }}<i class="fas fa-arrow-right ms-2"></i>
+                </button>
+            </div>
         </div>
 
         {% if custom_footer_html | default('') %}
@@ -487,6 +496,8 @@
             username: {{ username | tojson }},
             url_prefix: {{ url_prefix | default('') | tojson }},
             review_mode: {{ review_mode | default({}) | tojson }},
+            explicit_submission_required: {{ 'true' if explicit_submission_required | default(false) else 'false' }},
+            is_submitted: {{ 'true' if is_submitted | default(false) else 'false' }},
             ui_config: {}
         };
 

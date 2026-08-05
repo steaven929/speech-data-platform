@@ -259,7 +259,7 @@ class TestAudioAnnotationSchemaGeneration:
 
         assert 'data-action="zoom-in"' in html
         assert 'data-action="zoom-out"' in html
-        assert 'data-action="zoom-fit"' in html
+        assert 'data-action="zoom-fit"' not in html
 
     def test_schema_generates_html_with_playback_rate(self):
         """Test that schema generates playback rate control when enabled."""
@@ -319,7 +319,7 @@ class TestAudioAnnotationSchemaGeneration:
 
         assert keybindings is not None
         keys = [k for k, _ in keybindings]
-        assert "Space" in keys  # Play/pause
+        assert "空格键" in keys  # Play/pause
         assert "1" in keys  # speech
         assert "2" in keys  # music
         assert "Enter" in keys  # Create segment

@@ -632,7 +632,7 @@ class AudioAnnotationManager {
             mediaElement: this.audioEl,
             keyboard: false, // We handle our own keyboard shortcuts
             logger: console.error.bind(console),
-            zoomLevels: [256, 512, 1024, 2048, 4096],
+            zoomLevels: [128, 256, 512, 1024, 2048, 4096],
             ...waveformSource,
             // segments must be an array (empty initially, segments added later)
             segments: [],
@@ -666,6 +666,7 @@ class AudioAnnotationManager {
         try {
             this.peaks = await this._initPeaks(peaksOptions);
             audioDebugLog('Peaks.js initialized successfully');
+            this.peaks.zoom.setZoom(1);
 
             // Set up event listeners
             this._setupPeaksEventListeners();
@@ -970,11 +971,6 @@ class AudioAnnotationManager {
                 this.zoomOut();
                 break;
 
-            case '0':
-                event.preventDefault();
-                this.zoomToFit();
-                break;
-
             default:
                 // Check for label shortcuts (1-9)
                 if (/^[1-9]$/.test(key)) {
@@ -1074,8 +1070,7 @@ class AudioAnnotationManager {
             // Halve the current samples-per-pixel to show more detail. (Do NOT
             // reset to 'auto' first — that jumps to the whole clip and makes
             // "zoom in" widen the view from the initial state.)
-            const currentZoom = view.getZoom();
-            view.setZoom({ scale: Math.max(256, currentZoom / 2) });
+            this.peaks.zoom.zoomIn();
             // Update spectrogram to match
             this._updateSpectrogramView();
         }
@@ -1088,21 +1083,7 @@ class AudioAnnotationManager {
         if (!this.peaks) return;
         const view = this.peaks.views.getView('zoomview');
         if (view) {
-            const currentZoom = view.getZoom();
-            view.setZoom({ scale: Math.min(4096, currentZoom * 2) });
-            // Update spectrogram to match
-            this._updateSpectrogramView();
-        }
-    }
-
-    /**
-     * Zoom to fit entire waveform
-     */
-    zoomToFit() {
-        if (!this.peaks) return;
-        const view = this.peaks.views.getView('zoomview');
-        if (view) {
-            view.setZoom({ scale: 'auto' });
+            this.peaks.zoom.zoomOut();
             // Update spectrogram to match
             this._updateSpectrogramView();
         }
@@ -1648,6 +1629,11 @@ class AudioAnnotationManager {
             }, 500);
         }
         audioDebugLog('Saved audio annotation data:', data);
+    }
+
+    prepareForSubmit() {
+        this._saveData();
+        return this.serialize();
     }
 
     /**

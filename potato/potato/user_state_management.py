@@ -489,6 +489,9 @@ class UserStateManager:
         # standard user_roles config block; absent users fall through to the
         # default in by_user_role.
         self.user_roles = config.get("user_roles") or {}
+        self.require_explicit_submit = bool(
+            (config.get("annotation_submission") or {}).get("require_explicit_submit", False)
+        )
 
         # Database support
         self.db_manager = None
@@ -643,6 +646,8 @@ class UserStateManager:
             else:
                 logger.debug(f"Creating InMemoryUserState for user: {user_id} (quota={quota})")
                 user_state = InMemoryUserState(user_id, quota)
+
+            user_state.explicit_submission_required = self.require_explicit_submit
 
             self.user_to_annotation_state[user_id] = user_state
             logger.debug(f"User state created and stored: {user_state}")
@@ -1067,6 +1072,7 @@ class UserStateManager:
 
         # TODO: make the user state type configurable between in-memory and DB-backed.
         user_state = InMemoryUserState.load(user_dir)
+        user_state.explicit_submission_required = self.require_explicit_submit
         user_state.prune_missing_assigned_instances()
 
         if user_state.get_user_id() in self.user_to_annotation_state:
@@ -1835,6 +1841,12 @@ class InMemoryUserState(UserState):
         # a user labels for each instance.
         self.instance_id_to_label_to_value = defaultdict(dict)
 
+        # Explicit-submission tasks keep drafts in the normal annotation maps,
+        # while completion is tracked separately. The runtime flag is supplied
+        # by UserStateManager and is intentionally not persisted as task data.
+        self.submitted_instance_ids = set()
+        self.explicit_submission_required = False
+
         # For non-annotation data, we save the responses for each page in separate
         # dictionaries to keep the data organized and make state-tracking easier.
         self.phase_to_page_to_label_to_value = defaultdict(lambda: defaultdict(dict))
@@ -2357,6 +2369,8 @@ class InMemoryUserState(UserState):
         return self.user_id
 
     def get_annotated_instance_ids(self) -> set[str]:
+        if self.explicit_submission_required:
+            return set(self.submitted_instance_ids)
         return set(self.instance_id_to_label_to_value.keys()) \
                     | set(self.instance_id_to_span_to_value.keys()) \
                     | set(self.instance_id_to_link_to_value.keys()) \
@@ -2398,10 +2412,36 @@ class InMemoryUserState(UserState):
 
     def has_annotated(self, instance_id: str) -> bool:
         '''Returns True if the user has annotated the instance with the given ID'''
+        if self.explicit_submission_required:
+            return instance_id in self.submitted_instance_ids
         return instance_id in self.instance_id_to_label_to_value \
             or instance_id in self.instance_id_to_span_to_value \
             or instance_id in self.instance_id_to_link_to_value \
             or instance_id in self.instance_id_to_event_to_value
+
+    def mark_submitted(self, instance_id: str) -> None:
+        """Mark an instance as formally submitted."""
+        self.submitted_instance_ids.add(str(instance_id))
+
+    def defer_instance_for_retry(self, instance_id: str) -> None:
+        """Move a rejected item to the end of this user's assignment queue."""
+        instance_id = str(instance_id)
+        self.submitted_instance_ids.discard(instance_id)
+        if instance_id not in self.instance_id_ordering:
+            return
+        old_index = self.current_instance_index
+        self.instance_id_ordering.remove(instance_id)
+        self.instance_id_ordering.append(instance_id)
+        self.instance_id_to_order = self.generate_id_order_mapping(self.instance_id_ordering)
+        self.assigned_instance_ids = set(self.instance_id_ordering)
+        self.current_instance_index = min(old_index, len(self.instance_id_ordering) - 1)
+
+    def is_submitted(self, instance_id: str) -> bool:
+        """Return whether an instance has been formally submitted."""
+        return str(instance_id) in self.submitted_instance_ids
+
+    def get_submitted_instance_ids(self) -> set[str]:
+        return set(self.submitted_instance_ids)
 
     def clear_all_annotations(self) -> None:
         '''Clears all annotations for this user'''
@@ -2409,6 +2449,7 @@ class InMemoryUserState(UserState):
         self.instance_id_to_span_to_value.clear()
         self.instance_id_to_link_to_value.clear()
         self.instance_id_to_event_to_value.clear()
+        self.submitted_instance_ids.clear()
         self.instance_id_to_behavioral_data.clear()
         self.ai_hints.clear()
 
@@ -2418,6 +2459,7 @@ class InMemoryUserState(UserState):
         self.instance_id_to_span_to_value.pop(instance_id, None)
         self.instance_id_to_link_to_value.pop(instance_id, None)
         self.instance_id_to_event_to_value.pop(instance_id, None)
+        self.submitted_instance_ids.discard(str(instance_id))
         self.instance_id_to_behavioral_data.pop(instance_id, None)
         self.ai_hints.pop(instance_id, None)
 
@@ -2798,6 +2840,7 @@ class InMemoryUserState(UserState):
             'completed_phase_and_pages':
                 [ pp_to_tuple(pp) for pp in self.completed_phase_and_pages],
             'max_assignments': self.max_assignments,
+            'submitted_instance_ids': sorted(self.submitted_instance_ids),
         }
         # Serialize behavioral data (used for interaction tracking)
         d['instance_id_to_behavioral_data'] = {}
@@ -2896,6 +2939,9 @@ class InMemoryUserState(UserState):
             return (UserPhase.fromstr(t[0]), t[1])
 
         user_state = InMemoryUserState(j['user_id'], j['max_assignments'])
+        # Backward compatibility: old state files have no explicit submissions,
+        # so their existing annotations load as drafts that need re-submission.
+        user_state.submitted_instance_ids = set(j.get('submitted_instance_ids', []))
 
         user_state.instance_id_ordering = j['instance_id_ordering']
         user_state.assigned_instance_ids = set(j['instance_id_ordering'])
@@ -2982,4 +3028,3 @@ class InMemoryUserState(UserState):
             pass
 
         return user_state
-

@@ -79,6 +79,9 @@ def collect_audio_annotation_records(user_state_manager: Any) -> List[Dict[str, 
         if not user_state:
             continue
         for recording_id, annotations in user_state.get_all_annotations().items():
+            if (getattr(user_state, "explicit_submission_required", False)
+                    and not user_state.is_submitted(str(recording_id))):
+                continue
             labels = annotations.get("labels", {}) if isinstance(annotations, dict) else {}
             value = _audio_annotation_value(labels)
             if value is None:
@@ -115,9 +118,12 @@ def write_annotation_sqlite(
                 annotator TEXT NOT NULL,
                 segment_count INTEGER NOT NULL,
                 parse_error TEXT,
-                review_status TEXT NOT NULL DEFAULT 'pending',
+                review_status TEXT NOT NULL DEFAULT 'in_progress',
                 reviewed_by TEXT,
-                reviewed_at TEXT
+                reviewed_at TEXT,
+                review_method TEXT,
+                cer_score REAL,
+                qc_reason TEXT
             );
             CREATE INDEX idx_annotations_recording
                 ON annotations(recording_id);
@@ -144,17 +150,21 @@ def write_annotation_sqlite(
                 """
                 INSERT INTO annotations
                     (recording_id, annotator, segment_count, parse_error,
-                     review_status, reviewed_by, reviewed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     review_status, reviewed_by, reviewed_at, review_method,
+                     cer_score, qc_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["recording_id"],
                     record["annotator"],
                     record["segment_count"],
                     record.get("parse_error"),
-                    record.get("review_status", "pending"),
+                    record.get("review_status", "in_progress"),
                     record.get("reviewed_by"),
                     record.get("reviewed_at"),
+                    record.get("review_method"),
+                    record.get("cer_score"),
+                    record.get("qc_reason"),
                 ),
             )
             annotation_id = cursor.lastrowid

@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  let statusFilter = "pending";
+  let statusFilter = "in_progress";
   let selected = null;
   let items = [];
 
@@ -50,7 +50,7 @@
     });
   }
 
-  const statusText = (status) => ({pending: "待审核", in_progress: "审核中", completed: "已完成"}[status] || status);
+  const statusText = (status) => ({in_progress: "审核中", completed: "已完成"}[status] || status);
 
   function renderEditor() {
     if (!selected) return;
@@ -59,8 +59,12 @@
     document.getElementById("direct-review-title").textContent =
       `录音 ${selected.recording_id} · 标注员 ${selected.annotator}`;
     document.getElementById("direct-review-audio").src = `/media/${encodeURIComponent(selected.recording_id)}.wav`;
+    const systemReview = selected.review_method === "cer";
+    const reviewerText = systemReview
+      ? ` · 系统 CER 自动通过${Number.isFinite(selected.cer_score) ? `（${(selected.cer_score * 100).toFixed(2)}%）` : ""}`
+      : (selected.reviewed_by ? ` · 最近审核人：${selected.reviewed_by}` : "");
     document.getElementById("direct-review-status").textContent =
-      `状态：${statusText(selected.review_status)}${selected.assigned_to ? ` · 审核人：${selected.assigned_to}` : ""}`;
+      `状态：${statusText(selected.review_status)}${reviewerText}`;
     document.getElementById("direct-review-segments").innerHTML = `
       <table class="direct-review-table"><thead><tr>
         <th>开始时间</th><th>结束时间</th><th>说话人</th><th>转写文本</th><th>方言</th>
@@ -72,16 +76,12 @@
           <td><textarea class="seg-text">${escapeHtml(segment.text)}</textarea></td>
           <td><input class="seg-dialect" type="checkbox" ${segment.is_dialect ? "checked" : ""}></td>
         </tr>`).join("")}</tbody></table>`;
-    const editable = (selected.review_status === "pending" && !selected.assigned_to)
-      || (selected.review_status === "in_progress"
-        && selected.assigned_to === window.DIRECT_REVIEW_ADMIN);
+    const editable = selected.review_status === "in_progress";
     document.querySelectorAll("#direct-review-segments input, #direct-review-segments select, #direct-review-segments textarea")
       .forEach((field) => field.disabled = !editable);
-    document.getElementById("direct-review-claim").hidden = selected.review_status !== "pending";
     document.getElementById("direct-review-save").hidden = !editable;
     document.getElementById("direct-review-complete").hidden = !editable;
-    document.getElementById("direct-review-reopen").hidden = selected.review_status !== "completed"
-      || selected.reviewed_by !== window.DIRECT_REVIEW_ADMIN;
+    document.getElementById("direct-review-reopen").hidden = selected.review_status !== "completed";
   }
 
   function editedSegments() {
@@ -113,8 +113,6 @@
       document.getElementById("direct-review-empty").hidden = false; loadQueue();
     });
   });
-  document.getElementById("direct-review-claim").addEventListener("click", () => action(
-    "/adjudicate/api/audio-reviews/claim", {method: "POST", body: JSON.stringify({recording_id: selected.recording_id, annotator: selected.annotator})}));
   document.getElementById("direct-review-save").addEventListener("click", () => action(
     `/adjudicate/api/audio-reviews/${encodeURIComponent(selected.recording_id)}/${encodeURIComponent(selected.annotator)}`,
     {method: "PUT", body: JSON.stringify({segments: editedSegments()})}));

@@ -295,7 +295,7 @@ def _generate_html(
         playback_rate_html = '''
             <div class="playback-rate-group">
                 <span class="tool-group-label" title="调整播放速度">速度:</span>
-                <select class="playback-rate-select" title="Change audio playback speed (0.5x to 2x)">
+            <select class="playback-rate-select" title="调整音频播放速度（0.5 倍至 2 倍）">
                     <option value="0.5">0.5x</option>
                     <option value="0.75">0.75x</option>
                     <option value="1" selected>1x</option>
@@ -367,22 +367,21 @@ def _generate_html(
 
                     <!-- Zoom controls -->
                     <div class="zoom-group">
-                        <button type="button" class="zoom-btn" data-action="zoom-in" title="Zoom in to see more detail. Keyboard shortcut: + or =">+</button>
-                        <button type="button" class="zoom-btn" data-action="zoom-out" title="Zoom out to see more of the audio. Keyboard shortcut: -">-</button>
-                        <button type="button" class="zoom-btn" data-action="zoom-fit" title="在窗口中显示完整音频。快捷键：0">适应窗口</button>
+                        <button type="button" class="zoom-btn" data-action="zoom-in" title="放大查看更多细节。快捷键：+ 或 =">+</button>
+                        <button type="button" class="zoom-btn" data-action="zoom-out" title="缩小以查看更多音频。快捷键：-">-</button>
                     </div>
 
                     <!-- Segment controls -->
                     <div class="segment-group">
-                        <button type="button" class="segment-btn" data-action="set-start" title="Mark the start of a new segment at the current playback position. Keyboard shortcut: [">[</button>
-                        <button type="button" class="segment-btn" data-action="set-end" title="Mark the end of a new segment at the current playback position. Keyboard shortcut: ]">]</button>
-                        <button type="button" class="segment-btn" data-action="create-segment" title="Create a segment from the marked start and end positions. Keyboard shortcut: Enter">新建片段</button>
-                        <button type="button" class="segment-btn delete-btn" data-action="delete-segment" title="Delete the currently selected segment. Keyboard shortcut: Delete or Backspace" disabled>删除</button>
+                        <button type="button" class="segment-btn" data-action="set-start" title="在当前播放位置标记新片段的开始时间。快捷键：[">[</button>
+                        <button type="button" class="segment-btn" data-action="set-end" title="在当前播放位置标记新片段的结束时间。快捷键：]">]</button>
+                        <button type="button" class="segment-btn" data-action="create-segment" title="根据标记的开始和结束时间创建片段。快捷键：Enter">新建片段</button>
+                        <button type="button" class="segment-btn delete-btn" data-action="delete-segment" title="删除当前选中的片段。快捷键：Delete 或 Backspace" disabled>删除</button>
                     </div>
 
                     <!-- Segment count -->
                     <div class="count-group">
-                        <span class="segment-count" title="Number of segments you have created">片段数： <span class="count-value">0</span></span>
+                        <span class="segment-count" title="已创建的片段数量">片段数： <span class="count-value">0</span></span>
                     </div>
 
                     <!-- Help toggle button -->
@@ -412,7 +411,7 @@ def _generate_html(
                                 <li><strong>[ ]</strong> - 标记片段开始/结束</li>
                                 <li><strong>Enter</strong> - 从标记创建片段</li>
                                 <li><strong>Delete</strong> - 删除选中的片段</li>
-                                <li><strong>+/-/0</strong> - 放大/缩小/适应窗口</li>
+                                <li><strong>+/-</strong> - 放大/缩小波形</li>
                                 <li><strong>← →</strong> - 跳过 5s (Shift: 30s)</li>
                             </ul>
                         </div>
@@ -629,7 +628,6 @@ def _generate_html(
                                 var action = this.dataset.action;
                                 if (action === 'zoom-in') manager.zoomIn();
                                 else if (action === 'zoom-out') manager.zoomOut();
-                                else if (action === 'zoom-fit') manager.zoomToFit();
                             }});
                         }});
 
@@ -715,22 +713,21 @@ def _generate_keybindings(labels: List[Dict[str, Any]], mode: str) -> List[Tuple
     keybindings = []
 
     # Playback shortcuts
-    keybindings.append(("Space", "Play/Pause"))
-    keybindings.append(("←/→", "Seek 5 seconds"))
+    keybindings.append(("空格键", "播放/暂停"))
+    keybindings.append(("←/→", "前后跳转 5 秒"))
 
     # Label shortcuts (for label/both modes)
     if mode in ['label', 'both']:
         for label in labels:
             if label.get("key_value"):
-                keybindings.append((label["key_value"], f"Select: {label['name']}"))
+                keybindings.append((label["key_value"], f"选择：{label['name']}"))
 
     # Segment shortcuts
-    keybindings.append(("[/]", "Set segment start/end"))
-    keybindings.append(("Enter", "Create segment"))
-    keybindings.append(("Del", "Delete segment"))
+    keybindings.append(("[/]", "设置片段开始/结束时间"))
+    keybindings.append(("Enter", "创建片段"))
+    keybindings.append(("Delete", "删除片段"))
 
     # Zoom shortcuts
-    keybindings.append(("+/-", "Zoom in/out"))
-    keybindings.append(("0", "Fit to view"))
+    keybindings.append(("+/-", "放大/缩小"))
 
     return keybindings

@@ -47,7 +47,7 @@ class WaveformService:
     DEFAULT_CLIENT_FALLBACK_MAX_DURATION = 1800  # 30 minutes in seconds
 
     # Waveform generation settings
-    WAVEFORM_ZOOM_LEVEL = 256  # Samples per pixel
+    WAVEFORM_ZOOM_LEVEL = 128  # Samples per pixel
     WAVEFORM_BITS = 8  # 8-bit resolution
 
     def __init__(
@@ -134,7 +134,8 @@ class WaveformService:
         Returns:
             MD5 hash of the path as cache key
         """
-        return hashlib.md5(audio_path.encode('utf-8')).hexdigest()
+        cache_identity = f"{audio_path}|z={self.WAVEFORM_ZOOM_LEVEL}|b={self.WAVEFORM_BITS}"
+        return hashlib.md5(cache_identity.encode('utf-8')).hexdigest()
 
     def _get_waveform_cache_path(self, audio_path: str) -> str:
         """

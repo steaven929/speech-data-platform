@@ -35,11 +35,6 @@ from datetime import timedelta
 from flask import Flask, session, render_template, request, redirect, url_for, jsonify, make_response
 import time
 import uuid
-from pathlib import Path
-import shutil
-import tempfile
-import threading
-from werkzeug.utils import secure_filename
 
 # Import from the main flask_server.py module
 from potato.flask_server import (
@@ -1785,6 +1780,96 @@ def _check_required_or_block(user_state, instance_id: str):
     return None
 
 
+def _explicit_submission_required() -> bool:
+    return bool((config.get("annotation_submission") or {}).get(
+        "require_explicit_submit", False
+    ))
+
+
+def _cer_review_config() -> dict:
+    submission = config.get("annotation_submission") or {}
+    cer_config = submission.get("cer_review") or {}
+    return cer_config if cer_config.get("enabled", False) else {}
+
+
+def _original_audio_segments(instance_id: str) -> list[dict]:
+    try:
+        item = get_item_state_manager().get_item(str(instance_id))
+        data = item.get_data()
+        segments = data.get("segments", []) if isinstance(data, dict) else []
+        return [segment for segment in segments if isinstance(segment, dict)]
+    except (KeyError, TypeError, ValueError):
+        return []
+
+
+def _submitted_audio_segments(user_state, instance_id: str) -> list[dict]:
+    from potato.audio_cer_review import parse_annotation_segments
+    labels = user_state.instance_id_to_label_to_value.get(str(instance_id), {})
+    for label, value in labels.items():
+        if (getattr(label, "get_schema", lambda: "")() == "transcript_segments"
+                and getattr(label, "get_name", lambda: "")() == "_data"):
+            return parse_annotation_segments(value)
+    return []
+
+
+def _is_unchanged_from_pretranscript(user_state, instance_id: str) -> bool:
+    from potato.audio_cer_review import normalize_cer_text, segments_text
+    original = normalize_cer_text(segments_text(_original_audio_segments(instance_id)))
+    submitted = normalize_cer_text(segments_text(
+        _submitted_audio_segments(user_state, instance_id)))
+    return bool(original) and original == submitted
+
+
+def _run_cer_auto_review(instance_id: str) -> dict:
+    from potato.audio_cer_review import find_matching_submissions
+    cer_config = _cer_review_config()
+    threshold = float(cer_config.get("max_pair_cer", 0.05))
+    matched, comparisons = find_matching_submissions(
+        str(instance_id), get_user_state_manager(), threshold)
+    completed = _get_direct_audio_review_store().reconcile_auto_matches(
+        str(instance_id), matched, comparisons, threshold)
+    return {
+        "action": "auto_completed" if completed else "pending",
+        "matched_annotators": completed,
+        "threshold": threshold,
+        "comparisons": comparisons,
+    }
+
+
+def _check_explicit_submit_or_block(user_state, instance_id: str):
+    """Block forward navigation until the current item is formally submitted."""
+    if _explicit_submission_required() and not user_state.is_submitted(instance_id):
+        message = "请先提交当前标注，再前往下一条。"
+        if request.is_json:
+            return jsonify({"status": "submission_required", "message": message}), 409
+        return redirect(url_for("annotate"))
+    return None
+
+
+def _validate_explicit_audio_submission(user_state, instance_id: str) -> list[str]:
+    """Validate minimum audio segment counts against the just-saved draft."""
+    errors = []
+    labels = user_state.instance_id_to_label_to_value.get(instance_id, {})
+    for scheme in config.get("annotation_schemes", []):
+        if scheme.get("annotation_type") != "audio_annotation":
+            continue
+        minimum = int(scheme.get("min_segments", 1) or 0)
+        raw_value = None
+        for label, value in labels.items():
+            if (hasattr(label, "get_schema") and label.get_schema() == scheme.get("name")
+                    and label.get_name() == "_data"):
+                raw_value = value
+                break
+        try:
+            payload = json.loads(raw_value) if isinstance(raw_value, str) else (raw_value or {})
+            segments = payload.get("segments", []) if isinstance(payload, dict) else []
+        except (TypeError, ValueError):
+            segments = []
+        if len(segments) < minimum:
+            errors.append(f"{scheme.get('name', '音频标注')} 至少需要 {minimum} 个片段")
+    return errors
+
+
 def _ibws_check_and_advance(user_state) -> bool:
     """Check if IBWS round is complete and advance to next round if so.
 
@@ -2002,6 +2087,9 @@ def annotate():
         logger.debug(f"Moving to next instance for user: {username}")
         # Check required annotations before allowing forward navigation
         current_id = user_state.get_current_instance_id()
+        block_response = _check_explicit_submit_or_block(user_state, current_id)
+        if block_response is not None:
+            return block_response
         block_response = _check_required_or_block(user_state, current_id)
         if block_response is not None:
             return block_response
@@ -2045,6 +2133,9 @@ def annotate():
             target_index = int(go_to_value)
             if target_index > user_state.current_instance_index:
                 current_id = user_state.get_current_instance_id()
+                block_response = _check_explicit_submit_or_block(user_state, current_id)
+                if block_response is not None:
+                    return block_response
                 block_response = _check_required_or_block(user_state, current_id)
                 if block_response is not None:
                     return block_response
@@ -2060,6 +2151,9 @@ def annotate():
     elif action == "jump_to_unannotated":
         # Check required annotations before jumping forward
         current_id = user_state.get_current_instance_id()
+        block_response = _check_explicit_submit_or_block(user_state, current_id)
+        if block_response is not None:
+            return block_response
         block_response = _check_required_or_block(user_state, current_id)
         if block_response is not None:
             return block_response
@@ -2899,154 +2993,6 @@ def admin_export_annotation_data_sqlite():
     )
 
 
-_audio_import_batches = {}
-_audio_import_batches_lock = threading.RLock()
-_AUDIO_IMPORT_MAX_FILES = 200
-_AUDIO_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_AUDIO_IMPORT_TOKEN_TTL_SECONDS = 30 * 60
-
-
-def _audio_import_task_path(path_value):
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return Path(config.get("task_dir", ".")) / path
-
-
-def _audio_import_data_file():
-    entries = config.get("data_files") or []
-    if not entries:
-        raise ValueError("当前项目未配置 data_files")
-    first = entries[0]
-    if isinstance(first, dict):
-        first = first.get("path")
-    if not first or Path(str(first)).suffix.lower() != ".json":
-        raise ValueError("批量导入需要首个 data_files 为 JSON 文件")
-    return _audio_import_task_path(first)
-
-
-def _cleanup_expired_audio_imports():
-    cutoff = time.time() - _AUDIO_IMPORT_TOKEN_TTL_SECONDS
-    expired = []
-    with _audio_import_batches_lock:
-        for token, batch in list(_audio_import_batches.items()):
-            if batch["created_at"] < cutoff:
-                expired.append(_audio_import_batches.pop(token))
-    for batch in expired:
-        shutil.rmtree(batch["temp_dir"], ignore_errors=True)
-
-
-def _fill_and_persist_coverage_assignments():
-    """Fill all configured user capacity and persist users that changed."""
-    user_manager = get_user_state_manager()
-    users = user_manager.get_all_users()
-    report = get_item_state_manager().fill_assignments_to_coverage(users)
-    changed = set(report.get("assignments_by_user", {}))
-    if changed and hasattr(user_manager, "save_user_state"):
-        for user_state in users:
-            user_id = str(getattr(user_state, "user_id", user_state.get_user_id()))
-            if user_id in changed:
-                user_manager.save_user_state(user_state)
-    return report
-
-
-@app.route("/admin/api/audio-import/preview", methods=["POST"])
-@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
-def admin_audio_import_preview():
-    """Stage and validate one legacy XLS plus matching WAV uploads."""
-    from potato import admin_audio_import
-
-    _cleanup_expired_audio_imports()
-    excel = request.files.get("excel")
-    audio_files = request.files.getlist("audio")
-    if excel is None or not excel.filename:
-        return jsonify({"error": "请选择原始 .xls 文件"}), 400
-    if Path(excel.filename).suffix.lower() != ".xls":
-        return jsonify({"error": "Excel 必须是原始 .xls 格式"}), 400
-    if not audio_files:
-        return jsonify({"error": "请至少选择一条 WAV 音频"}), 400
-    if len(audio_files) > _AUDIO_IMPORT_MAX_FILES:
-        return jsonify({"error": f"一次最多导入 {_AUDIO_IMPORT_MAX_FILES} 条音频"}), 400
-    if request.content_length and request.content_length > _AUDIO_IMPORT_MAX_BYTES:
-        return jsonify({"error": "上传文件总体积超过 2 GB"}), 413
-
-    temp_dir = Path(tempfile.mkdtemp(prefix="potato-audio-import-"))
-    try:
-        excel_path = temp_dir / "transcript.xls"
-        excel.save(excel_path)
-        saved_audio = []
-        seen_names = set()
-        for uploaded in audio_files:
-            filename = secure_filename(uploaded.filename or "")
-            if not filename or Path(filename).suffix.lower() != ".wav":
-                raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
-            if filename in seen_names:
-                raise ValueError(f"上传列表中存在重名音频：{filename}")
-            seen_names.add(filename)
-            destination = temp_dir / filename
-            uploaded.save(destination)
-            saved_audio.append(destination)
-
-        rows = admin_audio_import.parse_legacy_xls(excel_path)
-        item_manager = get_item_state_manager()
-        preview = admin_audio_import.preview_rows(
-            rows,
-            saved_audio,
-            set(item_manager.get_instance_ids()),
-            _audio_import_task_path(config.get("media_directory", "media")),
-        )
-        token = uuid.uuid4().hex
-        with _audio_import_batches_lock:
-            _audio_import_batches[token] = {
-                "created_at": time.time(),
-                "temp_dir": temp_dir,
-                "preview": preview,
-            }
-        return jsonify({"token": token, "preview": preview.to_dict()})
-    except (ValueError, RuntimeError) as exc:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({"error": str(exc)}), 400
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        logger.exception("Failed to preview admin audio import")
-        return jsonify({"error": "解析导入文件失败，请检查文件格式"}), 500
-
-
-@app.route("/admin/api/audio-import/confirm", methods=["POST"])
-@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
-def admin_audio_import_confirm():
-    """Commit a previously validated batch exactly once."""
-    from potato.admin_audio_import import commit_preview
-
-    token = str((request.get_json(silent=True) or {}).get("token", "")).strip()
-    with _audio_import_batches_lock:
-        batch = _audio_import_batches.pop(token, None)
-    if batch is None:
-        return jsonify({"error": "导入预览已失效，请重新预览"}), 404
-
-    try:
-        imported = commit_preview(
-            batch["preview"],
-            _audio_import_data_file(),
-            _audio_import_task_path(config.get("media_directory", "media")),
-            get_item_state_manager(),
-        )
-        coverage = _fill_and_persist_coverage_assignments()
-        return jsonify({
-            "success": True,
-            "imported_ids": [item["id"] for item in imported],
-            "imported_count": len(imported),
-            "coverage": coverage,
-        })
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception:
-        logger.exception("Failed to commit admin audio import")
-        return jsonify({"error": "导入失败，未完成写入"}), 500
-    finally:
-        shutil.rmtree(batch["temp_dir"], ignore_errors=True)
-
-
 @app.route("/admin/api/overview", methods=["GET"])
 def admin_api_overview():
     """
@@ -3110,16 +3056,6 @@ def admin_api_instances():
     )
     if isinstance(result, tuple):
         return jsonify(result[0]), result[1]
-    coverage = get_item_state_manager().get_assignment_coverage(
-        get_user_state_manager().get_all_users()
-    )
-    for instance in result.get("instances", []):
-        row = coverage["items"].get(instance["id"], {})
-        instance["assigned_annotators"] = row.get("assigned_users", [])
-        instance["assignment_target"] = row.get("target", -1)
-        instance["assignment_missing"] = row.get("missing", 0)
-    result.setdefault("summary", {})["assignment_shortfall"] = coverage["total_shortfall"]
-    result["summary"]["items_below_assignment_target"] = coverage["items_below_target"]
     return jsonify(result)
 
 
@@ -3137,10 +3073,9 @@ def admin_api_config():
     """
     if request.method == "GET":
         # Return current configuration
-        item_manager = get_item_state_manager()
         response_data = {
             "max_annotations_per_user": config.get("max_annotations_per_user", -1),
-            "max_annotations_per_item": item_manager.max_annotations_per_item,
+            "max_annotations_per_item": config.get("max_annotations_per_item", -1),
             "assignment_strategy": config.get("assignment_strategy", "fixed_order"),
             "annotation_task_name": config.get("annotation_task_name", "Unknown"),
             "debug_mode": config.get("debug", False)
@@ -3161,24 +3096,6 @@ def admin_api_config():
         result = admin_dashboard.update_config(config_updates)
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
-        if result.get("status") == "success":
-            item_manager = get_item_state_manager()
-            if "max_annotations_per_item" in config_updates:
-                target = int(config_updates["max_annotations_per_item"])
-                item_manager.max_annotations_per_item = target
-                item_manager.config["max_annotations_per_item"] = target
-                item_manager.config["num_annotators_per_item"] = target
-                config["num_annotators_per_item"] = target
-            if "max_annotations_per_user" in config_updates:
-                item_manager.config["max_annotations_per_user"] = int(
-                    config_updates["max_annotations_per_user"]
-                )
-            if "assignment_strategy" in config_updates:
-                from potato.item_state_management import AssignmentStrategy
-                item_manager.assignment_strategy = AssignmentStrategy.fromstr(
-                    config_updates["assignment_strategy"]
-                )
-            result["coverage"] = _fill_and_persist_coverage_assignments()
         return jsonify(result)
 
 
@@ -3212,14 +3129,12 @@ def admin_api_set_user_instances(username):
         max_instances = current_count
 
     user_state.set_max_assignments(max_instances)
-    coverage = _fill_and_persist_coverage_assignments()
 
     return jsonify({
         "success": True,
         "username": username,
         "max_instances": max_instances,
-        "current_annotations": current_count,
-        "coverage": coverage,
+        "current_annotations": current_count
     })
 
 
@@ -4957,6 +4872,9 @@ def update_instance():
             logger.error(f"User state not found for user: {username}")
             return jsonify({"status": "error", "message": "User state not found"})
 
+        explicit_submit = _explicit_submission_required()
+        submit_requested = request.json.get("submit") is True
+
         # Synthetic phase-page saves use a sentinel instance ID from annotation.js.
         # They should be routed by the current user phase instead of assignment checks.
         is_phase_page_update = instance_id == "__phase_page__"
@@ -5006,8 +4924,10 @@ def update_instance():
         # Capture whether this instance already had annotations BEFORE we mutate
         # state, so the webhook below can correctly distinguish annotation.created
         # from annotation.updated. F-032.
-        _had_prior_annotation = bool(
-            getattr(user_state, "instance_id_to_label_to_value", {}).get(instance_id)
+        _had_prior_annotation = (
+            user_state.is_submitted(instance_id)
+            if explicit_submit
+            else bool(getattr(user_state, "instance_id_to_label_to_value", {}).get(instance_id))
         )
 
         # Check if this is the frontend format (annotations, span_annotations, link_annotations, event_annotations)
@@ -5493,14 +5413,60 @@ def update_instance():
         if user_state.annotation_history:
             user_state.annotation_history[-1].server_processing_time_ms = processing_time_ms
 
-        # Register annotator with item state manager for tracking
-        get_item_state_manager().register_annotator(instance_id, username)
+        auto_review_result = None
+        if explicit_submit and submit_requested:
+            validation_errors = _validate_explicit_audio_submission(user_state, instance_id)
+            if validation_errors:
+                get_user_state_manager().save_user_state(user_state)
+                return jsonify({
+                    "status": "validation_error",
+                    "message": "；".join(validation_errors),
+                    "submitted": False,
+                    "annotation_status": "in_progress",
+                    "submitted_count": user_state.get_annotation_count(),
+                }), 400
+            cer_config = _cer_review_config()
+            if (cer_config.get("reject_unchanged_source", False)
+                    and _is_unchanged_from_pretranscript(user_state, instance_id)):
+                reason = "提交文本与原预转写文本完全一致，系统已打回并移至任务队列末尾，请重新人工标注。"
+                user_state.defer_instance_for_retry(instance_id)
+                get_user_state_manager().save_user_state(user_state)
+                if "annotations" in request.json:
+                    _write_readable_audio_annotation(
+                        username, instance_id, request.json.get("annotations", {}))
+                _get_direct_audio_review_store().record_auto_rejection(
+                    instance_id, username, reason)
+                return jsonify({
+                    "status": "rejected",
+                    "message": reason,
+                    "submission_rejected": True,
+                    "retry_queued": True,
+                    "submitted": False,
+                    "annotation_status": "in_progress",
+                    "submitted_count": user_state.get_annotation_count(),
+                    "next_instance_id": user_state.get_current_instance_id(),
+                    "qc_result": {
+                        "type": "cer_unchanged_source",
+                        "action": "rejected",
+                        "cer": 0.0,
+                    },
+                })
+            user_state.mark_submitted(instance_id)
+
+        formal_save = not explicit_submit or submit_requested
+
+        # Draft saves must not count as completed work in explicit-submit tasks.
+        if formal_save:
+            get_item_state_manager().register_annotator(instance_id, username)
 
         # Save state
         get_user_state_manager().save_user_state(user_state)
         if "annotations" in request.json:
             _write_readable_audio_annotation(username, instance_id, request.json.get("annotations", {}))
         logger.debug(f"User state saved for {username}")
+
+        if _cer_review_config() and user_state.is_submitted(instance_id):
+            auto_review_result = _run_cer_auto_review(instance_id)
 
         # Emit webhook events for annotation save
         from potato.webhooks import get_webhook_emitter
@@ -5510,7 +5476,7 @@ def update_instance():
             build_annotation_payload, build_item_fully_annotated_payload,
         )
         _wh = get_webhook_emitter()
-        if _wh:
+        if _wh and formal_save:
             _evt = ANNOTATION_UPDATED if _had_prior_annotation else ANNOTATION_CREATED
             _wh.emit(
                 _evt,
@@ -5552,10 +5518,7 @@ def update_instance():
             try:
                 assigned = set(user_state.get_assigned_instance_ids() or [])
                 if assigned and not _had_prior_annotation:
-                    annotated = (
-                        set(getattr(user_state, "instance_id_to_label_to_value", {}).keys())
-                        | set(getattr(user_state, "instance_id_to_span_to_value", {}).keys())
-                    ) & assigned
+                    annotated = set(user_state.get_annotated_instance_ids()) & assigned
                     if assigned.issubset(annotated):
                         from potato.webhooks.events import (
                             TASK_COMPLETED, build_task_completed_payload,
@@ -5607,11 +5570,24 @@ def update_instance():
         # Get performance metrics for response
         performance_metrics = user_state.get_performance_metrics()
 
+        has_draft = bool(
+            user_state.instance_id_to_label_to_value.get(instance_id)
+            or user_state.instance_id_to_span_to_value.get(instance_id)
+            or user_state.instance_id_to_link_to_value.get(instance_id)
+            or user_state.instance_id_to_event_to_value.get(instance_id)
+        )
+        submitted = user_state.is_submitted(instance_id) if explicit_submit else user_state.has_annotated(instance_id)
+        annotation_status = "labeled" if submitted else ("in_progress" if has_draft else "unlabeled")
         response_data = {
             "status": "success",
             "processing_time_ms": processing_time_ms,
-            "performance_metrics": performance_metrics
+            "performance_metrics": performance_metrics,
+            "submitted": submitted,
+            "annotation_status": annotation_status,
+            "submitted_count": user_state.get_annotation_count(),
         }
+        if auto_review_result is not None:
+            response_data["auto_review"] = auto_review_result
 
         # Include quality control result if present
         if qc_result:
@@ -7881,18 +7857,6 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/poststudy", "poststudy", poststudy, methods=["GET", "POST"])
     app.add_url_rule("/done", "done", done, methods=["GET", "POST"])
     app.add_url_rule("/admin", "admin", admin, methods=["GET"])
-    app.add_url_rule(
-        "/admin/api/audio-import/preview",
-        "admin_audio_import_preview",
-        admin_audio_import_preview,
-        methods=["POST"],
-    )
-    app.add_url_rule(
-        "/admin/api/audio-import/confirm",
-        "admin_audio_import_confirm",
-        admin_audio_import_confirm,
-        methods=["POST"],
-    )
     app.add_url_rule("/progress", "annotator_progress", annotator_progress, methods=["GET"])
     app.add_url_rule("/progress/api/summary", "annotator_progress_summary", annotator_progress_summary, methods=["GET"])
 
@@ -8022,7 +7986,6 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/adjudicate/api/next", "adjudicate_api_next", adjudicate_api_next, methods=["GET"])
     app.add_url_rule("/adjudicate/api/similar/<instance_id>", "adjudicate_api_similar", adjudicate_api_similar, methods=["GET"])
     app.add_url_rule("/adjudicate/api/audio-reviews", "direct_audio_review_queue", direct_audio_review_queue, methods=["GET"])
-    app.add_url_rule("/adjudicate/api/audio-reviews/claim", "direct_audio_review_claim", direct_audio_review_claim, methods=["POST"])
     app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>", "direct_audio_review_update", direct_audio_review_update, methods=["PUT"])
     app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>/complete", "direct_audio_review_complete", direct_audio_review_complete, methods=["POST"])
     app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>/reopen", "direct_audio_review_reopen", direct_audio_review_reopen, methods=["POST"])
@@ -8255,9 +8218,15 @@ def _is_authorized_adjudicator(username, adj_mgr):
     return get_rbac_manager().check(Permission.ADJUDICATE, request, session)
 
 
+_direct_audio_review_stores = {}
+
+
 def _get_direct_audio_review_store():
     from potato.direct_audio_review import DirectAudioReviewStore
-    return DirectAudioReviewStore(config.get("output_annotation_dir", "annotation_output"))
+    output_dir = os.path.abspath(config.get("output_annotation_dir", "annotation_output"))
+    if output_dir not in _direct_audio_review_stores:
+        _direct_audio_review_stores[output_dir] = DirectAudioReviewStore(output_dir)
+    return _direct_audio_review_stores[output_dir]
 
 
 def _direct_review_state_response(state):
@@ -8278,21 +8247,6 @@ def direct_audio_review_queue():
     if status and status != "all":
         records = [row for row in records if row["review_status"] == status]
     return jsonify({"items": records, "total": len(records)})
-
-
-@app.route('/adjudicate/api/audio-reviews/claim', methods=['POST'])
-def direct_audio_review_claim():
-    authorized, username, error = _check_adjudicator_auth()
-    if not authorized:
-        return error
-    from potato.direct_audio_review import ReviewConflict
-    data = request.get_json(silent=True) or {}
-    try:
-        state = _get_direct_audio_review_store().claim(
-            str(data.get("recording_id", "")), str(data.get("annotator", "")), username)
-    except ReviewConflict as exc:
-        return jsonify({"error": str(exc)}), 409
-    return jsonify(_direct_review_state_response(state))
 
 
 def _validated_audio_segments(data):

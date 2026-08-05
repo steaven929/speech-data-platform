@@ -197,9 +197,9 @@ class TestAudioAnnotationSchema:
         assert "2" in keys
 
         # Should have common keybindings
-        assert "Space" in keys
+        assert "空格键" in keys
         assert "Enter" in keys
-        assert "Del" in keys
+        assert "Delete" in keys
 
     def test_zoom_controls_present(self):
         """Test that zoom controls are generated."""
@@ -216,7 +216,7 @@ class TestAudioAnnotationSchema:
 
         assert 'data-action="zoom-in"' in html
         assert 'data-action="zoom-out"' in html
-        assert 'data-action="zoom-fit"' in html
+        assert 'data-action="zoom-fit"' not in html
 
     def test_playback_controls_present(self):
         """Test that playback controls are generated."""
@@ -438,10 +438,10 @@ class TestKeybindings:
         keybindings = _generate_keybindings(labels, "label")
 
         keys = [k for k, _ in keybindings]
-        assert "Space" in keys
-        assert "Del" in keys
+        assert "空格键" in keys
+        assert "Delete" in keys
         assert "+/-" in keys
-        assert "0" in keys
+        assert "0" not in keys
         assert "Enter" in keys
 
 

@@ -2063,6 +2063,8 @@ def get_current_page_html(config, username):
         'annotation_instructions': config.get('annotation_instructions', ''),
         'annotation_status': 'unlabeled',
         'instance_has_annotations': False,
+        'explicit_submission_required': False,
+        'is_submitted': False,
         'can_go_back': usm.can_user_go_back(username),
         'jumping_to_id_disabled': config.get('jumping_to_id_disabled', False),
     }
@@ -2385,8 +2387,20 @@ def render_page_with_annotations(username: str):
         total_count = min(total_count, max_assignments)
 
     # Determine annotation status for the status badge (three-state)
+    explicit_submission_required = bool(
+        (config.get("annotation_submission") or {}).get("require_explicit_submit", False)
+    )
+    is_submitted = user_state.is_submitted(instance_id) if explicit_submission_required else False
+    has_draft = bool(
+        user_state.instance_id_to_label_to_value.get(instance_id)
+        or user_state.instance_id_to_span_to_value.get(instance_id)
+        or user_state.instance_id_to_link_to_value.get(instance_id)
+        or user_state.instance_id_to_event_to_value.get(instance_id)
+    )
     annotation_status = "unlabeled"
-    if user_state.has_annotated(instance_id):
+    if explicit_submission_required:
+        annotation_status = "labeled" if is_submitted else ("in_progress" if has_draft else "unlabeled")
+    elif user_state.has_annotated(instance_id):
         unsatisfied = _instance_meets_required_annotation_rules(user_state, instance_id)
         annotation_status = "labeled" if not unsatisfied else "in_progress"
     instance_has_annotations = (annotation_status != "unlabeled")
@@ -2593,6 +2607,8 @@ def render_page_with_annotations(username: str):
         # Annotation status indicator (three-state: labeled/in_progress/unlabeled)
         annotation_status=annotation_status,
         instance_has_annotations=instance_has_annotations,
+        explicit_submission_required=explicit_submission_required,
+        is_submitted=is_submitted,
         # if this is an annotation page
         is_annotation_page=is_annotation_page,
         # IBWS round info (for round banner)
@@ -4514,4 +4530,3 @@ def main():
 # Main entry point
 if __name__ == "__main__":
     main()
-

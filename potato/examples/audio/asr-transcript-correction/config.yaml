@@ -1,6 +1,15 @@
 annotation_task_name: "靖江热线 ASR 转写校对"
 admin_ui_language: "zh"
 
+annotation_submission:
+  require_explicit_submit: true
+  cer_review:
+    enabled: true
+    max_pair_cer: 0.05
+    min_matching_submissions: 2
+    reject_unchanged_source: true
+    rejected_item_position: queue_end
+
 ui_language:
   html_lang: "zh-CN"
   html_dir: "ltr"
