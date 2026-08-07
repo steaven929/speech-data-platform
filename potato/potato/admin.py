@@ -107,6 +107,7 @@ class InstanceData:
     id: str
     text: str
     displayed_text: str
+    category: str
     annotation_count: int
     completion_percentage: float
     most_frequent_label: Optional[str]
@@ -400,7 +401,8 @@ class AdminDashboard:
 
     def get_instances_data(self, page: int = 1, page_size: int = 25,
                           sort_by: str = "annotation_count", sort_order: str = "desc",
-                          filter_completion: Optional[str] = None) -> Dict[str, Any]:
+                          filter_completion: Optional[str] = None,
+                          filter_category: Optional[str] = None) -> Dict[str, Any]:
         """
         Get paginated instances data with sorting and filtering.
 
@@ -410,6 +412,7 @@ class AdminDashboard:
             sort_by: Field to sort by (annotation_count, completion_percentage, disagreement, id)
             sort_order: Sort order (asc, desc)
             filter_completion: Filter by completion status (completed, incomplete, all)
+            filter_category: Filter by category (exact match; empty category -> 未分类)
 
         Returns:
             Dict containing paginated instances data
@@ -427,6 +430,7 @@ class AdminDashboard:
                 item_id = item.get_id()
                 annotators = ism.get_annotators_for_item(item_id)
                 annotation_count = len(annotators) if annotators else 0
+                category = (item.get_data() or {}).get("category", "未分类") or "未分类"
 
                 # Calculate completion percentage
                 max_annotations = config.get("max_annotations_per_item", -1)
@@ -445,6 +449,7 @@ class AdminDashboard:
                     id=item_id,
                     text=item.get_text(),
                     displayed_text=item.get_displayed_text(),
+                    category=category,
                     annotation_count=annotation_count,
                     completion_percentage=completion_percentage,
                     most_frequent_label=most_frequent_label,
@@ -460,6 +465,8 @@ class AdminDashboard:
                 instances_data = [i for i in instances_data if i.completion_percentage >= 100]
             elif filter_completion == "incomplete":
                 instances_data = [i for i in instances_data if i.completion_percentage < 100]
+            if filter_category:
+                instances_data = [i for i in instances_data if i.category == filter_category]
 
             # Apply sorting
             reverse = sort_order.lower() == "desc"
@@ -485,6 +492,7 @@ class AdminDashboard:
             for instance in paginated_instances:
                 serialized_instances.append({
                     "id": instance.id,
+                    "category": instance.category,
                     "text": instance.text[:100] + "..." if len(instance.text) > 100 else instance.text,
                     "displayed_text": instance.displayed_text[:100] + "..." if len(instance.displayed_text) > 100 else instance.displayed_text,
                     "annotation_count": instance.annotation_count,
@@ -496,8 +504,14 @@ class AdminDashboard:
                     "average_time_per_annotation": self._format_seconds(instance.average_time_per_annotation) if instance.average_time_per_annotation else None
                 })
 
+            categories = sorted({
+                (item.get_data() or {}).get("category", "未分类") or "未分类"
+                for item in items
+            })
+
             return {
                 "instances": serialized_instances,
+                "categories": categories,
                 "pagination": {
                     "page": page,
                     "page_size": page_size,

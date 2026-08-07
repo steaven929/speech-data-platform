@@ -35,6 +35,11 @@ from datetime import timedelta
 from flask import Flask, session, render_template, request, redirect, url_for, jsonify, make_response
 import time
 import uuid
+import shutil
+import tempfile
+import threading
+from pathlib import Path
+from werkzeug.utils import secure_filename
 
 # Import from the main flask_server.py module
 from potato.flask_server import (
@@ -76,6 +81,7 @@ from potato.adjudication import get_adjudication_manager, AdjudicationDecision
 from potato.diversity_manager import get_diversity_manager
 
 import os
+from collections import defaultdict
 from potato.item_state_management import Item
 from potato.flask_server import get_displayed_text
 
@@ -3036,6 +3042,7 @@ def admin_api_instances():
         sort_by: Sort field (annotation_count, completion_percentage, disagreement, id, average_time)
         sort_order: Sort order (asc, desc)
         filter_completion: Filter by completion (completed, incomplete, all)
+        filter_category: Filter by category (exact match)
 
     Returns:
         flask.Response: JSON response with paginated instances data
@@ -3046,17 +3053,457 @@ def admin_api_instances():
     sort_by = request.args.get('sort_by', 'annotation_count')
     sort_order = request.args.get('sort_order', 'desc')
     filter_completion = request.args.get('filter_completion')
+    filter_category = request.args.get('filter_category')
 
     result = admin_dashboard.get_instances_data(
         page=page,
         page_size=page_size,
         sort_by=sort_by,
         sort_order=sort_order,
-        filter_completion=filter_completion
+        filter_completion=filter_completion,
+        filter_category=filter_category
     )
     if isinstance(result, tuple):
         return jsonify(result[0]), result[1]
+    coverage = get_item_state_manager().get_assignment_coverage(
+        get_user_state_manager().get_all_users()
+    )
+    for instance in result.get("instances", []):
+        row = coverage["items"].get(instance["id"], {})
+        instance["assigned_annotators"] = row.get("assigned_users", [])
+        instance["assignment_target"] = row.get("target", -1)
+        instance["assignment_missing"] = row.get("missing", 0)
+    result.setdefault("summary", {})["assignment_shortfall"] = coverage["total_shortfall"]
+    result["summary"]["items_below_assignment_target"] = coverage["items_below_target"]
     return jsonify(result)
+
+
+@app.route("/admin/api/instances/<instance_id>/category", methods=["POST"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_api_update_instance_category(instance_id):
+    """
+    Update the category (label) of one instance and persist it to items.json.
+
+    JSON Body:
+        category (str): New category value; blank is normalized to 未分类.
+
+    Returns:
+        flask.Response: JSON response with the updated category
+    """
+    payload = request.get_json(silent=True) or {}
+    category = str(payload.get("category", "")).strip() or "未分类"
+
+    item_manager = get_item_state_manager()
+    try:
+        item = item_manager.get_item(instance_id)
+    except KeyError:
+        return jsonify({"error": f"实例 {instance_id} 不存在"}), 404
+
+    item_data = dict(item.get_data() or {})
+    item_data["category"] = category
+    if not item_manager.update_item(instance_id, item_data):
+        return jsonify({"error": f"实例 {instance_id} 不存在"}), 404
+
+    # Persist back to the first JSON data file (same source as batch import).
+    try:
+        data_file = _audio_import_data_file()
+        existing = json.loads(data_file.read_text(encoding="utf-8"))
+        if isinstance(existing, list):
+            for entry in existing:
+                if entry.get("id") == instance_id:
+                    entry["category"] = category
+                    break
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=".items-", suffix=".json", dir=data_file.parent
+            )
+            os.close(fd)
+            Path(tmp_name).write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp_name, data_file)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.error(f"Failed to persist category for {instance_id}: {exc}")
+        return jsonify({"error": f"类别已更新内存但写入失败：{exc}"}), 500
+
+    return jsonify({
+        "success": True,
+        "instance_id": instance_id,
+        "category": category,
+    })
+
+
+def _build_assignment_plan(ism, usm, item_ids, annotator_ids, target):
+    """Compute a batch assignment plan without mutating any state.
+
+    Returns (plan, summary, annotator_states, used_by, cap_by):
+      - plan: list of {"item_id", "existing", "suggested", "full"}
+      - summary: dict with by_annotator counts, new_assignments, unfulfilled
+      - annotator_states: uid -> UserState for every valid selected annotator
+      - used_by / cap_by: current assignment counts / remaining capacity
+    """
+    all_users = usm.get_all_users()
+    coverage = ism.get_assignment_coverage(all_users)
+    coverage_items = coverage.get("items", {})
+
+    valid_ids = set(ism.get_instance_ids())
+    item_ids = [iid for iid in item_ids if iid in valid_ids]
+
+    annotator_states = {}
+    for uid in annotator_ids:
+        state = usm.get_user_state(uid)
+        if state is not None:
+            annotator_states[uid] = state
+
+    used_by = {}
+    cap_by = {}
+    for uid, state in annotator_states.items():
+        assigned = set(state.get_assigned_instance_ids())
+        try:
+            assigned |= state.get_annotated_instance_ids()
+        except (AttributeError, NotImplementedError):
+            pass
+        assigned &= valid_ids
+        used = len(assigned)
+        used_by[uid] = used
+        maximum = state.get_max_assignments()
+        if maximum is None or maximum < 0:
+            cap_by[uid] = None  # unlimited
+        else:
+            cap_by[uid] = max(0, int(maximum) - used)
+
+    plan = []
+    by_annotator = defaultdict(int)
+    unfulfilled = []
+    new_assignments = 0
+    for iid in item_ids:
+        info = coverage_items.get(iid, {})
+        existing = set(info.get("assigned_users", []))
+        deficit = max(0, target - len(existing))
+        chosen = []
+        candidates = [
+            uid for uid in annotator_states
+            if uid not in existing and (cap_by[uid] is None or cap_by[uid] > 0)
+        ]
+        candidates.sort(key=lambda uid: (used_by[uid], uid))
+        for uid in candidates:
+            if len(chosen) >= deficit:
+                break
+            chosen.append(uid)
+            used_by[uid] += 1
+            if cap_by[uid] is not None:
+                cap_by[uid] -= 1
+            by_annotator[uid] += 1
+            new_assignments += 1
+        full = len(existing) + len(chosen) >= target
+        if not full:
+            unfulfilled.append({
+                "item_id": iid,
+                "assigned": len(existing) + len(chosen),
+                "target": target,
+                "reason": "可分配标注员不足",
+            })
+        plan.append({
+            "item_id": iid,
+            "existing": sorted(existing),
+            "suggested": chosen,
+            "full": full,
+        })
+
+    summary = {
+        "selected_count": len(item_ids),
+        "new_assignments": new_assignments,
+        "by_annotator": dict(by_annotator),
+        "unfulfilled": unfulfilled,
+    }
+    return plan, summary, annotator_states, used_by, cap_by
+
+
+@app.route("/admin/api/assignment/batch", methods=["POST"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_api_batch_assignment():
+    """
+    Batch-assign recordings to annotators with a preview/confirm two-step flow.
+
+    JSON Body:
+        item_ids (list[str]): Recordings to cover (required for dry-run plans).
+        annotator_ids (list[str]): Selected annotators.
+        target_per_item (int): Target annotators per recording (default 3).
+        dry_run (bool): True returns the plan without mutating state.
+        plan (list[dict], optional): Pre-adjusted plan [{item_id, suggested}]
+            used when confirming; regenerated server-side if omitted.
+    """
+    payload = request.get_json(silent=True) or {}
+    item_ids = [str(i) for i in (payload.get("item_ids") or [])]
+    annotator_ids = [str(a) for a in (payload.get("annotator_ids") or [])]
+    try:
+        target = int(payload.get("target_per_item", 3))
+    except (TypeError, ValueError):
+        target = 3
+    if target < 1:
+        target = 3
+    dry_run = bool(payload.get("dry_run", True))
+    adjusted = payload.get("plan")
+
+    if not item_ids:
+        return jsonify({"error": "请先圈定需要分配的录音"}), 400
+    if not annotator_ids:
+        return jsonify({"error": "请至少选择一名标注员"}), 400
+
+    ism = get_item_state_manager()
+    usm = get_user_state_manager()
+
+    if dry_run:
+        plan, summary, _, _, _ = _build_assignment_plan(
+            ism, usm, item_ids, annotator_ids, target
+        )
+        return jsonify({
+            "success": True,
+            "dry_run": True,
+            "summary": summary,
+            "plan": plan,
+        })
+
+    # Confirm path: apply the provided (possibly adjusted) plan.
+    if isinstance(adjusted, list) and adjusted:
+        plan_rows = adjusted
+    else:
+        plan_rows, _, _, _, _ = _build_assignment_plan(
+            ism, usm, item_ids, annotator_ids, target
+        )
+
+    annotator_states = {}
+    for uid in annotator_ids:
+        state = usm.get_user_state(uid)
+        if state is not None:
+            annotator_states[uid] = state
+
+    # Validate capacity before applying anything.
+    valid_ids = set(ism.get_instance_ids())
+    errors = []
+    for row in plan_rows:
+        iid = str(row.get("item_id", ""))
+        suggested = [str(a) for a in (row.get("suggested") or [])]
+        if iid not in valid_ids:
+            errors.append(f"录音 {iid} 不存在")
+            continue
+        if len(suggested) > target:
+            errors.append(f"录音 {iid} 分配人数超过目标 {target}")
+            continue
+        seen = set()
+        for uid in suggested:
+            if uid in seen:
+                errors.append(f"录音 {iid} 存在重复标注员 {uid}")
+                break
+            seen.add(uid)
+            state = annotator_states.get(uid)
+            if state is None:
+                errors.append(f"标注员 {uid} 不存在或未选择")
+                continue
+            assigned = set(state.get_assigned_instance_ids())
+            try:
+                assigned |= state.get_annotated_instance_ids()
+            except (AttributeError, NotImplementedError):
+                pass
+            assigned &= valid_ids
+            maximum = state.get_max_assignments()
+            if maximum is not None and maximum >= 0 and len(assigned) + 1 > int(maximum):
+                errors.append(f"标注员 {uid} 已达到配额（{maximum}）")
+    if errors:
+        return jsonify({"error": "分配校验未通过", "details": errors[:50]}), 400
+
+    # Apply assignments.
+    changed = set()
+    applied = 0
+    for row in plan_rows:
+        iid = str(row.get("item_id", ""))
+        if iid not in valid_ids:
+            continue
+        item = ism.get_item(iid)
+        for uid in [str(a) for a in (row.get("suggested") or [])]:
+            state = annotator_states.get(uid)
+            if state is None:
+                continue
+            state.assign_instance(item)
+            changed.add(uid)
+            applied += 1
+
+    saved_users = []
+    for uid in changed:
+        state = annotator_states[uid]
+        try:
+            usm.save_user_state(state)
+            saved_users.append(uid)
+        except Exception as exc:
+            logger.error(f"Failed to save user state for {uid}: {exc}")
+
+    by_annotator = defaultdict(int)
+    for row in plan_rows:
+        for uid in [str(a) for a in (row.get("suggested") or [])]:
+            by_annotator[uid] += 1
+
+    return jsonify({
+        "success": True,
+        "dry_run": False,
+        "summary": {
+            "selected_count": len(plan_rows),
+            "new_assignments": applied,
+            "by_annotator": dict(by_annotator),
+            "saved_users": saved_users,
+        },
+        "plan": plan_rows,
+    })
+
+
+_audio_import_batches = {}
+_audio_import_batches_lock = threading.RLock()
+_AUDIO_IMPORT_MAX_FILES = 200
+_AUDIO_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_AUDIO_IMPORT_TOKEN_TTL_SECONDS = 30 * 60
+
+
+def _audio_import_task_path(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return Path(config.get("task_dir", ".")) / path
+
+
+def _audio_import_data_file():
+    entries = config.get("data_files") or []
+    if not entries:
+        raise ValueError("当前项目未配置 data_files")
+    first = entries[0]
+    if isinstance(first, dict):
+        first = first.get("path")
+    if not first or Path(str(first)).suffix.lower() != ".json":
+        raise ValueError("批量导入需要首个 data_files 为 JSON 文件")
+    return _audio_import_task_path(first)
+
+
+def _cleanup_expired_audio_imports():
+    cutoff = time.time() - _AUDIO_IMPORT_TOKEN_TTL_SECONDS
+    expired = []
+    with _audio_import_batches_lock:
+        for token, batch in list(_audio_import_batches.items()):
+            if batch["created_at"] < cutoff:
+                expired.append(_audio_import_batches.pop(token))
+    for batch in expired:
+        shutil.rmtree(batch["temp_dir"], ignore_errors=True)
+
+
+def _fill_and_persist_coverage_assignments():
+    """Fill all configured user capacity and persist users that changed."""
+    user_manager = get_user_state_manager()
+    users = user_manager.get_all_users()
+    report = get_item_state_manager().fill_assignments_to_coverage(users)
+    changed = set(report.get("assignments_by_user", {}))
+    if changed and hasattr(user_manager, "save_user_state"):
+        for user_state in users:
+            user_id = str(getattr(user_state, "user_id", user_state.get_user_id()))
+            if user_id in changed:
+                user_manager.save_user_state(user_state)
+    return report
+
+
+@app.route("/admin/api/audio-import/preview", methods=["POST"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_audio_import_preview():
+    """Stage and validate one legacy XLS plus matching WAV uploads."""
+    from potato import admin_audio_import
+
+    _cleanup_expired_audio_imports()
+    excel = request.files.get("excel")
+    audio_files = request.files.getlist("audio")
+    if excel is None or not excel.filename:
+        return jsonify({"error": "请选择原始 .xls 文件"}), 400
+    if Path(excel.filename).suffix.lower() != ".xls":
+        return jsonify({"error": "Excel 必须是原始 .xls 格式"}), 400
+    if not audio_files:
+        return jsonify({"error": "请至少选择一条 WAV 音频"}), 400
+    if len(audio_files) > _AUDIO_IMPORT_MAX_FILES:
+        return jsonify({"error": f"一次最多导入 {_AUDIO_IMPORT_MAX_FILES} 条音频"}), 400
+    if request.content_length and request.content_length > _AUDIO_IMPORT_MAX_BYTES:
+        return jsonify({"error": "上传文件总体积超过 2 GB"}), 413
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="potato-audio-import-"))
+    try:
+        excel_path = temp_dir / "transcript.xls"
+        excel.save(excel_path)
+        saved_audio = []
+        seen_names = set()
+        for uploaded in audio_files:
+            filename = secure_filename(uploaded.filename or "")
+            if not filename or Path(filename).suffix.lower() != ".wav":
+                raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
+            if filename in seen_names:
+                raise ValueError(f"上传列表中存在重名音频：{filename}")
+            seen_names.add(filename)
+            destination = temp_dir / filename
+            uploaded.save(destination)
+            saved_audio.append(destination)
+
+        rows = admin_audio_import.parse_legacy_xls(excel_path)
+        rows = admin_audio_import.apply_category_override(
+            rows, request.form.get("category", "")
+        )
+        item_manager = get_item_state_manager()
+        preview = admin_audio_import.preview_rows(
+            rows,
+            saved_audio,
+            set(item_manager.get_instance_ids()),
+            _audio_import_task_path(config.get("media_directory", "media")),
+        )
+        token = uuid.uuid4().hex
+        with _audio_import_batches_lock:
+            _audio_import_batches[token] = {
+                "created_at": time.time(),
+                "temp_dir": temp_dir,
+                "preview": preview,
+            }
+        return jsonify({"token": token, "preview": preview.to_dict()})
+    except (ValueError, RuntimeError) as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logger.exception("Failed to preview admin audio import")
+        return jsonify({"error": "解析导入文件失败，请检查文件格式"}), 500
+
+
+@app.route("/admin/api/audio-import/confirm", methods=["POST"])
+@require_permission(Permission.VIEW_ADMIN_DASHBOARD)
+def admin_audio_import_confirm():
+    """Commit a previously validated batch exactly once."""
+    from potato.admin_audio_import import commit_preview
+
+    token = str((request.get_json(silent=True) or {}).get("token", "")).strip()
+    with _audio_import_batches_lock:
+        batch = _audio_import_batches.pop(token, None)
+    if batch is None:
+        return jsonify({"error": "导入预览已失效，请重新预览"}), 404
+
+    try:
+        imported = commit_preview(
+            batch["preview"],
+            _audio_import_data_file(),
+            _audio_import_task_path(config.get("media_directory", "media")),
+            get_item_state_manager(),
+        )
+        coverage = _fill_and_persist_coverage_assignments()
+        return jsonify({
+            "success": True,
+            "imported_ids": [item["id"] for item in imported],
+            "imported_count": len(imported),
+            "coverage": coverage,
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logger.exception("Failed to commit admin audio import")
+        return jsonify({"error": "导入失败，未完成写入"}), 500
+    finally:
+        shutil.rmtree(batch["temp_dir"], ignore_errors=True)
 
 
 @app.route("/admin/api/config", methods=["GET", "POST"])
@@ -7857,6 +8304,18 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/poststudy", "poststudy", poststudy, methods=["GET", "POST"])
     app.add_url_rule("/done", "done", done, methods=["GET", "POST"])
     app.add_url_rule("/admin", "admin", admin, methods=["GET"])
+    app.add_url_rule(
+        "/admin/api/audio-import/preview",
+        "admin_audio_import_preview",
+        admin_audio_import_preview,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/admin/api/audio-import/confirm",
+        "admin_audio_import_confirm",
+        admin_audio_import_confirm,
+        methods=["POST"],
+    )
     app.add_url_rule("/progress", "annotator_progress", annotator_progress, methods=["GET"])
     app.add_url_rule("/progress/api/summary", "annotator_progress_summary", annotator_progress_summary, methods=["GET"])
 
@@ -7918,6 +8377,18 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/admin/api/annotation-data/export/json", "admin_export_annotation_data_json", admin_export_annotation_data_json, methods=["GET"])
     app.add_url_rule("/admin/api/annotation-data/export/sqlite", "admin_export_annotation_data_sqlite", admin_export_annotation_data_sqlite, methods=["GET"])
     app.add_url_rule("/admin/api/instances", "admin_api_instances", admin_api_instances, methods=["GET"])
+    app.add_url_rule(
+        "/admin/api/instances/<instance_id>/category",
+        "admin_api_update_instance_category",
+        admin_api_update_instance_category,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/admin/api/assignment/batch",
+        "admin_api_batch_assignment",
+        admin_api_batch_assignment,
+        methods=["POST"],
+    )
     app.add_url_rule("/admin/api/config", "admin_api_config", admin_api_config, methods=["GET", "POST"])
     app.add_url_rule("/admin/api/user/<username>/set_instances", "admin_api_set_user_instances", admin_api_set_user_instances, methods=["POST"])
     app.add_url_rule("/admin/api/stale_assignments", "admin_api_stale_assignments", admin_api_stale_assignments, methods=["GET"])

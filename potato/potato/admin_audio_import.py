@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -18,6 +18,7 @@ class TranscriptRow:
     item_id: str
     audio_filename: str
     transcript: str
+    category: str = "未分类"
 
 
 @dataclass
@@ -65,8 +66,12 @@ def _audio_basename(address: str) -> str:
     return filename
 
 
+_TRANSCRIPT_COLUMN_NAMES = ("阿里转译", "预转写", "转写")
+_DEFAULT_CATEGORY = "未分类"
+
+
 def parse_legacy_sheet(sheet) -> list[TranscriptRow]:
-    """Parse the original worksheet containing 录音地址 and 阿里转译."""
+    """Parse the original worksheet containing 录音地址 and a transcript column."""
     if sheet.nrows < 2:
         raise ValueError("Excel 中没有可导入的数据")
 
@@ -74,23 +79,52 @@ def parse_legacy_sheet(sheet) -> list[TranscriptRow]:
         _clean_header(sheet.cell_value(0, column)): column
         for column in range(sheet.ncols)
     }
-    missing = [name for name in ("录音地址", "阿里转译") if name not in headers]
-    if missing:
-        raise ValueError("Excel 缺少列：" + "、".join(missing))
+    if "录音地址" not in headers:
+        raise ValueError("Excel 缺少列：录音地址")
+    transcript_column = next(
+        (headers[name] for name in _TRANSCRIPT_COLUMN_NAMES if name in headers),
+        None,
+    )
+    if transcript_column is None:
+        raise ValueError("Excel 缺少转写列（阿里转译 / 预转写 / 转写）")
+    category_column = headers.get("类别")
 
     rows = []
     for row_index in range(1, sheet.nrows):
         address = _clean_header(sheet.cell_value(row_index, headers["录音地址"]))
-        transcript = _clean_header(sheet.cell_value(row_index, headers["阿里转译"]))
+        transcript = _clean_header(sheet.cell_value(row_index, transcript_column))
         if not address and not transcript:
             continue
         if not address or not transcript:
             raise ValueError(f"Excel 第 {row_index + 1} 行录音地址或转写为空")
         filename = _audio_basename(address)
-        rows.append(TranscriptRow(Path(filename).stem, filename, transcript))
+        category = (
+            _clean_header(sheet.cell_value(row_index, category_column))
+            if category_column is not None
+            else ""
+        )
+        rows.append(TranscriptRow(
+            Path(filename).stem,
+            filename,
+            transcript,
+            category or _DEFAULT_CATEGORY,
+        ))
     if not rows:
         raise ValueError("Excel 中没有可导入的数据")
     return rows
+
+
+def apply_category_override(
+    rows: list[TranscriptRow], category: str | None
+) -> list[TranscriptRow]:
+    """Apply a user-supplied category label to every row.
+
+    Blank input leaves the rows untouched (Excel 类别 column, or 未分类).
+    """
+    category = (category or "").strip()
+    if not category:
+        return rows
+    return [replace(row, category=category) for row in rows]
 
 
 def parse_legacy_xls(path: os.PathLike | str) -> list[TranscriptRow]:
@@ -180,6 +214,7 @@ def build_audio_item(
         "sample_id": row.item_id,
         "audio_url": media_url,
         "segments": segments,
+        "category": row.category,
         "source_transcript_file": "管理员批量导入",
     }
 

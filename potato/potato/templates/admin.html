@@ -192,15 +192,25 @@
                 <input id="audioImportExcel" type="file" accept=".xls">
               </label>
               <label>
-                <span style="display:block;margin-bottom:.4rem;">WAV 音频（可多选）</span>
-                <input id="audioImportFiles" type="file" accept=".wav,audio/wav" multiple>
+                <span style="display:block;margin-bottom:.4rem;">设置标签（类别，选填）</span>
+                <input id="audioImportCategory" type="text" style="padding:.5rem .75rem;border:1px solid var(--border,#d4d4d8);border-radius:.5rem;font-size:.875rem;background:var(--card,#fff);color:var(--foreground,#18181b);" placeholder="留空则使用 Excel「类别」列，无则归「未分类」">
               </label>
+              <label>
+                <span style="display:block;margin-bottom:.4rem;">WAV 音频（可多选，也可逐个添加）</span>
+                <input id="audioImportFiles" type="file" accept=".wav,audio/wav" multiple onchange="handleAudioFilesSelected()">
+              </label>
+              <button id="audioImportClearFiles" type="button" onclick="clearAudioFiles()" class="shadcn-button shadcn-button-outline" style="display:none;">
+                清除已选
+              </button>
               <button id="audioImportPreviewButton" type="button" onclick="previewAudioImport()" class="shadcn-button shadcn-button-primary">
                 校验并预览
               </button>
               <button id="audioImportConfirm" type="button" onclick="confirmAudioImport()" class="shadcn-button shadcn-button-outline" disabled>
                 确认导入
               </button>
+            </div>
+            <div id="audioImportFilesSummary" style="padding:.5rem 0;color:var(--muted-foreground);font-size:.85rem;">
+              尚未选择 WAV 音频。
             </div>
             <div id="audioImportStatus" style="padding:1rem 0;color:var(--muted-foreground);">
               尚未选择文件。
@@ -237,11 +247,21 @@
               <option value="incomplete">{{ ui_lang.admin_filter_incomplete|default('Incomplete Only') }}</option>
             </select>
 
+            <select id="filterCategory" onchange="loadInstances()">
+              <option value="">全部分类</option>
+            </select>
+
             <button
               onclick="refreshInstances()"
               class="shadcn-button shadcn-button-primary"
             >
               {{ ui_lang.admin_btn_refresh|default('Refresh') }}
+            </button>
+            <button
+              onclick="openBatchAssignModal()"
+              class="shadcn-button shadcn-button-outline"
+            >
+              批量分配
             </button>
           </div>
 
@@ -251,15 +271,9 @@
             <table class="admin-table" id="instancesTable">
               <thead>
                 <tr>
-                  <th>{{ ui_lang.admin_th_instance_id|default('Instance ID') }}</th>
-                  <th>{{ ui_lang.admin_th_text_preview|default('Text Preview') }}</th>
-                  <th>{{ ui_lang.admin_th_annotations|default('Annotations') }}</th>
-                  <th>{{ ui_lang.admin_th_completion_pct|default('Completion %') }}</th>
-                  <th>{{ ui_lang.admin_th_most_frequent_label|default('Most Frequent Label') }}</th>
-                  <th>{{ ui_lang.admin_th_disagreement|default('Disagreement') }}</th>
-                  <th>{{ ui_lang.admin_th_avg_time|default('Avg Time') }}</th>
-                  <th>已分配标注员 / 目标</th>
-                  <th>{{ ui_lang.admin_th_num_ai_used|default('Num AI Used') }}</th>
+                  <th>编号</th>
+                  <th>类别</th>
+                  <th>标注员</th>
                 </tr>
               </thead>
               <tbody id="instancesTableBody">
@@ -644,6 +658,7 @@
       let currentSortBy = "annotation_count";
       let currentSortOrder = "desc";
       let currentFilter = "";
+      let currentCategoryFilter = "";
 
       // Initialize dashboard
       document.addEventListener("DOMContentLoaded", function () {
@@ -735,6 +750,10 @@
         const response = await fetch(endpoint, {
           ...defaultOptions,
           ...options,
+          headers: {
+            ...defaultOptions.headers,
+            ...(options.headers || {}),
+          },
         });
 
         if (!response.ok) {
@@ -955,6 +974,7 @@
           }
         } catch (err) {
           console.error('Failed to adjust instances:', err);
+          showError(`配额更新失败：${err.message || "请重试"}`);
         }
       }
 
@@ -1016,11 +1036,11 @@
         const summary = data.summary || {};
         document.getElementById("annotationDataSummary").innerHTML = `
           <div class="dashboard-card">
-            <h3>录音数量</h3>
+            <h3>已标注录音数</h3>
             <div class="value">${summary.recording_count || 0}</div>
           </div>
           <div class="dashboard-card">
-            <h3>标注数量</h3>
+            <h3>标注记录数</h3>
             <div class="value">${summary.annotation_count || 0}</div>
           </div>
           <div class="dashboard-card">
@@ -1108,9 +1128,51 @@
           </div>`;
       }
 
+      function showImportModal(title, message, isError) {
+        document.getElementById("audioImportModalTitle").textContent = title;
+        document.getElementById("audioImportModalTitle").style.color = isError ? "#dc2626" : "#16a34a";
+        document.getElementById("audioImportModalMessage").textContent = message;
+        document.getElementById("audioImportModal").style.display = "flex";
+      }
+
+      function closeImportModal() {
+        document.getElementById("audioImportModal").style.display = "none";
+      }
+
+      let selectedAudioFiles = [];
+
+      function handleAudioFilesSelected() {
+        const input = document.getElementById("audioImportFiles");
+        for (const file of Array.from(input.files || [])) {
+          if (!selectedAudioFiles.some((f) => f.name === file.name && f.size === file.size)) {
+            selectedAudioFiles.push(file);
+          }
+        }
+        input.value = "";
+        updateAudioFilesSummary();
+      }
+
+      function updateAudioFilesSummary() {
+        const summary = document.getElementById("audioImportFilesSummary");
+        const clearButton = document.getElementById("audioImportClearFiles");
+        if (selectedAudioFiles.length) {
+          summary.textContent = `已选 ${selectedAudioFiles.length} 个 WAV：${selectedAudioFiles.map((f) => f.name).join("、")}`;
+          clearButton.style.display = "inline-block";
+        } else {
+          summary.textContent = "尚未选择 WAV 音频。";
+          clearButton.style.display = "none";
+        }
+      }
+
+      function clearAudioFiles() {
+        selectedAudioFiles = [];
+        document.getElementById("audioImportFiles").value = "";
+        updateAudioFilesSummary();
+      }
+
       async function previewAudioImport() {
         const excel = document.getElementById("audioImportExcel").files[0];
-        const audioFiles = Array.from(document.getElementById("audioImportFiles").files);
+        const audioFiles = selectedAudioFiles;
         const status = document.getElementById("audioImportStatus");
         audioImportToken = null;
         document.getElementById("audioImportConfirm").disabled = true;
@@ -1121,6 +1183,8 @@
 
         const body = new FormData();
         body.append("excel", excel);
+        const categoryInput = document.getElementById("audioImportCategory").value.trim();
+        if (categoryInput) body.append("category", categoryInput);
         audioFiles.forEach((file) => body.append("audio", file));
         setAudioImportBusy(true);
         status.textContent = "正在上传并校验，请稍候……";
@@ -1135,12 +1199,26 @@
           renderAudioImportPreview(data.preview);
           audioImportToken = data.preview.can_confirm ? data.token : null;
           document.getElementById("audioImportConfirm").disabled = !data.preview.can_confirm;
-          status.textContent = data.preview.can_confirm
-            ? `校验通过，共 ${data.preview.ready.length} 条录音可以导入。`
-            : "校验未通过，请根据下表补齐或移除有问题的文件后重新预览。";
+          if (data.preview.can_confirm) {
+            status.textContent = `校验通过，共 ${data.preview.ready.length} 条录音可以导入。`;
+            const tagNote = categoryInput
+              ? `，标签为「${categoryInput}」`
+              : "，未设置标签（使用 Excel 类别或「未分类」）";
+            showImportModal("校验通过", `共 ${data.preview.ready.length} 条录音可以导入${tagNote}，点击「确认导入」完成写入。修改标签需重新校验预览。`, false);
+          } else {
+            status.textContent = "校验未通过，请根据下表补齐或移除有问题的文件后重新预览。";
+            const p = data.preview;
+            const lines = [];
+            if (p.duplicate_ids && p.duplicate_ids.length) lines.push(`重复录音：${p.duplicate_ids.join("、")}`);
+            if (p.invalid_rows && p.invalid_rows.length) lines.push(`格式错误：${p.invalid_rows.join("；")}`);
+            if (p.unmatched_audio && p.unmatched_audio.length) lines.push(`Excel 中无对应记录：${p.unmatched_audio.join("、")}`);
+            if (p.missing_audio && p.missing_audio.length) lines.push(`缺少音频：${p.missing_audio.join("、")}`);
+            showImportModal("校验未通过", lines.join("\n") || "存在校验问题，请查看下方预览表。", true);
+          }
         } catch (error) {
           status.textContent = error.message || "校验失败，请重试。";
           document.getElementById("audioImportPreview").innerHTML = "";
+          showImportModal("导入校验失败", error.message || "请检查文件后重新预览。", true);
         } finally {
           setAudioImportBusy(false);
           document.getElementById("audioImportConfirm").disabled = !audioImportToken;
@@ -1154,18 +1232,26 @@
         confirmButton.disabled = true;
         status.textContent = "正在导入，请勿关闭页面……";
         try {
-          const data = await makeApiRequest("/admin/api/audio-import/confirm", {
+          const response = await fetch("/admin/api/audio-import/confirm", {
             method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-API-Key": "{{ admin_api_key }}",
+            },
             body: JSON.stringify({token: audioImportToken}),
           });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || `导入失败（HTTP ${response.status}）`);
           audioImportToken = null;
           status.textContent = `导入完成，共新增 ${data.imported_count} 条录音。现在可以在任务页面进行分配。`;
           document.getElementById("audioImportExcel").value = "";
-          document.getElementById("audioImportFiles").value = "";
+          clearAudioFiles();
           document.getElementById("audioImportPreview").innerHTML = "";
+          showImportModal("导入成功", `共新增 ${data.imported_count} 条录音。现在可以在任务页面进行分配。`, false);
         } catch (error) {
           audioImportToken = null;
           status.textContent = "导入失败，预览已失效，请重新选择文件并预览。";
+          showImportModal("导入失败", error.message || "预览已失效，请重新选择文件并预览。", true);
         }
       }
 
@@ -1177,6 +1263,7 @@
           currentSortBy = document.getElementById("sortBy").value;
           currentSortOrder = document.getElementById("sortOrder").value;
           currentFilter = document.getElementById("filterCompletion").value;
+          currentCategoryFilter = document.getElementById("filterCategory").value;
 
           const params = new URLSearchParams({
             page: currentPage,
@@ -1188,6 +1275,9 @@
           if (currentFilter) {
             params.append("filter_completion", currentFilter);
           }
+          if (currentCategoryFilter) {
+            params.append("filter_category", currentCategoryFilter);
+          }
 
           const data = await makeApiRequest(`/admin/api/instances?${params}`);
           displayInstances(data);
@@ -1197,8 +1287,262 @@
         }
       }
 
+      function populateCategoryFilter(categories) {
+        const sel = document.getElementById("filterCategory");
+        const current = sel.value;
+        const options = ['<option value="">全部分类</option>'];
+        for (const category of categories) {
+          options.push(`<option value="${escapeAnnotationDataHtml(category)}">${escapeAnnotationDataHtml(category)}</option>`);
+        }
+        sel.innerHTML = options.join("");
+        if (current && !categories.includes(current)) {
+          const opt = document.createElement("option");
+          opt.value = current;
+          opt.textContent = current;
+          sel.appendChild(opt);
+          sel.value = current;
+        } else {
+          sel.value = current;
+        }
+      }
+
+      function categoryOptions(current, categories) {
+        const values = [];
+        for (const c of categories || []) {
+          if (!values.includes(c)) values.push(c);
+        }
+        const normalized = current || "未分类";
+        if (!values.includes(normalized)) values.push(normalized);
+        return values
+          .map(
+            (c) =>
+              `<option value="${escapeAnnotationDataHtml(c)}" ${c === normalized ? "selected" : ""}>${escapeAnnotationDataHtml(c)}</option>`
+          )
+          .join("");
+      }
+
+      async function updateInstanceCategory(select) {
+        const instanceId = select.dataset.instanceId;
+        const category = select.value;
+        select.disabled = true;
+        try {
+          const data = await makeApiRequest(
+            `/admin/api/instances/${encodeURIComponent(instanceId)}/category`,
+            {
+              method: "POST",
+              body: JSON.stringify({ category }),
+            }
+          );
+          showImportModal("修改成功", `实例「${instanceId}」的类别已更新为「${data.category}」。`, false);
+        } catch (error) {
+          showImportModal("修改失败", error.message || "类别修改失败，请重试。", true);
+        } finally {
+          loadInstances();
+        }
+      }
+
+      // Batch assignment (preview -> confirm)
+      let batchAssignPool = [];
+      let batchAssignAnnotators = [];
+      let batchAssignSelectedAnnotators = [];
+      let batchAssignTarget = 3;
+      let batchAssignPlan = null;
+
+      function toggleBatchAssignRandom() {
+        document.getElementById("batchAssignRandomRow").style.display =
+          document.getElementById("batchAssignMode").value === "random" ? "flex" : "none";
+      }
+
+      async function openBatchAssignModal() {
+        document.getElementById("batchAssignStep1").style.display = "flex";
+        document.getElementById("batchAssignStep2").style.display = "none";
+        document.getElementById("batchAssignModal").style.display = "flex";
+        batchAssignPlan = null;
+        try {
+          const params = new URLSearchParams({
+            page: 1,
+            page_size: 10000,
+            sort_by: currentSortBy,
+            sort_order: currentSortOrder,
+          });
+          if (currentFilter) params.append("filter_completion", currentFilter);
+          if (currentCategoryFilter) params.append("filter_category", currentCategoryFilter);
+          const data = await makeApiRequest(`/admin/api/instances?${params}`);
+          batchAssignPool = (data.instances || []).map((i) => i.id);
+          document.getElementById("batchAssignPoolCount").textContent = batchAssignPool.length;
+        } catch (error) {
+          batchAssignPool = [];
+          document.getElementById("batchAssignPoolCount").textContent = "0（加载失败）";
+        }
+        try {
+          const data = await makeApiRequest("/admin/api/annotators");
+          batchAssignAnnotators = (data.annotators || []).filter(
+            (a) => a.max_assignments !== 0
+          );
+          renderBatchAssignAnnotators();
+        } catch (error) {
+          document.getElementById("batchAssignAnnotators").innerHTML = "标注员加载失败。";
+        }
+      }
+
+      function closeBatchAssignModal() {
+        document.getElementById("batchAssignModal").style.display = "none";
+      }
+
+      function renderBatchAssignAnnotators() {
+        const container = document.getElementById("batchAssignAnnotators");
+        container.innerHTML = batchAssignAnnotators
+          .map(
+            (a) => `
+              <label style="display:inline-flex;align-items:center;gap:.35rem;font-size:.85rem;border:1px solid #d4d4d8;border-radius:.4rem;padding:.3rem .55rem;cursor:pointer;">
+                <input type="checkbox" class="batch-assign-annotator" value="${escapeAnnotationDataHtml(a.user_id)}" checked>
+                ${escapeAnnotationDataHtml(a.user_id)}${a.max_assignments > 0 ? `（配额 ${a.max_assignments}）` : ""}
+              </label>`
+          )
+          .join("");
+      }
+
+      function batchAssignSelectedAnnotatorIds() {
+        return Array.from(document.querySelectorAll(".batch-assign-annotator:checked")).map(
+          (el) => el.value
+        );
+      }
+
+      function pickRandomFromPool(pool, count) {
+        const arr = [...pool];
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr.slice(0, Math.max(0, Math.min(count, arr.length)));
+      }
+
+      async function batchAssignPreview() {
+        const mode = document.getElementById("batchAssignMode").value;
+        let itemIds = batchAssignPool;
+        if (mode === "random") {
+          const count = parseInt(document.getElementById("batchAssignRandomCount").value, 10) || 20;
+          itemIds = pickRandomFromPool(batchAssignPool, count);
+        }
+        const annotators = batchAssignSelectedAnnotatorIds();
+        batchAssignTarget = parseInt(document.getElementById("batchAssignTarget").value, 10) || 3;
+        if (!itemIds.length) {
+          showImportModal("无法生成方案", "当前圈定的录音为空，请调整筛选条件。", true);
+          return;
+        }
+        if (!annotators.length) {
+          showImportModal("无法生成方案", "请至少勾选一名标注员。", true);
+          return;
+        }
+        try {
+          const data = await makeApiRequest("/admin/api/assignment/batch", {
+            method: "POST",
+            body: JSON.stringify({
+              item_ids: itemIds,
+              annotator_ids: annotators,
+              target_per_item: batchAssignTarget,
+              dry_run: true,
+            }),
+          });
+          batchAssignSelectedAnnotators = annotators;
+          renderBatchAssignPlan(data);
+        } catch (error) {
+          showImportModal("生成方案失败", error.message || "请重试。", true);
+        }
+      }
+
+      function renderBatchAssignPlan(data) {
+        const { summary, plan } = data;
+        const byAnnotator = Object.entries(summary.by_annotator || {})
+          .map(([uid, count]) => `${escapeAnnotationDataHtml(uid)} 新增 ${count} 条`)
+          .join("，");
+        const unfulfilled = (summary.unfulfilled || []).length;
+        document.getElementById("batchAssignSummary").innerHTML = `
+          <div>共圈定 <b>${summary.selected_count}</b> 条录音，预计新增分配 <b>${summary.new_assignments}</b> 条。</div>
+          <div>${byAnnotator || "暂无新增"}</div>
+          ${summary.new_assignments === 0 ? `<div style="color:#b45309;">本次预计不会新增任何任务：所选标注员的剩余配额不足（或无可用标注员）。请返回修改标注员 / 调高配额 / 降低目标人数，否则确认后不会有任务下发。</div>` : ""}
+          ${unfulfilled && summary.new_assignments > 0 ? `<div style="color:#b45309;">${unfulfilled} 条录音无法凑满 ${batchAssignTarget} 人：所选标注员的剩余配额不足，或可用人数不够。这些录音保持现状，确认时只下发能凑满的。</div>` : ""}
+        `;
+        document.getElementById("batchAssignConfirmBtn").disabled = summary.new_assignments === 0;
+        const annotatorIds = batchAssignSelectedAnnotators;
+        document.getElementById("batchAssignPlan").innerHTML = `
+          <div class="admin-table-container">
+            <table class="admin-table">
+              <thead><tr><th>录音</th><th>现有标注员</th><th>本次分配（可勾选调整）</th><th>状态</th></tr></thead>
+              <tbody>
+                ${plan
+                  .map((row) => {
+                    const options = annotatorIds
+                      .map(
+                        (uid) => `
+                          <label style="display:inline-flex;align-items:center;gap:.25rem;margin-right:.5rem;font-size:.8rem;white-space:nowrap;">
+                            <input type="checkbox" data-item="${escapeAnnotationDataHtml(row.item_id)}" data-user="${escapeAnnotationDataHtml(uid)}" ${row.suggested.includes(uid) ? "checked" : ""}>
+                            ${escapeAnnotationDataHtml(uid)}
+                          </label>`
+                      )
+                      .join("");
+                    const assignedCount = row.existing.length;
+                    return `
+                      <tr ${row.full ? "" : 'style="background:#fef2f2;"'}>
+                        <td>${escapeAnnotationDataHtml(row.item_id)}</td>
+                        <td>${row.existing.length ? escapeAnnotationDataHtml(row.existing.join("、")) : "—"}</td>
+                        <td style="max-width:340px;">${options || "无可用标注员"}</td>
+                        <td>已有 ${assignedCount} 人，目标 ${batchAssignTarget} 人</td>
+                      </tr>`;
+                  })
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        `;
+        batchAssignPlan = plan;
+        document.getElementById("batchAssignStep1").style.display = "none";
+        document.getElementById("batchAssignStep2").style.display = "flex";
+      }
+
+      function batchAssignBack() {
+        document.getElementById("batchAssignStep1").style.display = "flex";
+        document.getElementById("batchAssignStep2").style.display = "none";
+      }
+
+      async function batchAssignConfirm() {
+        if (!batchAssignPlan) return;
+        const plan = batchAssignPlan.map((row) => ({
+          item_id: row.item_id,
+          suggested: Array.from(
+            document.querySelectorAll(
+              `input[type="checkbox"][data-item="${CSS.escape(row.item_id)}"]:checked`
+            )
+          ).map((el) => el.dataset.user),
+        }));
+        try {
+          const data = await makeApiRequest("/admin/api/assignment/batch", {
+            method: "POST",
+            body: JSON.stringify({
+              item_ids: plan.map((r) => r.item_id),
+              annotator_ids: batchAssignSelectedAnnotators,
+              target_per_item: batchAssignTarget,
+              dry_run: false,
+              plan,
+            }),
+          });
+          const byAnnotator = Object.entries(data.summary.by_annotator || {})
+            .map(([uid, count]) => `${escapeAnnotationDataHtml(uid)} ${count} 条`)
+            .join("，");
+          const message = data.summary.new_assignments > 0
+            ? `已处理 ${data.summary.selected_count} 条录音，新增下发 ${data.summary.new_assignments} 条任务。\n${byAnnotator}`
+            : `已处理 ${data.summary.selected_count} 条录音，但本次没有新增任何任务：所选标注员的剩余配额不足（或无可用标注员）。请返回修改标注员 / 调高配额 / 降低目标人数后重试。`;
+          showImportModal("分配完成", message, data.summary.new_assignments === 0);
+          closeBatchAssignModal();
+          loadInstances();
+        } catch (error) {
+          showImportModal("分配失败", error.message || "请重试。", true);
+        }
+      }
+
       function displayInstances(data) {
         const tbody = document.getElementById("instancesTableBody");
+        populateCategoryFilter(data.categories || []);
         const pagination = document.getElementById("instancesPagination");
         const coverageStatus = document.getElementById("assignmentCoverageStatus");
         const shortfall = data.summary?.assignment_shortfall || 0;
@@ -1213,14 +1557,8 @@
             (instance) => `
                 <tr>
                     <td>${instance.id}</td>
-                    <td title="${instance.text}">${instance.text}</td>
-                    <td>${instance.annotation_count}</td>
-                    <td>${instance.completion_percentage}%</td>
-                    <td>${instance.most_frequent_label || "N/A"}</td>
-                    <td>${instance.label_disagreement}</td>
-                    <td>${instance.average_time_per_annotation || "N/A"}</td>
-                    <td>${(instance.assigned_annotators || []).join(", ") || "无"}（${(instance.assigned_annotators || []).length}/${instance.assignment_target < 0 ? "∞" : instance.assignment_target}）</td>
-                    <td>${instance.num_ai_instance}</td>
+                    <td><select style="max-width:12rem;" data-instance-id="${escapeAnnotationDataHtml(instance.id)}" onchange="updateInstanceCategory(this)">${categoryOptions(instance.category, data.categories || [])}</select></td>
+                    <td>${escapeAnnotationDataHtml((instance.assigned_annotators || []).join(", ") || "无")}</td>
                 </tr>
             `
           )
@@ -2414,5 +2752,61 @@
         }
       }
     </script>
+    <div id="batchAssignModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9998;align-items:center;justify-content:center;">
+      <div style="background:#fff;border-radius:10px;max-width:760px;width:94%;max-height:88vh;padding:1.25rem 1.5rem;box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;flex-direction:column;font-family:inherit;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem;">
+          <h3 style="margin:0;font-size:1.05rem;color:#111;">批量分配</h3>
+          <button onclick="closeBatchAssignModal()" style="border:none;background:none;font-size:1.4rem;line-height:1;cursor:pointer;color:#666;" aria-label="关闭">&times;</button>
+        </div>
+
+        <div id="batchAssignStep1" style="display:flex;flex-direction:column;gap:.75rem;overflow:auto;">
+          <div style="font-size:.9rem;color:#333;">当前筛选已圈定 <b id="batchAssignPoolCount">0</b> 条录音（不含已完成全部标注的条目）</div>
+          <label style="display:flex;flex-direction:column;gap:.3rem;font-size:.85rem;">
+            <span>圈定方式</span>
+            <select id="batchAssignMode" onchange="toggleBatchAssignRandom()" style="padding:.45rem .6rem;border:1px solid #d4d4d8;border-radius:.4rem;font-size:.875rem;">
+              <option value="filter">按当前筛选范围（全部）</option>
+              <option value="random">随机抽取指定条数</option>
+            </select>
+          </label>
+          <label id="batchAssignRandomRow" style="display:none;flex-direction:column;gap:.3rem;font-size:.85rem;">
+            <span>随机抽取条数</span>
+            <input id="batchAssignRandomCount" type="number" min="1" value="20" style="padding:.45rem .6rem;border:1px solid #d4d4d8;border-radius:.4rem;font-size:.875rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:.3rem;font-size:.85rem;">
+            <span>目标人数（每条录音的标注员数）</span>
+            <input id="batchAssignTarget" type="number" min="1" value="3" style="padding:.45rem .6rem;border:1px solid #d4d4d8;border-radius:.4rem;font-size:.875rem;">
+          </label>
+          <div style="font-size:.85rem;">
+            <span>参与分配的标注员</span>
+            <div id="batchAssignAnnotators" style="display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.4rem;"></div>
+          </div>
+          <div style="text-align:right;margin-top:.5rem;">
+            <button onclick="batchAssignPreview()" class="shadcn-button shadcn-button-primary">生成分配方案</button>
+          </div>
+        </div>
+
+        <div id="batchAssignStep2" style="display:none;flex-direction:column;gap:.75rem;overflow:auto;">
+          <div id="batchAssignSummary" style="font-size:.9rem;color:#333;"></div>
+          <div id="batchAssignPlan" style="overflow:auto;max-height:42vh;"></div>
+          <div style="text-align:right;margin-top:.5rem;display:flex;justify-content:flex-end;gap:.5rem;">
+            <button onclick="batchAssignBack()" class="shadcn-button shadcn-button-outline">返回修改</button>
+            <button id="batchAssignConfirmBtn" onclick="batchAssignConfirm()" class="shadcn-button shadcn-button-primary">确认分配</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="audioImportModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;align-items:center;justify-content:center;">
+      <div style="background:#fff;border-radius:10px;max-width:560px;width:90%;padding:1.25rem 1.5rem;box-shadow:0 10px 30px rgba(0,0,0,.25);font-family:inherit;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem;">
+          <h3 id="audioImportModalTitle" style="margin:0;font-size:1.05rem;color:#111;"></h3>
+          <button onclick="closeImportModal()" style="border:none;background:none;font-size:1.4rem;line-height:1;cursor:pointer;color:#666;" aria-label="关闭">&times;</button>
+        </div>
+        <div id="audioImportModalMessage" style="white-space:pre-wrap;font-size:.9rem;color:#333;line-height:1.6;max-height:50vh;overflow:auto;"></div>
+        <div style="margin-top:1rem;text-align:right;">
+          <button onclick="closeImportModal()" class="shadcn-button shadcn-button-outline">知道了</button>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
