@@ -1200,20 +1200,27 @@
           audioImportToken = data.preview.can_confirm ? data.token : null;
           document.getElementById("audioImportConfirm").disabled = !data.preview.can_confirm;
           if (data.preview.can_confirm) {
+            const dupCount = (data.preview.duplicate_ids || []).length;
             status.textContent = `校验通过，共 ${data.preview.ready.length} 条录音可以导入。`;
             const tagNote = categoryInput
               ? `，标签为「${categoryInput}」`
               : "，未设置标签（使用 Excel 类别或「未分类」）";
-            showImportModal("校验通过", `共 ${data.preview.ready.length} 条录音可以导入${tagNote}，点击「确认导入」完成写入。修改标签需重新校验预览。`, false);
+            const dupNote = dupCount ? `（另有 ${dupCount} 条重复录音已跳过，不会写入）` : "";
+            showImportModal("校验通过", `共 ${data.preview.ready.length} 条录音可以导入${tagNote}${dupNote}。点击「确认导入」完成写入。修改标签需重新校验预览。`, false);
           } else {
-            status.textContent = "校验未通过，请根据下表补齐或移除有问题的文件后重新预览。";
             const p = data.preview;
             const lines = [];
             if (p.duplicate_ids && p.duplicate_ids.length) lines.push(`重复录音：${p.duplicate_ids.join("、")}`);
             if (p.invalid_rows && p.invalid_rows.length) lines.push(`格式错误：${p.invalid_rows.join("；")}`);
             if (p.unmatched_audio && p.unmatched_audio.length) lines.push(`Excel 中无对应记录：${p.unmatched_audio.join("、")}`);
             if (p.missing_audio && p.missing_audio.length) lines.push(`缺少音频：${p.missing_audio.join("、")}`);
-            showImportModal("校验未通过", lines.join("\n") || "存在校验问题，请查看下方预览表。", true);
+            if (p.ready && p.ready.length) {
+              status.textContent = "校验未通过，请根据下表补齐或移除有问题的文件后重新预览。";
+              showImportModal("校验未通过", lines.join("\n") || "存在校验问题，请查看下方预览表。", true);
+            } else {
+              status.textContent = "没有可导入的新录音，请检查上传文件。";
+              showImportModal("没有可导入的新录音", lines.join("\n") || "本次上传没有可以导入的新录音，请检查文件是否已被导入或重复。", true);
+            }
           }
         } catch (error) {
           status.textContent = error.message || "校验失败，请重试。";

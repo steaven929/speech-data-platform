@@ -3392,20 +3392,6 @@ def _cleanup_expired_audio_imports():
         shutil.rmtree(batch["temp_dir"], ignore_errors=True)
 
 
-def _fill_and_persist_coverage_assignments():
-    """Fill all configured user capacity and persist users that changed."""
-    user_manager = get_user_state_manager()
-    users = user_manager.get_all_users()
-    report = get_item_state_manager().fill_assignments_to_coverage(users)
-    changed = set(report.get("assignments_by_user", {}))
-    if changed and hasattr(user_manager, "save_user_state"):
-        for user_state in users:
-            user_id = str(getattr(user_state, "user_id", user_state.get_user_id()))
-            if user_id in changed:
-                user_manager.save_user_state(user_state)
-    return report
-
-
 @app.route("/admin/api/audio-import/preview", methods=["POST"])
 @require_permission(Permission.VIEW_ADMIN_DASHBOARD)
 def admin_audio_import_preview():
@@ -3437,7 +3423,7 @@ def admin_audio_import_preview():
             if not filename or Path(filename).suffix.lower() != ".wav":
                 raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
             if filename in seen_names:
-                raise ValueError(f"上传列表中存在重名音频：{filename}")
+                continue  # 同一批重复选择的音频直接跳过
             seen_names.add(filename)
             destination = temp_dir / filename
             uploaded.save(destination)
@@ -3490,12 +3476,10 @@ def admin_audio_import_confirm():
             _audio_import_task_path(config.get("media_directory", "media")),
             get_item_state_manager(),
         )
-        coverage = _fill_and_persist_coverage_assignments()
         return jsonify({
             "success": True,
             "imported_ids": [item["id"] for item in imported],
             "imported_count": len(imported),
-            "coverage": coverage,
         })
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

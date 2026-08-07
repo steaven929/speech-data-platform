@@ -34,8 +34,7 @@ class ImportPreview:
     @property
     def can_confirm(self) -> bool:
         return bool(self.ready) and not (
-            self.duplicate_ids
-            or self.missing_audio
+            self.missing_audio
             or self.unmatched_audio
             or self.invalid_rows
         )
@@ -247,9 +246,9 @@ def preview_rows(
         if not matching_rows:
             preview.unmatched_audio.append(filename)
             continue
-        if len(matching_rows) > 1:
-            preview.duplicate_ids.append(matching_rows[0].item_id)
-            continue
+        # 同一音频在 Excel 中出现多行：保留第一行，其余按重复跳过
+        for extra_row in matching_rows[1:]:
+            preview.duplicate_ids.append(extra_row.item_id)
         row = matching_rows[0]
         if row.item_id in existing_ids or (media_dir / row.audio_filename).exists():
             preview.duplicate_ids.append(row.item_id)

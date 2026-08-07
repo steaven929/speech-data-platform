@@ -107,7 +107,8 @@ def test_audio_import_confirm_persists_and_consumes_token(admin_client, monkeypa
 
     assert response.status_code == 200
     assert response.get_json()["imported_ids"] == ["10001"]
-    assert manager.coverage_calls == 1
+    # 导入后不再自动分配，由管理员在分配界面手动下发
+    assert manager.coverage_calls == 0
     repeated = admin_client.post(
         "/admin/api/audio-import/confirm",
         headers={"X-API-Key": "audio-import-key"},

@@ -54,3 +54,11 @@
   - 第一步：圈定方式二选一（按当前筛选范围全部 / 随机抽取 N 条）、标注员多选（默认排除配额 0）、目标人数（默认 3）。
   - 第二步：生成预览（概览每人新增数 + 明细表，每条可勾选微调建议标注员）→ 确认分配 → 结果弹窗并刷新列表。
 - 已验证：dry-run 生成方案正确（已有标注员跳过、均衡分配、容量不足提示）；confirm 应用微调方案、容量校验拒绝超额；真实服务 26 条 dry-run + 无副作用 confirm 通过；单元测试 11 通过（2 个既有 config 相关失败）。
+
+## 2026-08-07 变更记录
+
+### 导入后不再自动分配
+- 背景：导入确认接口写入 items.json 后会调用 `_fill_and_persist_coverage_assignments()`，新增录音会被立即自动分配满 3 人，导致批量分配界面永远显示「无新增待分配任务」，与功能 10「管理员预览确认后才下发」冲突。
+- 调整：移除 `potato/routes.py` 导入确认接口中的 `_fill_and_persist_coverage_assignments()` 调用（该辅助函数已删除）；配额调整 `/admin/api/user/<id>/set_instances` 与配置变更 `/admin/api/config` 仍保留各自的 coverage 回填逻辑。
+- 效果：新导入录音保持未分配，管理员在「批量分配」界面圈定、预览、确认后才会下发。
+- 测试：`test_audio_import_confirm_persists_and_consumes_token` 断言确认导入不再触发 `fill_assignments_to_coverage`。

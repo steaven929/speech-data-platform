@@ -121,6 +121,51 @@ def test_preview_rejects_uploaded_audio_that_has_no_excel_row(tmp_path):
     assert preview.can_confirm is False
 
 
+def test_preview_skips_duplicates_and_allows_confirming_ready_rows(tmp_path):
+    from potato.admin_audio_import import TranscriptRow, preview_rows
+
+    new_audio = tmp_path / "10001.wav"
+    dup_audio = tmp_path / "20002.wav"
+    write_silent_wav(new_audio)
+    write_silent_wav(dup_audio)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    (media_dir / "20002.wav").write_bytes(b"existing")
+
+    rows = [
+        TranscriptRow("10001", "10001.wav", "新录音"),
+        TranscriptRow("20002", "20002.wav", "媒体中已存在"),
+        TranscriptRow("10001", "10001.wav", "Excel 内重复行"),
+    ]
+
+    preview = preview_rows(rows, [new_audio, dup_audio], set(), media_dir)
+
+    assert [entry.item_id for entry in preview.ready] == ["10001"]
+    assert set(preview.duplicate_ids) == {"20002", "10001"}
+    assert preview.can_confirm is True
+
+
+def test_preview_all_duplicates_blocks_confirm(tmp_path):
+    from potato.admin_audio_import import TranscriptRow, preview_rows
+
+    audio = tmp_path / "10001.wav"
+    write_silent_wav(audio)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    (media_dir / "10001.wav").write_bytes(b"existing")
+
+    preview = preview_rows(
+        [TranscriptRow("10001", "10001.wav", "重复")],
+        [audio],
+        set(),
+        media_dir,
+    )
+
+    assert preview.ready == []
+    assert preview.duplicate_ids == ["10001"]
+    assert preview.can_confirm is False
+
+
 def test_commit_preview_appends_json_copies_audio_and_registers_runtime_item(tmp_path):
     from potato.admin_audio_import import TranscriptRow, commit_preview, preview_rows
 
