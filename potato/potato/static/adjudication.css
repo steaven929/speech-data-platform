@@ -1129,16 +1129,29 @@
 .direct-review-filters button.active { background:#0d6efd; color:white; border-color:#0d6efd; }
 .direct-review-item { display:flex; width:100%; flex-direction:column; text-align:left; gap:3px; padding:12px; margin-bottom:8px; border:1px solid #ddd; border-radius:8px; background:white; }
 .direct-review-item span { color:#666; font-size:13px; }
+.direct-review-item .direct-review-final-source { color:#2f2569; font-weight:600; }
+.direct-review-item .direct-review-error-text { color:#b42318; font-weight:600; }
 .direct-review-main { min-width:0; min-height:0; padding:0; overflow:hidden; }
 .direct-review-editor { height:100%; min-height:0; display:flex; flex-direction:column; background:#fff; }
 .direct-review-player { position:sticky; top:0; z-index:10; flex:0 0 auto; padding:20px 24px 14px; border-bottom:1px solid #ddd; background:#fff; box-shadow:0 3px 10px rgba(0,0,0,.07); }
 .direct-review-player h4 { margin:0 0 6px; }
 .direct-review-player audio { display:block; width:100%; margin:12px 0 0; }
+.direct-review-decision { margin-top:12px; padding:12px 14px; border:1px solid #d8d1f2; border-radius:8px; background:#f8f6ff; color:#30285e; }
+.direct-review-decision strong { display:inline-block; margin-bottom:5px; }
+.direct-review-decision-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:5px 14px; font-size:13px; }
+.direct-review-final-badge,.direct-review-reference-badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:700; margin-right:7px; }
+.direct-review-final-badge { color:#176b3a; background:#e9f8ef; border:1px solid #a9ddbd; }
+.direct-review-reference-badge { color:#6a5a19; background:#fff8d9; border:1px solid #eadc91; }
 .direct-review-scroll { flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:0 24px; }
 .direct-review-table { width:100%; border-collapse:collapse; margin:16px 0; }
 .direct-review-table th,.direct-review-table td { border:1px solid #ddd; padding:8px; vertical-align:top; }
 .direct-review-table input[type=number] { width:100px; }
 .direct-review-table textarea { width:100%; min-height:64px; }
+.direct-review-alternatives { margin:0 0 22px; border:1px solid #ddd; border-radius:8px; background:#fafafa; }
+.direct-review-alternatives summary { cursor:pointer; padding:12px 14px; font-weight:600; }
+.direct-review-alternative-buttons { display:flex; flex-wrap:wrap; gap:8px; padding:0 14px 14px; }
+.direct-review-alternative-buttons button { border:1px solid #c8c8c8; border-radius:6px; padding:6px 10px; background:white; }
+.direct-review-alternative-buttons button.active { color:white; background:#6f52cf; border-color:#6f52cf; }
 .direct-review-actions { flex:0 0 auto; display:flex; gap:10px; justify-content:flex-end; padding:14px 24px; border-top:1px solid #ddd; background:white; box-shadow:0 -3px 10px rgba(0,0,0,.05); }
 @media (max-width:800px) {
     .direct-review-shell { display:block; height:auto; min-height:calc(100dvh - 58px); overflow:visible; }

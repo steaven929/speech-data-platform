@@ -1,3 +1,5 @@
+import json
+
 from potato.audio_cer_workflow import AudioCerWorkflowStore
 from potato.item_state_management import ItemStateManager
 from potato.user_state_management import InMemoryUserState
@@ -25,6 +27,27 @@ def test_pair_at_three_percent_is_auto_finalized(tmp_path):
     assert state["comparisons"][0]["cer"] == 0.03
     assert state["final_annotator"] == "a"
     assert state["final_method"] == "pair_cer"
+    assert state["tie_breaker"] == "earlier_submission"
+    assert state["selection_reason"] == "双人 CER 3.00% 达标"
+    assert "提交时间更早" not in state["selection_reason"]
+
+
+def test_existing_pair_result_hides_old_submission_time_explanation(tmp_path):
+    store = AudioCerWorkflowStore(tmp_path)
+    store.register_initial_assignments("rec", ["a", "b"])
+    _submit(store, "a", "x" * 100, "2026-01-01T00:00:00Z")
+    _submit(store, "b", "x" * 97 + "yyy", "2026-01-01T00:00:01Z")
+    store.recalculate("rec")
+    store._data["recordings"]["rec"]["selection_reason"] = (
+        "双人 CER 3.00% 达标；标注员 a 提交时间更早，因此作为最终结果"
+    )
+
+    decorated = store.decorate_records([
+        {"recording_id": "rec", "annotator": "a"}
+    ])[0]
+
+    assert decorated["selection_reason"] == "双人 CER 3.00% 达标"
+    assert decorated["tie_breaker"] == "earlier_submission"
 
 
 def test_pair_over_three_percent_waits_for_third(tmp_path):
@@ -44,15 +67,18 @@ def test_three_way_medoid_uses_total_distance(tmp_path):
     store.register_initial_assignments("rec", ["a", "b"])
     store.set_third_annotator("rec", "c")
     _submit(store, "a", "x" * 100, "2026-01-01T00:00:00Z")
-    _submit(store, "b", "x" * 91 + "y" * 9, "2026-01-01T00:00:01Z")
-    _submit(store, "c", "x" * 98 + "zz", "2026-01-01T00:00:02Z")
+    _submit(store, "b", "x" * 95 + "y" * 5, "2026-01-01T00:00:01Z")
+    _submit(store, "c", "x" * 90 + "y" * 10, "2026-01-01T00:00:02Z")
 
     state = store.recalculate("rec")
 
     assert state["stage"] == "auto_finalized"
-    assert state["final_annotator"] == "a"
+    assert state["final_annotator"] == "b"
     assert state["final_method"] == "three_way_medoid"
-    assert state["scores"]["a"] < state["scores"]["b"]
+    assert state["scores"]["b"] < state["scores"]["a"]
+    assert state["scores"]["b"] < state["scores"]["c"]
+    assert state["selection_reason"] == "标注员 b 的总差异最小，因此系统选择 b 作为最终结果"
+    assert state["tie_breaker"] is None
 
 
 def test_three_way_medoid_tie_prefers_earlier_submission(tmp_path):
@@ -68,6 +94,51 @@ def test_three_way_medoid_tie_prefers_earlier_submission(tmp_path):
     assert state["stage"] == "auto_finalized"
     assert state["scores"]["a"] == state["scores"]["b"]
     assert state["final_annotator"] == "b"
+    assert state["tie_breaker"] == "earlier_submission"
+    assert "提交时间更早" in state["selection_reason"]
+
+
+def test_three_way_medoid_tie_without_timestamps_uses_annotator_id(tmp_path):
+    store = AudioCerWorkflowStore(tmp_path)
+    store.register_initial_assignments("rec", ["a", "b"])
+    store.set_third_annotator("rec", "c")
+    store.note_submission("rec", "b", "abcdefghiX", _payload("abcdefghiX"))
+    store.note_submission("rec", "a", "abcdefghij", _payload("abcdefghij"))
+    store.note_submission("rec", "c", "abcdefghYZ", _payload("abcdefghYZ"))
+    for row in store._data["recordings"]["rec"]["submissions"].values():
+        row["submitted_at"] = None
+
+    state = store.recalculate("rec", consensus_threshold=0.2)
+
+    assert state["scores"]["a"] == state["scores"]["b"]
+    assert state["final_annotator"] == "a"
+    assert state["tie_breaker"] == "annotator_id"
+    assert "标注员编号" in state["selection_reason"]
+
+
+def test_legacy_finalized_state_derives_missing_selection_explanation(tmp_path):
+    store = AudioCerWorkflowStore(tmp_path)
+    store.register_initial_assignments("rec", ["a", "b"])
+    store.set_third_annotator("rec", "c")
+    _submit(store, "a", "x" * 100, "2026-01-01T00:00:00Z")
+    _submit(store, "b", "x" * 95 + "y" * 5, "2026-01-01T00:00:01Z")
+    _submit(store, "c", "x" * 90 + "y" * 10, "2026-01-01T00:00:02Z")
+    store.recalculate("rec")
+    state_path = tmp_path / "admin_review" / "cer_workflow_state.json"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    persisted["recordings"]["rec"].pop("selection_reason")
+    persisted["recordings"]["rec"].pop("tie_breaker")
+    state_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    legacy_store = AudioCerWorkflowStore(tmp_path)
+    decorated = legacy_store.decorate_records([
+        {"recording_id": "rec", "annotator": "b"}
+    ])[0]
+
+    assert decorated["selection_reason"] == (
+        "标注员 b 的总差异最小，因此系统选择 b 作为最终结果"
+    )
+    assert decorated["tie_breaker"] is None
 
 
 def test_all_three_over_eight_percent_require_manual_review(tmp_path):

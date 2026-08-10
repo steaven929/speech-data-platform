@@ -1,4 +1,7 @@
+import pytest
+
 from potato import routes
+from potato import admin_annotation_data
 from potato.item_state_management import ItemStateManager
 from potato.user_state_management import InMemoryUserState
 
@@ -111,3 +114,95 @@ def test_batch_confirm_rejects_partial_first_round(monkeypatch):
 
     assert status == 400
     assert "恰好分配两人" in response.get_json()["details"][0]
+
+
+@pytest.mark.parametrize("final_annotator", ["a", "b", "c"])
+@pytest.mark.parametrize("final_method", ["pair_cer", "three_way_medoid", "manual"])
+def test_completed_review_api_groups_three_results_by_recording(
+    monkeypatch, final_annotator, final_method
+):
+    rows = [
+        {
+            "recording_id": "rec",
+            "annotator": annotator,
+            "review_status": "completed",
+            "segments": [{"id": annotator, "text": annotator}],
+            "segment_count": 1,
+            "is_final_result": annotator == final_annotator,
+            "final_annotator": final_annotator,
+            "final_method": final_method,
+            "finalized_at": "2026-08-10T12:00:00Z",
+            "workflow_comparisons": [
+                {"annotators": ["a", "b"], "cer": 0.05},
+                {"annotators": ["a", "c"], "cer": 0.10},
+                {"annotators": ["b", "c"], "cer": 0.05},
+            ],
+            "workflow_scores": {"a": 0.15, "b": 0.10, "c": 0.15},
+            "selection_reason": f"标注员 {final_annotator} 的总差异最小，因此系统选择 {final_annotator} 作为最终结果",
+            "tie_breaker": None,
+        }
+        for annotator in ("a", "b", "c")
+    ]
+    monkeypatch.setattr(routes, "_check_adjudicator_auth", lambda: (True, "admin", None))
+    monkeypatch.setattr(routes, "_cer_review_config", lambda: {"enabled": True})
+    monkeypatch.setattr(
+        admin_annotation_data,
+        "collect_audio_annotation_records",
+        lambda _manager: [{"recording_id": "rec"}],
+    )
+    monkeypatch.setattr(routes, "get_user_state_manager", lambda: object())
+    monkeypatch.setattr(routes, "_decorate_audio_review_records", lambda _records: rows)
+
+    with routes.app.test_request_context(
+        "/adjudicate/api/audio-reviews?status=completed"
+    ):
+        response = routes.direct_audio_review_queue()
+
+    payload = response.get_json()
+    assert payload["total"] == 3
+    assert payload["recording_total"] == 1
+    assert len(payload["recordings"]) == 1
+    group = payload["recordings"][0]
+    assert group["recording_id"] == "rec"
+    assert group["final_status"] == "ready"
+    assert group["final_result"]["annotator"] == final_annotator
+    assert group["final_method"] == final_method
+    assert [row["annotator"] for row in group["original_results"]] == [
+        annotator for annotator in ("a", "b", "c")
+        if annotator != final_annotator
+    ]
+    assert group["minimum_cer"] == 0.05
+
+
+def test_completed_review_api_does_not_guess_when_final_result_is_missing(monkeypatch):
+    rows = [
+        {
+            "recording_id": "rec",
+            "annotator": annotator,
+            "review_status": "completed",
+            "is_final_result": False,
+            "final_annotator": "missing-user",
+            "workflow_comparisons": [],
+        }
+        for annotator in ("a", "b", "c")
+    ]
+    monkeypatch.setattr(routes, "_check_adjudicator_auth", lambda: (True, "admin", None))
+    monkeypatch.setattr(routes, "_cer_review_config", lambda: {"enabled": True})
+    monkeypatch.setattr(
+        admin_annotation_data,
+        "collect_audio_annotation_records",
+        lambda _manager: [{"recording_id": "rec"}],
+    )
+    monkeypatch.setattr(routes, "get_user_state_manager", lambda: object())
+    monkeypatch.setattr(routes, "_decorate_audio_review_records", lambda _records: rows)
+
+    with routes.app.test_request_context(
+        "/adjudicate/api/audio-reviews?status=completed"
+    ):
+        response = routes.direct_audio_review_queue()
+
+    group = response.get_json()["recordings"][0]
+    assert group["final_status"] == "error"
+    assert group["final_error"] == "最终稿数据异常"
+    assert group["final_result"] is None
+    assert [row["annotator"] for row in group["original_results"]] == ["a", "b", "c"]

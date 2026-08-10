@@ -3,6 +3,8 @@
 
   let statusFilter = "in_progress";
   let selected = null;
+  let selectedGroup = null;
+  let viewingOriginal = false;
   let items = [];
 
   const escapeHtml = (value) => String(value ?? "")
@@ -21,13 +23,39 @@
 
   async function loadQueue() {
     const data = await request(`/adjudicate/api/audio-reviews?status=${statusFilter}`);
-    items = data.items || [];
+    const previousRecording = selected && selected.recording_id;
+    const previousAnnotator = selected && selected.annotator;
+    items = statusFilter === "completed" && data.grouped
+      ? (data.recordings || []) : (data.items || []);
     renderList();
-    if (selected) {
-      selected = items.find((item) => item.recording_id === selected.recording_id &&
-        item.annotator === selected.annotator) || selected;
-      renderEditor();
+    if (previousRecording && statusFilter === "completed") {
+      selectedGroup = items.find((item) => item.recording_id === previousRecording) || null;
+      selected = selectedGroup && selectedGroup.final_result;
+      viewingOriginal = false;
+    } else if (previousRecording) {
+      selected = items.find((item) => item.recording_id === previousRecording &&
+        item.annotator === previousAnnotator) || null;
+      selectedGroup = null;
     }
+    if (selected || selectedGroup) {
+      renderEditor();
+    } else if (previousRecording) {
+      resetEditor();
+    }
+  }
+
+  const formatPercent = (value) => Number.isFinite(value)
+    ? `${(value * 100).toFixed(2)}%` : "—";
+
+  const methodText = (method) => ({
+    pair_cer: "系统双人 CER 自动通过",
+    three_way_medoid: "系统三人自动选择",
+    manual: "管理员人工选择",
+  }[method] || "已定稿");
+
+  function resetEditor() {
+    document.getElementById("direct-review-editor").hidden = true;
+    document.getElementById("direct-review-empty").hidden = false;
   }
 
   function renderList() {
@@ -36,15 +64,32 @@
       list.innerHTML = '<div class="direct-review-empty-list">当前没有记录</div>';
       return;
     }
-    list.innerHTML = items.map((item, index) => `
-      <button class="direct-review-item" data-index="${index}">
-        <strong>${escapeHtml(item.recording_id)}</strong>
-        <span>标注员：${escapeHtml(item.annotator)}</span>
-        <span>${item.segment_count} 个片段 · ${statusText(item.review_status)}</span>
-      </button>`).join("");
+    list.innerHTML = items.map((item, index) => {
+      if (statusFilter === "completed" && item.final_status) {
+        const finalLine = item.final_status === "ready"
+          ? `<span class="direct-review-final-source">最终结果：标注员 ${escapeHtml(item.final_annotator)}</span>`
+          : `<span class="direct-review-error-text">${escapeHtml(item.final_error || "最终稿数据异常")}</span>`;
+        const cerLine = Number.isFinite(item.minimum_cer)
+          ? ` · 最低 CER ${formatPercent(item.minimum_cer)}` : "";
+        return `<button class="direct-review-item" data-index="${index}">
+          <strong>${escapeHtml(item.recording_id)}</strong>
+          ${finalLine}
+          <span>${escapeHtml(methodText(item.final_method))}${cerLine}</span>
+          <span>定稿时间：${escapeHtml(item.finalized_at || "未记录")}</span>
+        </button>`;
+      }
+      return `<button class="direct-review-item" data-index="${index}">
+          <strong>${escapeHtml(item.recording_id)}</strong>
+          <span>标注员：${escapeHtml(item.annotator)}</span>
+          <span>${item.segment_count} 个片段 · ${statusText(item.review_status)}</span>
+        </button>`;
+    }).join("");
     list.querySelectorAll(".direct-review-item").forEach((button) => {
       button.addEventListener("click", () => {
-        selected = items[Number(button.dataset.index)];
+        const entry = items[Number(button.dataset.index)];
+        selectedGroup = statusFilter === "completed" && entry.final_status ? entry : null;
+        selected = selectedGroup ? selectedGroup.final_result : entry;
+        viewingOriginal = false;
         renderEditor();
       });
     });
@@ -52,10 +97,79 @@
 
   const statusText = (status) => ({in_progress: "审核中", completed: "已完成"}[status] || status);
 
+  function renderDecision() {
+    const panel = document.getElementById("direct-review-decision");
+    if (!selectedGroup) {
+      panel.hidden = true;
+      panel.innerHTML = "";
+      return;
+    }
+    panel.hidden = false;
+    if (selectedGroup.final_status !== "ready") {
+      panel.innerHTML = `<strong class="direct-review-error-text">最终稿数据异常</strong>
+        <div>系统没有找到唯一、有效的最终稿，请重新打开该录音进行人工确认。</div>`;
+      return;
+    }
+    const comparisons = (selectedGroup.comparisons || []).map((row) =>
+      `<div>${escapeHtml((row.annotators || []).join(" - "))} CER：${formatPercent(row.cer)}</div>`
+    ).join("");
+    const scores = Object.entries(selectedGroup.scores || {}).map(([annotator, score]) =>
+      `<div>标注员 ${escapeHtml(annotator)} 总差异：${formatPercent(score)}</div>`
+    ).join("");
+    panel.innerHTML = `
+      <strong>${escapeHtml(methodText(selectedGroup.final_method))}</strong>
+      <div class="direct-review-decision-grid">
+        <div>最终稿：标注员 ${escapeHtml(selectedGroup.final_annotator)}</div>
+        <div>定稿时间：${escapeHtml(selectedGroup.finalized_at || "未记录")}</div>
+        ${comparisons}${scores}
+      </div>
+      <div>${escapeHtml(selectedGroup.selection_reason || "系统已保存该录音的唯一最终结果")}</div>`;
+  }
+
+  function renderAlternatives() {
+    const container = document.getElementById("direct-review-alternatives");
+    if (!selectedGroup || !(selectedGroup.original_results || []).length) {
+      container.innerHTML = "";
+      return;
+    }
+    const originalResults = selectedGroup.original_results;
+    container.innerHTML = `<details class="direct-review-alternatives">
+      <summary>查看另外 ${originalResults.length} 份原始标注（仅供参考）</summary>
+      <div class="direct-review-alternative-buttons">
+        ${selectedGroup.final_result ? `<button type="button" data-final="true" class="${viewingOriginal ? "" : "active"}">最终结果 · ${escapeHtml(selectedGroup.final_annotator)}</button>` : ""}
+        ${originalResults.map((row, index) => `<button type="button" data-original-index="${index}" class="${viewingOriginal && selected && selected.annotator === row.annotator ? "active" : ""}">原始标注 · ${escapeHtml(row.annotator)}</button>`).join("")}
+      </div>
+    </details>`;
+    const finalButton = container.querySelector("[data-final]");
+    if (finalButton) finalButton.addEventListener("click", () => {
+      selected = selectedGroup.final_result;
+      viewingOriginal = false;
+      renderEditor();
+    });
+    container.querySelectorAll("[data-original-index]").forEach((button) => {
+      button.addEventListener("click", () => {
+        selected = originalResults[Number(button.dataset.originalIndex)];
+        viewingOriginal = true;
+        renderEditor();
+      });
+    });
+  }
+
   function renderEditor() {
-    if (!selected) return;
+    if (!selected && !selectedGroup) return;
     document.getElementById("direct-review-empty").hidden = true;
     document.getElementById("direct-review-editor").hidden = false;
+    renderDecision();
+    if (!selected) {
+      document.getElementById("direct-review-title").textContent = `录音 ${selectedGroup.recording_id}`;
+      document.getElementById("direct-review-status").innerHTML = '<span class="direct-review-error-text">最终稿数据异常</span>';
+      document.getElementById("direct-review-audio").src = `/media/${encodeURIComponent(selectedGroup.recording_id)}.wav`;
+      document.getElementById("direct-review-segments").innerHTML = "";
+      renderAlternatives();
+      document.querySelectorAll(".direct-review-actions button").forEach((button) => button.hidden = true);
+      return;
+    }
+    const finalView = Boolean(selectedGroup && !viewingOriginal && selected.is_final_result);
     document.getElementById("direct-review-title").textContent =
       `录音 ${selected.recording_id} · 标注员 ${selected.annotator}`;
     document.getElementById("direct-review-audio").src = `/media/${encodeURIComponent(selected.recording_id)}.wav`;
@@ -65,8 +179,13 @@
       : (selected.reviewed_by ? ` · 最近审核人：${selected.reviewed_by}` : "");
     const workflowText = selected.workflow_stage
       ? ` · ${workflowStatusText(selected.workflow_stage)}` : "";
-    document.getElementById("direct-review-status").textContent =
-      `状态：${statusText(selected.review_status)}${workflowText}${reviewerText}`;
+    const resultBadge = selectedGroup
+      ? (finalView
+        ? '<span class="direct-review-final-badge">最终结果</span>'
+        : '<span class="direct-review-reference-badge">原始标注，仅供参考</span>')
+      : "";
+    document.getElementById("direct-review-status").innerHTML =
+      `${resultBadge}状态：${escapeHtml(statusText(selected.review_status))}${escapeHtml(workflowText)}${escapeHtml(reviewerText)}`;
     document.getElementById("direct-review-segments").innerHTML = `
       <table class="direct-review-table"><thead><tr>
         <th>开始时间</th><th>结束时间</th><th>说话人</th><th>转写文本</th><th>方言</th>
@@ -78,13 +197,14 @@
           <td><textarea class="seg-text">${escapeHtml(segment.text)}</textarea></td>
           <td><input class="seg-dialect" type="checkbox" ${segment.is_dialect ? "checked" : ""}></td>
         </tr>`).join("")}</tbody></table>`;
+    renderAlternatives();
     const editable = selected.review_status === "in_progress" &&
       (!selected.workflow_stage || selected.workflow_stage === "needs_manual_review");
     document.querySelectorAll("#direct-review-segments input, #direct-review-segments select, #direct-review-segments textarea")
       .forEach((field) => field.disabled = !editable);
     document.getElementById("direct-review-save").hidden = !editable;
     document.getElementById("direct-review-complete").hidden = !editable;
-    document.getElementById("direct-review-reopen").hidden = selected.review_status !== "completed";
+    document.getElementById("direct-review-reopen").hidden = selected.review_status !== "completed" || Boolean(selectedGroup && !selectedGroup.final_result);
     document.getElementById("direct-review-retry-third").hidden =
       selected.workflow_stage !== "waiting_third_assignment";
   }
@@ -113,7 +233,7 @@
   async function action(path, options = {}) {
     try {
       const data = await request(path, options);
-      selected = {...selected, ...data};
+      if (selected) selected = {...selected, ...data};
       await loadQueue();
     } catch (error) {
       alert(error.message);
@@ -124,8 +244,7 @@
     button.addEventListener("click", () => {
       document.querySelectorAll(".direct-review-filters button").forEach((b) => b.classList.remove("active"));
       button.classList.add("active"); statusFilter = button.dataset.status; selected = null;
-      document.getElementById("direct-review-editor").hidden = true;
-      document.getElementById("direct-review-empty").hidden = false; loadQueue();
+      selectedGroup = null; viewingOriginal = false; resetEditor(); loadQueue();
     });
   });
   document.getElementById("direct-review-save").addEventListener("click", () => action(
@@ -133,8 +252,13 @@
     {method: "PUT", body: JSON.stringify({segments: editedSegments()})}));
   document.getElementById("direct-review-complete").addEventListener("click", () => action(
     `/adjudicate/api/audio-reviews/${encodeURIComponent(selected.recording_id)}/${encodeURIComponent(selected.annotator)}/complete`, {method: "POST"}));
-  document.getElementById("direct-review-reopen").addEventListener("click", () => action(
-    `/adjudicate/api/audio-reviews/${encodeURIComponent(selected.recording_id)}/${encodeURIComponent(selected.annotator)}/reopen`, {method: "POST"}));
+  document.getElementById("direct-review-reopen").addEventListener("click", () => {
+    const target = selectedGroup && selectedGroup.final_result
+      ? selectedGroup.final_result : selected;
+    return action(
+      `/adjudicate/api/audio-reviews/${encodeURIComponent(target.recording_id)}/${encodeURIComponent(target.annotator)}/reopen`,
+      {method: "POST"});
+  });
   document.getElementById("direct-review-retry-third").addEventListener("click", () => action(
     `/adjudicate/api/audio-reviews/${encodeURIComponent(selected.recording_id)}/retry-third`, {method: "POST"}));
 

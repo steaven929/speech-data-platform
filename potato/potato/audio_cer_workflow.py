@@ -25,6 +25,65 @@ def _submission_sort_key(row: Dict[str, Any]) -> tuple[str, str]:
     return (str(row.get("submitted_at") or "9999"), str(row.get("annotator") or ""))
 
 
+def _selection_metadata(state: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Return stored selection details, deriving them for legacy finalized rows."""
+    method = state.get("final_method")
+    if method != "pair_cer" and state.get("selection_reason"):
+        return state.get("selection_reason"), state.get("tie_breaker")
+
+    winner = str(state.get("final_annotator") or "")
+    submissions = list((state.get("submissions") or {}).values())
+    if not winner:
+        return None, None
+    if method == "manual":
+        reviewer = state.get("reviewed_by") or "管理员"
+        return f"管理员 {reviewer} 选择标注员 {winner} 作为最终结果", None
+    if method == "pair_cer":
+        comparisons = state.get("comparisons") or []
+        cer = comparisons[0].get("cer") if comparisons else None
+        tie_breaker = (
+            "earlier_submission"
+            if any(row.get("submitted_at") for row in submissions)
+            else "annotator_id"
+        )
+        cer_text = (
+            f"双人 CER {float(cer):.2%} 达标"
+            if cer is not None else "双人 CER 已达标"
+        )
+        return cer_text, tie_breaker
+    if method != "three_way_medoid":
+        return None, None
+
+    scores = state.get("scores") or {}
+    if winner not in scores:
+        return None, None
+    minimum = min(float(value) for value in scores.values())
+    tied = [
+        str(annotator) for annotator, value in scores.items()
+        if abs(float(value) - minimum) < 1e-12
+    ]
+    if len(tied) == 1:
+        return (
+            f"标注员 {winner} 的总差异最小，因此系统选择 {winner} 作为最终结果",
+            None,
+        )
+    tied_rows = [row for row in submissions if str(row.get("annotator")) in tied]
+    tie_breaker = (
+        "earlier_submission"
+        if any(row.get("submitted_at") for row in tied_rows)
+        else "annotator_id"
+    )
+    if tie_breaker == "earlier_submission":
+        return (
+            f"总差异并列，标注员 {winner} 提交时间更早，因此系统选择 {winner} 作为最终结果",
+            tie_breaker,
+        )
+    return (
+        f"总差异并列且提交时间不可确定，系统按标注员编号选择 {winner} 作为最终结果",
+        tie_breaker,
+    )
+
+
 class AudioCerWorkflowStore:
     """Own the recording-level assignment, arbitration, and final-result state."""
 
@@ -75,6 +134,8 @@ class AudioCerWorkflowStore:
             "final_method": None,
             "final_annotation": None,
             "finalized_at": None,
+            "selection_reason": None,
+            "tie_breaker": None,
             "reason": None,
             "history": [],
             "updated_at": utc_now(),
@@ -176,7 +237,8 @@ class AudioCerWorkflowStore:
             state.update({
                 "comparisons": [], "scores": {}, "final_annotator": None,
                 "final_method": None, "final_annotation": None,
-                "finalized_at": None, "reason": None,
+                "finalized_at": None, "selection_reason": None,
+                "tie_breaker": None, "reason": None,
             })
 
             if len(submissions) > 3:
@@ -207,12 +269,19 @@ class AudioCerWorkflowStore:
             }]
             if pair_score <= pair_threshold:
                 winner = min((first, second), key=_submission_sort_key)
+                pair_tie_breaker = (
+                    "earlier_submission"
+                    if any(row.get("submitted_at") for row in (first, second))
+                    else "annotator_id"
+                )
                 state.update({
                     "stage": "auto_finalized",
                     "final_annotator": winner["annotator"],
                     "final_method": "pair_cer",
                     "final_annotation": copy.deepcopy(winner.get("annotation")),
                     "finalized_at": utc_now(),
+                    "selection_reason": f"双人 CER {pair_score:.2%} 达标",
+                    "tie_breaker": pair_tie_breaker,
                 })
                 return self._put(state, previous, history_reason)
 
@@ -254,12 +323,37 @@ class AudioCerWorkflowStore:
             minimum = min(scores.values())
             tied = [row for row in submissions if abs(scores[row["annotator"]] - minimum) < 1e-12]
             winner = min(tied, key=_submission_sort_key)
+            tie_breaker = None
+            if len(tied) > 1:
+                submitted_at = [row.get("submitted_at") for row in tied]
+                tie_breaker = (
+                    "earlier_submission"
+                    if any(value for value in submitted_at)
+                    else "annotator_id"
+                )
+            if tie_breaker == "earlier_submission":
+                selection_reason = (
+                    f"总差异并列，标注员 {winner['annotator']} 提交时间更早，"
+                    f"因此系统选择 {winner['annotator']} 作为最终结果"
+                )
+            elif tie_breaker == "annotator_id":
+                selection_reason = (
+                    f"总差异并列且提交时间不可确定，系统按标注员编号选择 "
+                    f"{winner['annotator']} 作为最终结果"
+                )
+            else:
+                selection_reason = (
+                    f"标注员 {winner['annotator']} 的总差异最小，因此系统选择 "
+                    f"{winner['annotator']} 作为最终结果"
+                )
             state.update({
                 "stage": "auto_finalized",
                 "final_annotator": winner["annotator"],
                 "final_method": "three_way_medoid",
                 "final_annotation": copy.deepcopy(winner.get("annotation")),
                 "finalized_at": utc_now(),
+                "selection_reason": selection_reason,
+                "tie_breaker": tie_breaker,
             })
             return self._put(state, previous, history_reason)
 
@@ -280,6 +374,10 @@ class AudioCerWorkflowStore:
                 "final_annotation": copy.deepcopy(annotation),
                 "finalized_at": utc_now(),
                 "reviewed_by": str(admin),
+                "selection_reason": (
+                    f"管理员 {admin} 选择标注员 {annotator} 作为最终结果"
+                ),
+                "tie_breaker": None,
                 "reason": None,
             })
             return self._put(state, previous, "manual_finalized")
@@ -296,6 +394,8 @@ class AudioCerWorkflowStore:
                 "final_method": None,
                 "final_annotation": None,
                 "finalized_at": None,
+                "selection_reason": None,
+                "tie_breaker": None,
                 "reason": "管理员重新打开审核",
                 "reopened_by": str(admin),
             })
@@ -306,6 +406,7 @@ class AudioCerWorkflowStore:
         for record in records:
             row = dict(record)
             workflow = self.get(str(record["recording_id"]))
+            selection_reason, tie_breaker = _selection_metadata(workflow)
             row.update({
                 "workflow_stage": workflow.get("stage"),
                 "workflow_reason": workflow.get("reason"),
@@ -314,6 +415,9 @@ class AudioCerWorkflowStore:
                 "third_annotator": workflow.get("third_annotator"),
                 "final_annotator": workflow.get("final_annotator"),
                 "final_method": workflow.get("final_method"),
+                "finalized_at": workflow.get("finalized_at"),
+                "selection_reason": selection_reason,
+                "tie_breaker": tie_breaker,
                 "is_final_result": workflow.get("final_annotator") == record.get("annotator"),
             })
             result.append(row)
@@ -324,6 +428,7 @@ class AudioCerWorkflowStore:
         for state in self.list_states().values():
             if state.get("stage") not in {"auto_finalized", "manual_finalized"}:
                 continue
+            selection_reason, tie_breaker = _selection_metadata(state)
             results.append({
                 "recording_id": state["recording_id"],
                 "annotator": state.get("final_annotator"),
@@ -332,5 +437,7 @@ class AudioCerWorkflowStore:
                 "annotation": state.get("final_annotation"),
                 "comparisons": state.get("comparisons", []),
                 "scores": state.get("scores", {}),
+                "selection_reason": selection_reason,
+                "tie_breaker": tie_breaker,
             })
         return sorted(results, key=lambda row: row["recording_id"])

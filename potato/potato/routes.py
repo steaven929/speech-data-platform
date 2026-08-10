@@ -8931,6 +8931,53 @@ def _decorate_audio_review_records(records):
     return records
 
 
+def _group_completed_audio_reviews(records):
+    """Build one completed-review entry per recording without dropping raw rows."""
+    grouped = defaultdict(list)
+    for record in records:
+        grouped[str(record.get("recording_id", ""))].append(record)
+
+    result = []
+    for recording_id in sorted(grouped):
+        rows = sorted(
+            grouped[recording_id], key=lambda row: str(row.get("annotator", ""))
+        )
+        representative = rows[0]
+        final_annotator = next(
+            (row.get("final_annotator") for row in rows if row.get("final_annotator")),
+            None,
+        )
+        final_candidates = [
+            row for row in rows
+            if row.get("is_final_result")
+            and row.get("annotator") == final_annotator
+        ]
+        final_result = final_candidates[0] if len(final_candidates) == 1 else None
+        comparisons = representative.get("workflow_comparisons") or []
+        cer_values = [
+            float(row["cer"]) for row in comparisons
+            if row.get("cer") is not None
+        ]
+        result.append({
+            "recording_id": recording_id,
+            "final_status": "ready" if final_result else "error",
+            "final_error": None if final_result else "最终稿数据异常",
+            "final_result": final_result,
+            "original_results": [
+                row for row in rows if final_result is None or row is not final_result
+            ],
+            "final_annotator": final_annotator,
+            "final_method": representative.get("final_method"),
+            "finalized_at": representative.get("finalized_at"),
+            "minimum_cer": min(cer_values) if cer_values else None,
+            "comparisons": comparisons,
+            "scores": representative.get("workflow_scores") or {},
+            "selection_reason": representative.get("selection_reason"),
+            "tie_breaker": representative.get("tie_breaker"),
+        })
+    return result
+
+
 @app.route('/adjudicate/api/audio-reviews', methods=['GET'])
 def direct_audio_review_queue():
     authorized, _, error = _check_adjudicator_auth()
@@ -8942,7 +8989,15 @@ def direct_audio_review_queue():
     status = request.args.get("status")
     if status and status != "all":
         records = [row for row in records if row["review_status"] == status]
-    return jsonify({"items": records, "total": len(records)})
+    grouped = bool(status == "completed" and _cer_review_config())
+    recordings = _group_completed_audio_reviews(records) if grouped else []
+    return jsonify({
+        "items": records,
+        "total": len(records),
+        "grouped": grouped,
+        "recordings": recordings,
+        "recording_total": len(recordings),
+    })
 
 
 def _validated_audio_segments(data):
