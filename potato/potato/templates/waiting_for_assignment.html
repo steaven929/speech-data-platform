@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - 等待任务分配</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="potato-page-center">
+    <div class="potato-page-card" style="text-align: center;">
+        <div class="potato-page-icon" aria-hidden="true">⏳</div>
+        <h1 class="potato-page-title">暂无可标注任务</h1>
+        <p class="potato-page-subtitle">
+            当前账号 {{ username }} 暂时没有管理员分配的录音。完成批量分配后，刷新本页面即可开始标注。
+        </p>
+        <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
+            <button class="shadcn-button shadcn-button-primary" type="button" onclick="window.location.reload()">
+                刷新任务
+            </button>
+            <a class="shadcn-button shadcn-button-outline" href="/logout" style="text-decoration: none;">
+                切换账号
+            </a>
+        </div>
+    </div>
+</body>
+</html>

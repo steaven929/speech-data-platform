@@ -297,3 +297,87 @@ def test_annotate_prev_instance_from_first_annotation_item_retreats(monkeypatch)
     assert response.status_code == 302
     assert response.location.endswith("/")
     assert retreat_calls == ["user1"]
+
+
+def test_logged_in_user_still_in_login_phase_advances_without_redirect_loop(monkeypatch):
+    """A persisted login session must not bounce between home and annotate."""
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+
+    user_state = _StubPhaseUserState(UserPhase.LOGIN)
+    usm = MagicMock()
+    usm.has_user.return_value = True
+    usm.get_user_ids.return_value = ["user1"]
+
+    monkeypatch.setattr(routes, "app", app, raising=False)
+    monkeypatch.setattr(
+        routes,
+        "config",
+        {"debug": False, "annotation_task_name": "Phase Flow Test"},
+        raising=False,
+    )
+    monkeypatch.setattr(routes, "get_user_state_manager", lambda: usm)
+    monkeypatch.setattr(routes, "get_user_state", lambda username: user_state)
+
+    app.add_url_rule("/", "home", routes.home, methods=["GET", "POST"])
+    app.add_url_rule("/auth", "auth", routes.auth, methods=["GET", "POST"])
+    app.add_url_rule("/annotate", "annotate", routes.annotate, methods=["GET", "POST"])
+
+    client = app.test_client()
+    with client.session_transaction() as session_state:
+        session_state["username"] = "user1"
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.location.endswith("/")
+    usm.advance_phase.assert_called_once_with("user1")
+
+
+def test_existing_user_login_advances_from_login_phase(monkeypatch):
+    """Logging in again must also repair a persisted LOGIN-phase user state."""
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+
+    user_state = _StubPhaseUserState(UserPhase.LOGIN)
+    usm = MagicMock()
+    usm.has_user.return_value = True
+    authenticator = MagicMock()
+    authenticator.is_valid_username.return_value = True
+
+    monkeypatch.setattr(routes, "app", app, raising=False)
+    monkeypatch.setattr(
+        routes,
+        "config",
+        {
+            "debug": False,
+            "annotation_task_name": "Phase Flow Test",
+            "require_password": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(routes, "get_user_state_manager", lambda: usm)
+    monkeypatch.setattr(routes, "get_user_state", lambda username: user_state)
+    monkeypatch.setattr(
+        routes.UserAuthenticator,
+        "authenticate",
+        staticmethod(lambda username, password: True),
+    )
+    monkeypatch.setattr(
+        routes.UserAuthenticator,
+        "get_instance",
+        staticmethod(lambda: authenticator),
+    )
+
+    app.add_url_rule("/", "home", routes.home, methods=["GET", "POST"])
+    app.add_url_rule("/auth", "auth", routes.auth, methods=["GET", "POST"])
+
+    response = app.test_client().post(
+        "/auth",
+        data={"email": "user1", "pass": ""},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.location.endswith("/")
+    usm.advance_phase.assert_called_once_with("user1")

@@ -641,6 +641,23 @@ def home():
     return render_template("error.html", message="Invalid application state")
 
 
+def _advance_authenticated_user_from_login(user_id):
+    """Move an authenticated user out of LOGIN before routing their request."""
+    user_state = get_user_state(user_id)
+    if not user_state or user_state.get_phase() != UserPhase.LOGIN:
+        return False
+
+    if (
+        config.get("debug")
+        and config.get("debug_phase")
+        and apply_debug_phase_skip(user_id)
+    ):
+        return True
+
+    get_user_state_manager().advance_phase(user_id)
+    return True
+
+
 @app.route("/auth", methods=["GET", "POST"])
 def auth():
     """
@@ -667,8 +684,10 @@ def auth():
     """
     # Check if user is already logged in
     if 'username' in session and get_user_state_manager().has_user(session['username']):
-        logger.debug(f"User {session['username']} already logged in, redirecting to annotate")
-        return redirect(url_for("annotate"))
+        username = session['username']
+        _advance_authenticated_user_from_login(username)
+        logger.debug(f"User {username} already logged in, routing through home")
+        return redirect(url_for("home"))
 
     # Handle POST requests for user authentication
     if request.method == "POST":
@@ -702,23 +721,15 @@ def auth():
             session.permanent = True  # Make session persist longer
             logger.info(f"Login successful for user: {user_id}")
 
-            # Initialize user state if needed
+            # Initialize user state if needed, then ensure both new and existing
+            # users leave LOGIN before routing. Existing LOGIN state previously
+            # caused home -> annotate -> home redirect loops.
             if not get_user_state_manager().has_user(user_id):
                 logger.debug(f"Initializing state for new user: {user_id}")
                 usm = get_user_state_manager()
                 usm.add_user(user_id)
-
-                # Check for debug phase skip
-                if config.get("debug") and config.get("debug_phase"):
-                    if apply_debug_phase_skip(user_id):
-                        return redirect(url_for("home"))
-                    else:
-                        # Fall back to normal phase advancement
-                        usm.advance_phase(user_id)
-                else:
-                    usm.advance_phase(user_id)
-                return redirect(url_for("annotate"))
-            return redirect(url_for("annotate"))
+            _advance_authenticated_user_from_login(user_id)
+            return redirect(url_for("home"))
         else:
             logger.warning(f"Login failed for user: {user_id}")
             error_msg = "用户名或密码错误" if require_password else "登录失败，请检查用户名"
@@ -2113,7 +2124,8 @@ def annotate():
     # If the user hasn't yet been assigned anything to annotate, do so now
     if not user_state.has_assignments():
         logger.debug(f"User {username} has no assignments, assigning instances")
-        get_item_state_manager().assign_instances_to_user(user_state)
+        item_state_manager = get_item_state_manager()
+        item_state_manager.assign_instances_to_user(user_state)
         logger.debug(f"User has assignments after assignment: {user_state.has_assignments()}")
 
         # If assignment produced nothing and user is an adjudicator,
@@ -2123,6 +2135,12 @@ def annotate():
             if adj_mgr and adj_mgr.is_adjudicator(username):
                 logger.info(f"Adjudicator {username} has no annotation items, redirecting to /adjudicate")
                 return redirect(url_for("adjudicate"))
+            if getattr(item_state_manager, "admin_managed_initial_assignment", False):
+                return render_template(
+                    "waiting_for_assignment.html",
+                    title=config.get("annotation_task_name", "Annotation Platform"),
+                    username=username,
+                )
 
     # IBWS: Check if round is complete and advance if needed
     if config.get("ibws_config"):

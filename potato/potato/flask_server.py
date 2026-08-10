@@ -2210,9 +2210,11 @@ def render_page_with_annotations(username: str):
         logger.warning(
             f"User {username} has no valid current instance after loading state"
         )
-        if not user_state.has_remaining_assignments():
-            get_user_state_manager().advance_phase(username)
-        return redirect(url_for("home"))
+        return render_template(
+            "waiting_for_assignment.html",
+            title=config.get("annotation_task_name", "Annotation Platform"),
+            username=username,
+        )
 
     instance_id = item.get_id()
 
