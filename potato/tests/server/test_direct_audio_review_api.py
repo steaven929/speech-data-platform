@@ -141,6 +141,6 @@ def test_asr_adjudication_page_has_direct_edit_controls(review_server):
     admin = login(server.base_url, "admin")
     response = admin.get(f"{server.base_url}/adjudicate")
     assert response.status_code == 200
-    for text in ("分配给自己", "保存修改", "审核通过", "重新编辑"):
+    for text in ("分配给自己", "保存修改", "设为最终结果", "重新编辑"):
         assert text in response.text
     assert "direct-audio-review.js" in response.text

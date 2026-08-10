@@ -5,7 +5,10 @@ annotation_submission:
   require_explicit_submit: true
   cer_review:
     enabled: true
-    max_pair_cer: 0.05
+    pair_threshold: 0.03
+    consensus_threshold: 0.08
+    initial_assignment: admin_batch
+    third_assignment: random
     min_matching_submissions: 2
     reject_unchanged_source: true
     rejected_item_position: queue_end

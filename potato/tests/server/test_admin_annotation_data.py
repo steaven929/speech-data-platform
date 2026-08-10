@@ -143,15 +143,25 @@ def test_json_payload_and_sqlite_export_have_expected_counts_and_rows(tmp_path):
         }
     ]
 
-    payload = build_annotation_export_payload(records)
+    final_results = [{
+        "recording_id": "recording-1",
+        "annotator": "user2",
+        "method": "three_way_medoid",
+        "finalized_at": "2026-08-03T01:00:00Z",
+        "annotation": {"segments": []},
+        "comparisons": [{"annotators": ["user1", "user2"], "cer": 0.02}],
+        "scores": {"user2": 0.05},
+    }]
+    payload = build_annotation_export_payload(records, final_results=final_results)
     assert payload["recording_count"] == 1
     assert payload["annotation_count"] == 1
     assert payload["segment_count"] == 1
     assert payload["annotations"] == records
+    assert payload["final_results"] == final_results
     assert payload["exported_at"].endswith("Z")
 
     database_path = tmp_path / "annotations.sqlite"
-    write_annotation_sqlite(records, database_path)
+    write_annotation_sqlite(records, database_path, final_results=final_results)
     with sqlite3.connect(database_path) as connection:
         annotation_row = connection.execute(
             "SELECT recording_id, annotator, segment_count, review_status, reviewed_by FROM annotations"
@@ -162,6 +172,10 @@ def test_json_payload_and_sqlite_export_have_expected_counts_and_rows(tmp_path):
             FROM segments
             """
         ).fetchone()
+        final_row = connection.execute(
+            "SELECT recording_id, annotator, method FROM final_results"
+        ).fetchone()
 
     assert annotation_row == ("recording-1", "user2", 1, "completed", "admin")
     assert segment_row == ("seg-1", 1.25, 2.5, "agent", "您好", 0)
+    assert final_row == ("recording-1", "user2", "three_way_medoid")

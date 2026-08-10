@@ -189,3 +189,54 @@ class DirectAudioReviewStore:
         path = self.history_dir / f"{snapshot['created_at'].replace(':', '-')}-{snapshot['snapshot_id']}.json"
         path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
         return snapshot
+
+    def sync_workflow_state(self, workflow: Dict[str, Any]) -> None:
+        """Project a recording-level CER decision onto legacy per-user rows.
+
+        The direct-review API remains backward compatible, while the workflow
+        store is the source of truth for whether a recording needs human work.
+        Previous manual/system decisions are retained inline as audit history.
+        """
+        recording_id = str(workflow.get("recording_id", ""))
+        participants = set((workflow.get("submissions") or {}).keys())
+        participants.update(workflow.get("initial_annotators") or [])
+        if workflow.get("third_annotator"):
+            participants.add(str(workflow["third_annotator"]))
+        stage = workflow.get("stage")
+        finalized = stage in {"auto_finalized", "manual_finalized"}
+        with self._lock:
+            for annotator in participants:
+                key = self.key(recording_id, annotator)
+                state = self.get(recording_id, annotator)
+                old_decision = {
+                    name: state.get(name)
+                    for name in (
+                        "status", "reviewed_by", "reviewed_at", "review_method",
+                        "cer_score", "qc_reason",
+                    )
+                }
+                new_decision = {
+                    "status": "completed" if finalized else "in_progress",
+                    "reviewed_by": (
+                        workflow.get("reviewed_by")
+                        if stage == "manual_finalized" else
+                        ("system:cer" if finalized else None)
+                    ),
+                    "reviewed_at": workflow.get("finalized_at") if finalized else None,
+                    "review_method": workflow.get("final_method") if finalized else None,
+                    "cer_score": min(
+                        (float(row["cer"]) for row in workflow.get("comparisons", [])),
+                        default=None,
+                    ) if finalized else None,
+                    "qc_reason": workflow.get("reason"),
+                }
+                if old_decision != new_decision and any(old_decision.values()):
+                    history = state.setdefault("workflow_history", [])
+                    history.append({"changed_at": _now(), "decision": old_decision})
+                state.update(new_decision)
+                state["workflow_stage"] = stage
+                state["is_final_result"] = (
+                    workflow.get("final_annotator") == str(annotator)
+                )
+                self._state[key] = state
+            self._save()

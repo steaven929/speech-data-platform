@@ -38,7 +38,9 @@ import uuid
 import shutil
 import tempfile
 import threading
+import random
 from pathlib import Path
+from typing import Optional
 from werkzeug.utils import secure_filename
 
 # Import from the main flask_server.py module
@@ -1798,6 +1800,17 @@ def _cer_review_config() -> dict:
     return cer_config if cer_config.get("enabled", False) else {}
 
 
+def _cer_pair_threshold() -> float:
+    cer_config = _cer_review_config()
+    return float(cer_config.get(
+        "pair_threshold", cer_config.get("max_pair_cer", 0.03)
+    ))
+
+
+def _cer_consensus_threshold() -> float:
+    return float(_cer_review_config().get("consensus_threshold", 0.08))
+
+
 def _original_audio_segments(instance_id: str) -> list[dict]:
     try:
         item = get_item_state_manager().get_item(str(instance_id))
@@ -1826,19 +1839,96 @@ def _is_unchanged_from_pretranscript(user_state, instance_id: str) -> bool:
     return bool(original) and original == submitted
 
 
-def _run_cer_auto_review(instance_id: str) -> dict:
-    from potato.audio_cer_review import find_matching_submissions
-    cer_config = _cer_review_config()
-    threshold = float(cer_config.get("max_pair_cer", 0.05))
-    matched, comparisons = find_matching_submissions(
-        str(instance_id), get_user_state_manager(), threshold)
-    completed = _get_direct_audio_review_store().reconcile_auto_matches(
-        str(instance_id), matched, comparisons, threshold)
+def _workflow_annotation_payload(user_state, instance_id: str) -> dict:
+    return {"segments": _submitted_audio_segments(user_state, str(instance_id))}
+
+
+def _workflow_submission_text(user_state, instance_id: str) -> str:
+    from potato.audio_cer_review import segments_text
+    return segments_text(_submitted_audio_segments(user_state, str(instance_id)))
+
+
+def _eligible_third_annotators(instance_id: str, excluded: set[str]) -> list[str]:
+    usm = get_user_state_manager()
+    valid_item_ids = set(get_item_state_manager().get_instance_ids())
+    roles = ((config.get("rbac") or {}).get("user_role_assignments") or {})
+    adjudicators = set((config.get("adjudication") or {}).get("adjudicator_users") or [])
+    result = []
+    for username in sorted(usm.get_user_ids()):
+        username = str(username)
+        if username in excluded or username in adjudicators:
+            continue
+        role = str(roles.get(username, "annotator")).lower()
+        if role in {"admin", "adjudicator", "reviewer"}:
+            continue
+        state = usm.get_user_state(username)
+        if state is None or state.has_annotated(str(instance_id)):
+            continue
+        assigned = set(state.get_assigned_instance_ids()) & valid_item_ids
+        maximum = state.get_max_assignments()
+        if maximum is not None and maximum >= 0 and len(assigned) >= int(maximum):
+            continue
+        result.append(username)
+    return result
+
+
+def _assign_random_third(instance_id: str) -> Optional[str]:
+    workflow_store = _get_audio_cer_workflow_store()
+    workflow = workflow_store.get(str(instance_id))
+    if workflow.get("third_annotator"):
+        return str(workflow["third_annotator"])
+    excluded = set(workflow.get("initial_annotators") or [])
+    excluded.update((workflow.get("submissions") or {}).keys())
+    candidates = _eligible_third_annotators(str(instance_id), excluded)
+    if not candidates:
+        workflow_store.set_third_annotator(str(instance_id), None)
+        return None
+    chosen = random.SystemRandom().choice(candidates)
+    state = get_user_state_manager().get_user_state(chosen)
+    state.assign_instance(get_item_state_manager().get_item(str(instance_id)))
+    get_user_state_manager().save_user_state(state)
+    workflow = workflow_store.set_third_annotator(str(instance_id), chosen)
+    _get_direct_audio_review_store().sync_workflow_state(workflow)
+    return chosen
+
+
+def _run_cer_auto_review(instance_id: str, submitting_user: Optional[str] = None) -> dict:
+    """Record a formal submission, arbitrate, and assign C when required."""
+    instance_id = str(instance_id)
+    workflow_store = _get_audio_cer_workflow_store()
+    if submitting_user:
+        state = get_user_state_manager().get_user_state(str(submitting_user))
+        workflow_store.note_submission(
+            instance_id,
+            str(submitting_user),
+            _workflow_submission_text(state, instance_id),
+            _workflow_annotation_payload(state, instance_id),
+        )
+    workflow = workflow_store.recalculate(
+        instance_id, _cer_pair_threshold(), _cer_consensus_threshold())
+    third = None
+    if workflow.get("stage") == "waiting_third_assignment":
+        third = _assign_random_third(instance_id)
+        workflow = workflow_store.get(instance_id)
+    _get_direct_audio_review_store().sync_workflow_state(workflow)
+    action_by_stage = {
+        "auto_finalized": "auto_finalized",
+        "waiting_third_assignment": "waiting_third",
+        "awaiting_third_submission": "third_assigned",
+        "needs_manual_review": "manual_review",
+        "manual_finalized": "manual_finalized",
+    }
     return {
-        "action": "auto_completed" if completed else "pending",
-        "matched_annotators": completed,
-        "threshold": threshold,
-        "comparisons": comparisons,
+        "action": action_by_stage.get(workflow.get("stage"), "waiting_pair"),
+        "stage": workflow.get("stage"),
+        "third_annotator": third or workflow.get("third_annotator"),
+        "final_annotator": workflow.get("final_annotator"),
+        "final_method": workflow.get("final_method"),
+        "pair_threshold": _cer_pair_threshold(),
+        "consensus_threshold": _cer_consensus_threshold(),
+        "comparisons": workflow.get("comparisons", []),
+        "scores": workflow.get("scores", {}),
+        "reason": workflow.get("reason"),
     }
 
 
@@ -1873,6 +1963,10 @@ def _validate_explicit_audio_submission(user_state, instance_id: str) -> list[st
             segments = []
         if len(segments) < minimum:
             errors.append(f"{scheme.get('name', '音频标注')} 至少需要 {minimum} 个片段")
+        if _cer_review_config():
+            from potato.audio_cer_review import normalize_cer_text, segments_text
+            if not normalize_cer_text(segments_text(segments)):
+                errors.append("转写文本不能为空")
     return errors
 
 
@@ -2915,7 +3009,7 @@ def admin_api_annotation_data():
     from potato.admin_annotation_data import collect_audio_annotation_records
 
     records = collect_audio_annotation_records(get_user_state_manager())
-    records = _get_direct_audio_review_store().list_reviews(records)
+    records = _decorate_audio_review_records(records)
     available_annotators = sorted({
         record["annotator"] for record in records
     })
@@ -2956,8 +3050,14 @@ def admin_export_annotation_data_json():
     )
 
     records = collect_audio_annotation_records(get_user_state_manager())
-    records = _get_direct_audio_review_store().list_reviews(records)
-    payload = build_annotation_export_payload(records)
+    records = _decorate_audio_review_records(records)
+    payload = build_annotation_export_payload(
+        records,
+        final_results=(
+            _get_audio_cer_workflow_store().final_results()
+            if _cer_review_config() else []
+        ),
+    )
     response = make_response(json.dumps(payload, ensure_ascii=False, indent=2))
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     response.headers["Content-Disposition"] = (
@@ -2978,10 +3078,17 @@ def admin_export_annotation_data_sqlite():
     )
 
     records = collect_audio_annotation_records(get_user_state_manager())
-    records = _get_direct_audio_review_store().list_reviews(records)
+    records = _decorate_audio_review_records(records)
     handle, path = tempfile.mkstemp(suffix=".sqlite")
     os.close(handle)
-    write_annotation_sqlite(records, path)
+    write_annotation_sqlite(
+        records,
+        path,
+        final_results=(
+            _get_audio_cer_workflow_store().final_results()
+            if _cer_review_config() else []
+        ),
+    )
 
     @after_this_request
     def remove_export_file(response):
@@ -3073,6 +3180,10 @@ def admin_api_instances():
         instance["assigned_annotators"] = row.get("assigned_users", [])
         instance["assignment_target"] = row.get("target", -1)
         instance["assignment_missing"] = row.get("missing", 0)
+        if _cer_review_config():
+            workflow = _get_audio_cer_workflow_store().get(str(instance["id"]))
+            instance["cer_workflow_stage"] = workflow.get("stage")
+            instance["cer_third_annotator"] = workflow.get("third_annotator")
     result.setdefault("summary", {})["assignment_shortfall"] = coverage["total_shortfall"]
     result["summary"]["items_below_assignment_target"] = coverage["items_below_target"]
     return jsonify(result)
@@ -3242,6 +3353,9 @@ def admin_api_batch_assignment():
         target = 3
     if target < 1:
         target = 3
+    cer_workflow = bool(_cer_review_config())
+    if cer_workflow:
+        target = 2
     dry_run = bool(payload.get("dry_run", True))
     adjusted = payload.get("plan")
 
@@ -3260,6 +3374,8 @@ def admin_api_batch_assignment():
         return jsonify({
             "success": True,
             "dry_run": True,
+            "target_per_item": target,
+            "cer_workflow": cer_workflow,
             "summary": summary,
             "plan": plan,
         })
@@ -3280,6 +3396,7 @@ def admin_api_batch_assignment():
 
     # Validate capacity before applying anything.
     valid_ids = set(ism.get_instance_ids())
+    current_coverage = ism.get_assignment_coverage(usm.get_all_users()).get("items", {})
     errors = []
     for row in plan_rows:
         iid = str(row.get("item_id", ""))
@@ -3289,6 +3406,10 @@ def admin_api_batch_assignment():
             continue
         if len(suggested) > target:
             errors.append(f"录音 {iid} 分配人数超过目标 {target}")
+            continue
+        existing = set(current_coverage.get(iid, {}).get("assigned_users", []))
+        if cer_workflow and len(existing | set(suggested)) != 2:
+            errors.append(f"录音 {iid} 的 CER 首轮必须恰好分配两人")
             continue
         seen = set()
         for uid in suggested:
@@ -3337,6 +3458,20 @@ def admin_api_batch_assignment():
         except Exception as exc:
             logger.error(f"Failed to save user state for {uid}: {exc}")
 
+    workflow_rows = []
+    if cer_workflow:
+        workflow_store = _get_audio_cer_workflow_store()
+        for row in plan_rows:
+            iid = str(row.get("item_id", ""))
+            existing = set(current_coverage.get(iid, {}).get("assigned_users", []))
+            assigned = list(dict.fromkeys(
+                sorted(existing) + [str(a) for a in (row.get("suggested") or [])]
+            ))
+            if len(assigned) == 2:
+                workflow = workflow_store.register_initial_assignments(iid, assigned)
+                _get_direct_audio_review_store().sync_workflow_state(workflow)
+                workflow_rows.append({"item_id": iid, "stage": workflow["stage"]})
+
     by_annotator = defaultdict(int)
     for row in plan_rows:
         for uid in [str(a) for a in (row.get("suggested") or [])]:
@@ -3352,6 +3487,9 @@ def admin_api_batch_assignment():
             "saved_users": saved_users,
         },
         "plan": plan_rows,
+        "workflow": workflow_rows,
+        "target_per_item": target,
+        "cer_workflow": cer_workflow,
     })
 
 
@@ -5897,7 +6035,7 @@ def update_instance():
         logger.debug(f"User state saved for {username}")
 
         if _cer_review_config() and user_state.is_submitted(instance_id):
-            auto_review_result = _run_cer_auto_review(instance_id)
+            auto_review_result = _run_cer_auto_review(instance_id, username)
 
         # Emit webhook events for annotation save
         from potato.webhooks import get_webhook_emitter
@@ -6254,7 +6392,7 @@ def annotator_progress_summary():
     return jsonify(result)
 
 
-@app.route("/admin", methods=["GET"])
+@app.route("/admin", methods=["GET", "POST"])
 def admin():
     """
     Serve the admin dashboard page.
@@ -6277,17 +6415,32 @@ def admin():
     admin_overrides["_base"] = admin_language
     admin_ui_lang = resolve_ui_language(admin_overrides, UI_LANG_DEFAULTS)
 
-    # Check if admin API key is provided in session or headers
-    api_key = request.headers.get('X-API-Key') or session.get('admin_api_key')
+    # Use a native form POST for browser login. Embedded browsers may not
+    # reliably complete the previous fetch-then-navigate authentication flow.
+    submitted_key = request.form.get('apiKey', '').strip() if request.method == 'POST' else None
+    api_key = submitted_key or request.headers.get('X-API-Key') or session.get('admin_api_key')
 
     if not validate_admin_api_key(api_key):
         # Show API key entry form
-        return render_template("admin_login.html",
-                             title=config.get("annotation_task_name", "Admin Dashboard"),
-                             ui_lang=admin_ui_lang)
+        response = render_template(
+            "admin_login.html",
+            title=config.get("annotation_task_name", "Admin Dashboard"),
+            ui_lang=admin_ui_lang,
+            error_message=(
+                admin_ui_lang.get(
+                    "admin_login_invalid_key",
+                    "That API key wasn't recognized. Double-check the value in admin_api_key.txt.",
+                )
+                if request.method == 'POST'
+                else None
+            ),
+        )
+        return (response, 401) if request.method == 'POST' else response
 
     # Store API key in session for future requests
     session['admin_api_key'] = api_key
+    if request.method == 'POST':
+        return redirect(url_for('admin'))
 
     # Check if embedding visualization is available
     from potato.embedding_visualization import get_embedding_viz_manager
@@ -6308,6 +6461,7 @@ def admin():
         "automation_enabled": config.get("automation", {}).get("enabled", False),
         "curation_enabled": config.get("curation", {}).get("enabled", False),
         "arena_enabled": config.get("arena", {}).get("enabled", False),
+        "cer_review_enabled": bool(_cer_review_config()),
         "ui_lang": admin_ui_lang,
     }
 
@@ -8287,7 +8441,7 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/get_annotations", "get_annotations", get_annotations, methods=["GET"])
     app.add_url_rule("/poststudy", "poststudy", poststudy, methods=["GET", "POST"])
     app.add_url_rule("/done", "done", done, methods=["GET", "POST"])
-    app.add_url_rule("/admin", "admin", admin, methods=["GET"])
+    app.add_url_rule("/admin", "admin", admin, methods=["GET", "POST"])
     app.add_url_rule(
         "/admin/api/audio-import/preview",
         "admin_audio_import_preview",
@@ -8444,6 +8598,7 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>", "direct_audio_review_update", direct_audio_review_update, methods=["PUT"])
     app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>/complete", "direct_audio_review_complete", direct_audio_review_complete, methods=["POST"])
     app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/<annotator>/reopen", "direct_audio_review_reopen", direct_audio_review_reopen, methods=["POST"])
+    app.add_url_rule("/adjudicate/api/audio-reviews/<recording_id>/retry-third", "direct_audio_review_retry_third", direct_audio_review_retry_third, methods=["POST"])
     app.add_url_rule("/admin/api/adjudication", "admin_api_adjudication", admin_api_adjudication, methods=["GET"])
 
     # BWS scoring admin API routes
@@ -8674,6 +8829,8 @@ def _is_authorized_adjudicator(username, adj_mgr):
 
 
 _direct_audio_review_stores = {}
+_audio_cer_workflow_stores = {}
+_audio_cer_migrations_in_progress = set()
 
 
 def _get_direct_audio_review_store():
@@ -8684,10 +8841,76 @@ def _get_direct_audio_review_store():
     return _direct_audio_review_stores[output_dir]
 
 
+def _migrate_audio_cer_workflow(store) -> None:
+    """Re-evaluate every historical submission once under workflow v2."""
+    usm = get_user_state_manager()
+    submissions_by_recording = defaultdict(list)
+    for username in sorted(usm.get_user_ids()):
+        user_state = usm.get_user_state(username)
+        if user_state is None:
+            continue
+        for recording_id in sorted(user_state.get_submitted_instance_ids()):
+            try:
+                text = _workflow_submission_text(user_state, str(recording_id))
+                annotation = _workflow_annotation_payload(user_state, str(recording_id))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            submissions_by_recording[str(recording_id)].append(str(username))
+            store.note_submission(
+                str(recording_id), str(username), text, annotation, "9999"
+            )
+
+    coverage = get_item_state_manager().get_assignment_coverage(usm.get_all_users())
+    coverage_items = coverage.get("items", {})
+    recording_ids = set(submissions_by_recording) | set(store.list_states())
+    for recording_id in sorted(recording_ids):
+        workflow = store.get(recording_id)
+        if len(workflow.get("initial_annotators") or []) != 2:
+            assigned = list(coverage_items.get(recording_id, {}).get("assigned_users", []))
+            submitted = submissions_by_recording.get(recording_id, [])
+            initial = list(dict.fromkeys(submitted + sorted(assigned)))[:2]
+            if len(initial) == 2:
+                store.register_initial_assignments(recording_id, initial)
+        workflow = store.recalculate(
+            recording_id,
+            _cer_pair_threshold(),
+            _cer_consensus_threshold(),
+            history_reason="workflow_v2_full_recalculation",
+        )
+        if workflow.get("stage") == "waiting_third_assignment":
+            _assign_random_third(recording_id)
+            workflow = store.get(recording_id)
+        _get_direct_audio_review_store().sync_workflow_state(workflow)
+    store.mark_migration_complete()
+
+
+def _get_audio_cer_workflow_store():
+    from potato.audio_cer_workflow import AudioCerWorkflowStore
+    output_dir = os.path.abspath(config.get("output_annotation_dir", "annotation_output"))
+    if output_dir not in _audio_cer_workflow_stores:
+        _audio_cer_workflow_stores[output_dir] = AudioCerWorkflowStore(output_dir)
+    store = _audio_cer_workflow_stores[output_dir]
+    if (_cer_review_config() and not store.migration_complete()
+            and output_dir not in _audio_cer_migrations_in_progress):
+        _audio_cer_migrations_in_progress.add(output_dir)
+        try:
+            _migrate_audio_cer_workflow(store)
+        finally:
+            _audio_cer_migrations_in_progress.discard(output_dir)
+    return store
+
+
 def _direct_review_state_response(state):
     result = dict(state)
     result["review_status"] = result.pop("status")
     return result
+
+
+def _decorate_audio_review_records(records):
+    records = _get_direct_audio_review_store().list_reviews(records)
+    if _cer_review_config():
+        records = _get_audio_cer_workflow_store().decorate_records(records)
+    return records
 
 
 @app.route('/adjudicate/api/audio-reviews', methods=['GET'])
@@ -8697,7 +8920,7 @@ def direct_audio_review_queue():
         return error
     from potato.admin_annotation_data import collect_audio_annotation_records
     records = collect_audio_annotation_records(get_user_state_manager())
-    records = _get_direct_audio_review_store().list_reviews(records)
+    records = _decorate_audio_review_records(records)
     status = request.args.get("status")
     if status and status != "all":
         records = [row for row in records if row["review_status"] == status]
@@ -8759,6 +8982,13 @@ def direct_audio_review_update(recording_id, annotator):
     new_value = json.dumps({"segments": segments}, ensure_ascii=False, separators=(",", ":"))
     user_state.add_label_annotation(str(recording_id), target_label, new_value)
     get_user_state_manager().save_user_state(user_state)
+    if _cer_review_config():
+        _get_audio_cer_workflow_store().note_submission(
+            str(recording_id),
+            str(annotator),
+            _workflow_submission_text(user_state, str(recording_id)),
+            {"segments": segments},
+        )
     _write_readable_audio_annotation(
         annotator, str(recording_id), {"transcript_segments:::_data": new_value})
     return jsonify({"recording_id": recording_id, "annotator": annotator,
@@ -8770,10 +9000,23 @@ def direct_audio_review_complete(recording_id, annotator):
     authorized, username, error = _check_adjudicator_auth()
     if not authorized:
         return error
-    from potato.direct_audio_review import ReviewConflict
     try:
-        state = _get_direct_audio_review_store().complete(recording_id, annotator, username)
-    except ReviewConflict as exc:
+        if _cer_review_config():
+            user_state = get_user_state_manager().get_user_state(str(annotator))
+            if user_state is None:
+                return jsonify({"error": "标注员不存在"}), 404
+            workflow = _get_audio_cer_workflow_store().finalize_manual(
+                str(recording_id),
+                str(annotator),
+                _workflow_annotation_payload(user_state, str(recording_id)),
+                str(username),
+            )
+            _get_direct_audio_review_store().sync_workflow_state(workflow)
+            state = _get_direct_audio_review_store().get(recording_id, annotator)
+        else:
+            state = _get_direct_audio_review_store().complete(
+                recording_id, annotator, username)
+    except ValueError as exc:
         return jsonify({"error": str(exc)}), 409
     return jsonify(_direct_review_state_response(state))
 
@@ -8783,12 +9026,39 @@ def direct_audio_review_reopen(recording_id, annotator):
     authorized, username, error = _check_adjudicator_auth()
     if not authorized:
         return error
-    from potato.direct_audio_review import ReviewConflict
     try:
-        state = _get_direct_audio_review_store().reopen(recording_id, annotator, username)
-    except ReviewConflict as exc:
+        if _cer_review_config():
+            workflow = _get_audio_cer_workflow_store().reopen_for_manual_review(
+                str(recording_id), str(username))
+            _get_direct_audio_review_store().sync_workflow_state(workflow)
+            state = _get_direct_audio_review_store().get(recording_id, annotator)
+        else:
+            state = _get_direct_audio_review_store().reopen(
+                recording_id, annotator, username)
+    except ValueError as exc:
         return jsonify({"error": str(exc)}), 409
     return jsonify(_direct_review_state_response(state))
+
+
+@app.route('/adjudicate/api/audio-reviews/<recording_id>/retry-third', methods=['POST'])
+def direct_audio_review_retry_third(recording_id):
+    authorized, _, error = _check_adjudicator_auth()
+    if not authorized:
+        return error
+    if not _cer_review_config():
+        return jsonify({"error": "当前项目未启用 CER 工作流"}), 400
+    workflow = _get_audio_cer_workflow_store().get(str(recording_id))
+    if workflow.get("stage") != "waiting_third_assignment":
+        return jsonify({"error": "当前录音不在等待第三人状态"}), 409
+    chosen = _assign_random_third(str(recording_id))
+    workflow = _get_audio_cer_workflow_store().get(str(recording_id))
+    _get_direct_audio_review_store().sync_workflow_state(workflow)
+    return jsonify({
+        "success": bool(chosen),
+        "third_annotator": chosen,
+        "stage": workflow.get("stage"),
+        "reason": workflow.get("reason"),
+    })
 
 
 @app.route('/adjudicate', methods=['GET'])

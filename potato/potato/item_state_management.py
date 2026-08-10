@@ -811,6 +811,11 @@ class ItemStateManager:
             'threshold': float(adaptive_cfg.get('disagreement_threshold', 0.5)),
             'boost_to': int(adaptive_cfg.get('boost_to', 0)),
         }
+        cer_review = ((config.get("annotation_submission") or {}).get("cer_review") or {})
+        self.admin_managed_initial_assignment = bool(
+            cer_review.get("enabled", False)
+            and cer_review.get("initial_assignment", "admin_batch") == "admin_batch"
+        )
 
         # Minimum coverage floor; forces continued assignment even if some
         # users have not yet rated an item.
@@ -1624,6 +1629,10 @@ class ItemStateManager:
         """
         self.logger.debug(f"Assigning instances to user {getattr(user_state, 'user_id', None)} with strategy {self.assignment_strategy} and random_seed={self.random_seed}")
 
+        if self.admin_managed_initial_assignment:
+            self.logger.info("CER first-round assignment is managed by the admin batch flow")
+            return 0
+
         # Respect the runtime pause switch — freeze new assignments without
         # disturbing anything already assigned.
         if self._assignment_paused:
@@ -1655,6 +1664,16 @@ class ItemStateManager:
         items with the largest coverage deficit. Existing assignments and
         completed annotations are preserved.
         """
+        if self.admin_managed_initial_assignment:
+            coverage = self.get_assignment_coverage(user_states)
+            return {
+                "target_per_item": self.max_annotations_per_item,
+                "new_assignments": 0,
+                "total_shortfall": coverage["total_shortfall"],
+                "items_below_target": coverage["items_below_target"],
+                "assignments_by_user": {},
+                "admin_managed": True,
+            }
         if self._assignment_paused:
             return {
                 "target_per_item": self.max_annotations_per_item,

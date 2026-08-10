@@ -92,7 +92,8 @@ def collect_audio_annotation_records(user_state_manager: Any) -> List[Dict[str, 
 
 
 def build_annotation_export_payload(
-    records: Iterable[Dict[str, Any]]
+    records: Iterable[Dict[str, Any]],
+    final_results: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Build the downloadable JSON document."""
     records = list(records)
@@ -102,11 +103,13 @@ def build_annotation_export_payload(
         "annotation_count": len(records),
         "segment_count": sum(record["segment_count"] for record in records),
         "annotations": records,
+        "final_results": list(final_results or []),
     }
 
 
 def write_annotation_sqlite(
-    records: Iterable[Dict[str, Any]], path: Path
+    records: Iterable[Dict[str, Any]], path: Path,
+    final_results: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> None:
     """Write a standalone SQLite database containing annotation results."""
     with sqlite3.connect(str(path)) as connection:
@@ -123,7 +126,12 @@ def write_annotation_sqlite(
                 reviewed_at TEXT,
                 review_method TEXT,
                 cer_score REAL,
-                qc_reason TEXT
+                qc_reason TEXT,
+                workflow_stage TEXT,
+                third_annotator TEXT,
+                final_annotator TEXT,
+                final_method TEXT,
+                is_final_result INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX idx_annotations_recording
                 ON annotations(recording_id);
@@ -143,6 +151,16 @@ def write_annotation_sqlite(
             );
             CREATE INDEX idx_segments_annotation
                 ON segments(annotation_id);
+
+            CREATE TABLE final_results (
+                recording_id TEXT PRIMARY KEY,
+                annotator TEXT,
+                method TEXT,
+                finalized_at TEXT,
+                annotation_json TEXT NOT NULL,
+                comparisons_json TEXT NOT NULL,
+                scores_json TEXT NOT NULL
+            );
             """
         )
         for record in records:
@@ -151,8 +169,9 @@ def write_annotation_sqlite(
                 INSERT INTO annotations
                     (recording_id, annotator, segment_count, parse_error,
                      review_status, reviewed_by, reviewed_at, review_method,
-                     cer_score, qc_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cer_score, qc_reason, workflow_stage, third_annotator,
+                     final_annotator, final_method, is_final_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["recording_id"],
@@ -165,6 +184,11 @@ def write_annotation_sqlite(
                     record.get("review_method"),
                     record.get("cer_score"),
                     record.get("qc_reason"),
+                    record.get("workflow_stage"),
+                    record.get("third_annotator"),
+                    record.get("final_annotator"),
+                    record.get("final_method"),
+                    int(bool(record.get("is_final_result"))),
                 ),
             )
             annotation_id = cursor.lastrowid
@@ -188,3 +212,23 @@ def write_annotation_sqlite(
                     for segment in record["segments"]
                 ],
             )
+        connection.executemany(
+            """
+            INSERT INTO final_results (
+                recording_id, annotator, method, finalized_at,
+                annotation_json, comparisons_json, scores_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["recording_id"],
+                    row.get("annotator"),
+                    row.get("method"),
+                    row.get("finalized_at"),
+                    json.dumps(row.get("annotation"), ensure_ascii=False),
+                    json.dumps(row.get("comparisons", []), ensure_ascii=False),
+                    json.dumps(row.get("scores", {}), ensure_ascii=False),
+                )
+                for row in (final_results or [])
+            ],
+        )
