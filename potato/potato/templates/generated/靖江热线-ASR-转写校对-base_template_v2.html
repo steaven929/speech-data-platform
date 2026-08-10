@@ -1,4 +1,4 @@
-<!-- CONFIG_HASH: bbdfbeedd8aadba7752322785f287e0a -->
+<!-- CONFIG_HASH: 46d3bd772d5c89ead94420981c2de543 -->
 {# Default ui_lang values if not provided by context processor #}
 {% if ui_lang is not defined %}
 {% set ui_lang = {'next_button': '下一条', 'previous_button': '上一条', 'jump_prev_unannotated': '上一条未标注', 'jump_next_unannotated': '下一条未标注', 'labeled_badge': '已标注', 'not_labeled_badge': '未标注', 'submit_button': '提交', 'progress_label': '进度', 'go_button': '跳转', 'logout': '退出', 'loading': '正在加载标注界面...', 'error_heading': '错误', 'retry_button': '重试', 'adjudicate': '仲裁', 'codebook': '代码本', 'instructions_heading': '说明', 'text_to_annotate': '待标注文本：', 'video_to_annotate': '待标注视频：', 'audio_to_annotate': '待标注音频：', 'powered_by': '技术支持', 'cite_us': '引用', 'html_lang': 'zh-CN', 'html_dir': 'ltr'} %}
@@ -158,7 +158,7 @@
 
             <div class="navbar-center">
                 <div class="annotation-status-indicator" id="annotation-status">
-                    <span class="status-badge {{ annotation_status }}">
+                    <span class="status-badge {{ annotation_status }}" id="annotation-status-badge">
                         {% if annotation_status == 'labeled' %}
                             {{ ui_lang.labeled_badge }}
                         {% elif annotation_status == 'in_progress' %}
@@ -434,7 +434,7 @@
 
                     <!-- Annotation forms -->
                     <div id="annotation-forms">
-                        <!-- CONFIG_HASH: bbdfbeedd8aadba7752322785f287e0a_ea0c86abb4b0ec554e490d5543add9a8 -->
+                        <!-- CONFIG_HASH: 46d3bd772d5c89ead94420981c2de543_19d7e6721580e2b4f219f958271e4439 -->
 <!-- Generated annotation layout file -->
 <!-- This file was automatically generated based on the annotation schemes in your config -->
 <!-- You can customize this file to modify the layout of your annotation interface -->
@@ -458,7 +458,7 @@
                     <div class="zoomview-label" style="font-size: 0.85em; color: #666; margin-bottom: 4px;">局部波形 <span class="zoomview-hint">(右键拖动进行标注 · 拖到边缘可以继续滚动)</span></div>
                     <div id="waveform-transcript_segments" class="waveform-container"></div>
 
-
+                    
                 </div>
 
                 <!-- 3. Toolbar with annotation buttons -->
@@ -475,10 +475,10 @@
                         </span>
                     </div>
 
-
+                    
             <div class="playback-rate-group">
                 <span class="tool-group-label" title="调整播放速度">速度:</span>
-                <select class="playback-rate-select" title="Change audio playback speed (0.5x to 2x)">
+            <select class="playback-rate-select" title="调整音频播放速度（0.5 倍至 2 倍）">
                     <option value="0.5">0.5x</option>
                     <option value="0.75">0.75x</option>
                     <option value="1" selected>1x</option>
@@ -487,10 +487,10 @@
                     <option value="2">2x</option>
                 </select>
             </div>
-
+        
 
                     <!-- Label selector (for label/both modes) -->
-
+                    
         <div class="label-group">
             <span class="tool-group-label"
                   title="请先选择说话人，再创建音频片段">
@@ -498,26 +498,25 @@
             </span>
             <button type="button" class="label-btn" data-label="caller" data-color="#FF6B6B" title="选择“来电人”作为新片段的说话人。 快捷键：1" style="--label-color: #FF6B6B;"><span class="label-color-dot" style="background-color: #FF6B6B;"></span>来电人</button><button type="button" class="label-btn" data-label="agent" data-color="#4ECDC4" title="选择“座席”作为新片段的说话人。 快捷键：2" style="--label-color: #4ECDC4;"><span class="label-color-dot" style="background-color: #4ECDC4;"></span>座席</button>
         </div>
-
+    
 
                     <!-- Zoom controls -->
                     <div class="zoom-group">
-                        <button type="button" class="zoom-btn" data-action="zoom-in" title="Zoom in to see more detail. Keyboard shortcut: + or =">+</button>
-                        <button type="button" class="zoom-btn" data-action="zoom-out" title="Zoom out to see more of the audio. Keyboard shortcut: -">-</button>
-                        <button type="button" class="zoom-btn" data-action="zoom-fit" title="在窗口中显示完整音频。快捷键：0">适应窗口</button>
+                        <button type="button" class="zoom-btn" data-action="zoom-in" title="放大查看更多细节。快捷键：+ 或 =">+</button>
+                        <button type="button" class="zoom-btn" data-action="zoom-out" title="缩小以查看更多音频。快捷键：-">-</button>
                     </div>
 
                     <!-- Segment controls -->
                     <div class="segment-group">
-                        <button type="button" class="segment-btn" data-action="set-start" title="Mark the start of a new segment at the current playback position. Keyboard shortcut: [">[</button>
-                        <button type="button" class="segment-btn" data-action="set-end" title="Mark the end of a new segment at the current playback position. Keyboard shortcut: ]">]</button>
-                        <button type="button" class="segment-btn" data-action="create-segment" title="Create a segment from the marked start and end positions. Keyboard shortcut: Enter">新建片段</button>
-                        <button type="button" class="segment-btn delete-btn" data-action="delete-segment" title="Delete the currently selected segment. Keyboard shortcut: Delete or Backspace" disabled>删除</button>
+                        <button type="button" class="segment-btn" data-action="set-start" title="在当前播放位置标记新片段的开始时间。快捷键：[">[</button>
+                        <button type="button" class="segment-btn" data-action="set-end" title="在当前播放位置标记新片段的结束时间。快捷键：]">]</button>
+                        <button type="button" class="segment-btn" data-action="create-segment" title="根据标记的开始和结束时间创建片段。快捷键：Enter">新建片段</button>
+                        <button type="button" class="segment-btn delete-btn" data-action="delete-segment" title="删除当前选中的片段。快捷键：Delete 或 Backspace" disabled>删除</button>
                     </div>
 
                     <!-- Segment count -->
                     <div class="count-group">
-                        <span class="segment-count" title="Number of segments you have created">片段数： <span class="count-value">0</span></span>
+                        <span class="segment-count" title="已创建的片段数量">片段数： <span class="count-value">0</span></span>
                     </div>
 
                     <!-- Help toggle button -->
@@ -547,7 +546,7 @@
                                 <li><strong>[ ]</strong> - 标记片段开始/结束</li>
                                 <li><strong>Enter</strong> - 从标记创建片段</li>
                                 <li><strong>Delete</strong> - 删除选中的片段</li>
-                                <li><strong>+/-/0</strong> - 放大/缩小/适应窗口</li>
+                                <li><strong>+/-</strong> - 放大/缩小波形</li>
                                 <li><strong>← →</strong> - 跳过 5s (Shift: 30s)</li>
                             </ul>
                         </div>
@@ -764,7 +763,6 @@
                                 var action = this.dataset.action;
                                 if (action === 'zoom-in') manager.zoomIn();
                                 else if (action === 'zoom-out') manager.zoomOut();
-                                else if (action === 'zoom-fit') manager.zoomToFit();
                             });
                         });
 
@@ -800,7 +798,7 @@
             </script>
         </fieldset>
     </form>
-
+    
 
 </div>
 
@@ -821,9 +819,18 @@
             {% else %}
             <div id="prev-btn-placeholder"></div>
             {% endif %}
-            <button class="shadcn-button shadcn-button-primary" id="next-btn" onclick="navigateToNext()">
-                {{ ui_lang.next_button }}<i class="fas fa-arrow-right ms-2"></i>
-            </button>
+            <div class="potato-nav-actions">
+                {% if explicit_submission_required | default(false) %}
+                <button class="shadcn-button shadcn-button-outline" id="submit-btn"
+                        onclick="submitCurrentAnnotation()" {% if is_submitted %}disabled{% endif %}>
+                    {{ '已提交' if is_submitted else '提交' }}
+                </button>
+                {% endif %}
+                <button class="shadcn-button shadcn-button-primary" id="next-btn" onclick="navigateToNext()"
+                        {% if explicit_submission_required | default(false) and not is_submitted %}disabled{% endif %}>
+                    {{ ui_lang.next_button }}<i class="fas fa-arrow-right ms-2"></i>
+                </button>
+            </div>
         </div>
 
         {% if custom_footer_html | default('') %}
@@ -857,6 +864,8 @@
             username: {{ username | tojson }},
             url_prefix: {{ url_prefix | default('') | tojson }},
             review_mode: {{ review_mode | default({}) | tojson }},
+            explicit_submission_required: {{ 'true' if explicit_submission_required | default(false) else 'false' }},
+            is_submitted: {{ 'true' if is_submitted | default(false) else 'false' }},
             ui_config: {}
         };
 
