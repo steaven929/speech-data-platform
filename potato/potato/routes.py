@@ -3426,7 +3426,7 @@ def admin_api_batch_assignment():
             errors.append(f"录音 {iid} 分配人数超过目标 {target}")
             continue
         existing = set(current_coverage.get(iid, {}).get("assigned_users", []))
-        if cer_workflow and len(existing | set(suggested)) != 2:
+        if cer_workflow and suggested and len(existing | set(suggested)) != 2:
             errors.append(f"录音 {iid} 的 CER 首轮必须恰好分配两人")
             continue
         seen = set()

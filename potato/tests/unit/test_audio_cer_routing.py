@@ -116,6 +116,31 @@ def test_batch_confirm_rejects_partial_first_round(monkeypatch):
     assert "恰好分配两人" in response.get_json()["details"][0]
 
 
+def test_batch_confirm_skips_historical_overassigned_rows_without_new_assignments(monkeypatch):
+    manager, users = _batch_context(monkeypatch)
+    manager.add_items({"legacy": {"id": "legacy", "text": "old audio"}})
+    legacy = manager.get_item("legacy")
+    for username in ("a", "b", "c"):
+        users.get_user_state(username).assign_instance(legacy)
+
+    with routes.app.test_request_context(json={
+        "item_ids": ["legacy", "rec"],
+        "annotator_ids": ["a", "b", "c"],
+        "dry_run": False,
+        "plan": [
+            {"item_id": "legacy", "suggested": []},
+            {"item_id": "rec", "suggested": ["a", "b"]},
+        ],
+    }):
+        response = routes.admin_api_batch_assignment.__wrapped__()
+
+    data = response.get_json()
+    assert data["success"] is True
+    assert data["summary"]["new_assignments"] == 2
+    assert "rec" in users.get_user_state("a").get_assigned_instance_ids()
+    assert "rec" in users.get_user_state("b").get_assigned_instance_ids()
+
+
 @pytest.mark.parametrize("final_annotator", ["a", "b", "c"])
 @pytest.mark.parametrize("final_method", ["pair_cer", "three_way_medoid", "manual"])
 def test_completed_review_api_groups_three_results_by_recording(
