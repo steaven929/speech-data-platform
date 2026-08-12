@@ -8978,6 +8978,56 @@ def _group_completed_audio_reviews(records):
     return result
 
 
+def _group_manual_audio_reviews(records):
+    """Return one editable row per recording for CER manual-review work."""
+    grouped = defaultdict(list)
+    passthrough = []
+    for record in records:
+        if record.get("workflow_stage") != "needs_manual_review":
+            passthrough.append(record)
+            continue
+        grouped[str(record.get("recording_id", ""))].append(record)
+
+    result = list(passthrough)
+    for recording_id in sorted(grouped):
+        rows = sorted(
+            grouped[recording_id], key=lambda row: str(row.get("annotator", ""))
+        )
+        representative = rows[0]
+        candidate = representative.get("review_candidate")
+        if not candidate:
+            scores = representative.get("workflow_scores") or {}
+            if scores:
+                candidate = min(
+                    scores,
+                    key=lambda annotator: (
+                        float(scores[annotator]),
+                        str(annotator),
+                    ),
+                )
+        primary = next(
+            (row for row in rows if str(row.get("annotator")) == str(candidate)),
+            rows[0],
+        )
+        primary = dict(primary)
+        primary["original_results"] = [
+            row for row in rows if row.get("annotator") != primary.get("annotator")
+        ]
+        primary["comparisons"] = representative.get("workflow_comparisons") or []
+        primary["scores"] = representative.get("workflow_scores") or {}
+        primary["selection_reason"] = representative.get("selection_reason")
+        primary["tie_breaker"] = representative.get("tie_breaker")
+        result.append(primary)
+    return sorted(
+        result,
+        key=lambda row: (
+            str(row.get("pushed_at") or row.get("submitted_at") or ""),
+            str(row.get("recording_id") or ""),
+            str(row.get("annotator") or ""),
+        ),
+    )
+
+
 @app.route('/adjudicate/api/audio-reviews', methods=['GET'])
 def direct_audio_review_queue():
     authorized, _, error = _check_adjudicator_auth()
@@ -8987,8 +9037,15 @@ def direct_audio_review_queue():
     records = collect_audio_annotation_records(get_user_state_manager())
     records = _decorate_audio_review_records(records)
     status = request.args.get("status")
+    if status == "in_progress" and _cer_review_config():
+        records = [
+            row for row in records
+            if row.get("workflow_stage") == "needs_manual_review"
+        ]
     if status and status != "all":
         records = [row for row in records if row["review_status"] == status]
+    if status == "in_progress" and _cer_review_config():
+        records = _group_manual_audio_reviews(records)
     grouped = bool(status == "completed" and _cer_review_config())
     recordings = _group_completed_audio_reviews(records) if grouped else []
     return jsonify({

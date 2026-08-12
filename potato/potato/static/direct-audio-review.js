@@ -47,6 +47,8 @@
   const formatPercent = (value) => Number.isFinite(value)
     ? `${(value * 100).toFixed(2)}%` : "—";
 
+  const formatTime = (value) => value ? new Date(value).toLocaleString() : "未记录";
+
   const methodText = (method) => ({
     pair_cer: "系统双人 CER 自动通过",
     three_way_medoid: "系统三人自动选择",
@@ -80,6 +82,7 @@
       }
       return `<button class="direct-review-item" data-index="${index}">
           <strong>${escapeHtml(item.recording_id)}</strong>
+          <span>推送时间：${escapeHtml(formatTime(item.pushed_at || item.submitted_at))}</span>
           <span>标注员：${escapeHtml(item.annotator)}</span>
           <span>${item.segment_count} 个片段 · ${statusText(item.review_status)}</span>
         </button>`;
@@ -128,21 +131,29 @@
 
   function renderAlternatives() {
     const container = document.getElementById("direct-review-alternatives");
-    if (!selectedGroup || !(selectedGroup.original_results || []).length) {
+    const group = selectedGroup || selected;
+    if (!group || !(group.original_results || []).length) {
       container.innerHTML = "";
       return;
     }
-    const originalResults = selectedGroup.original_results;
+    const originalResults = group.original_results;
     container.innerHTML = `<details class="direct-review-alternatives">
       <summary>查看另外 ${originalResults.length} 份原始标注（仅供参考）</summary>
       <div class="direct-review-alternative-buttons">
-        ${selectedGroup.final_result ? `<button type="button" data-final="true" class="${viewingOriginal ? "" : "active"}">最终结果 · ${escapeHtml(selectedGroup.final_annotator)}</button>` : ""}
+        ${group.final_result ? `<button type="button" data-final="true" class="${viewingOriginal ? "" : "active"}">最终结果 · ${escapeHtml(group.final_annotator)}</button>` : ""}
+        ${!group.final_result ? `<button type="button" data-primary="true" class="${viewingOriginal ? "" : "active"}">审核候选 · ${escapeHtml(group.annotator)}</button>` : ""}
         ${originalResults.map((row, index) => `<button type="button" data-original-index="${index}" class="${viewingOriginal && selected && selected.annotator === row.annotator ? "active" : ""}">原始标注 · ${escapeHtml(row.annotator)}</button>`).join("")}
       </div>
     </details>`;
     const finalButton = container.querySelector("[data-final]");
     if (finalButton) finalButton.addEventListener("click", () => {
-      selected = selectedGroup.final_result;
+      selected = group.final_result;
+      viewingOriginal = false;
+      renderEditor();
+    });
+    const primaryButton = container.querySelector("[data-primary]");
+    if (primaryButton) primaryButton.addEventListener("click", () => {
+      selected = group;
       viewingOriginal = false;
       renderEditor();
     });
@@ -179,13 +190,15 @@
       : (selected.reviewed_by ? ` · 最近审核人：${selected.reviewed_by}` : "");
     const workflowText = selected.workflow_stage
       ? ` · ${workflowStatusText(selected.workflow_stage)}` : "";
+    const pushedText = selected.pushed_at || selected.submitted_at
+      ? ` · 推送时间：${formatTime(selected.pushed_at || selected.submitted_at)}` : "";
     const resultBadge = selectedGroup
       ? (finalView
         ? '<span class="direct-review-final-badge">最终结果</span>'
         : '<span class="direct-review-reference-badge">原始标注，仅供参考</span>')
       : "";
     document.getElementById("direct-review-status").innerHTML =
-      `${resultBadge}状态：${escapeHtml(statusText(selected.review_status))}${escapeHtml(workflowText)}${escapeHtml(reviewerText)}`;
+      `${resultBadge}状态：${escapeHtml(statusText(selected.review_status))}${escapeHtml(workflowText)}${escapeHtml(reviewerText)}${escapeHtml(pushedText)}`;
     document.getElementById("direct-review-segments").innerHTML = `
       <table class="direct-review-table"><thead><tr>
         <th>开始时间</th><th>结束时间</th><th>说话人</th><th>转写文本</th><th>方言</th>

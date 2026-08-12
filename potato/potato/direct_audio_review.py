@@ -78,6 +78,7 @@ class DirectAudioReviewStore:
                 "review_status": state["status"],
                 "assigned_to": state.get("assigned_to"),
                 "assigned_at": state.get("assigned_at"),
+                "pushed_at": state.get("pushed_at") or record.get("submitted_at"),
                 "reviewed_by": state.get("reviewed_by"),
                 "reviewed_at": state.get("reviewed_at"),
                 "review_method": state.get("review_method"),
@@ -238,5 +239,8 @@ class DirectAudioReviewStore:
                 state["is_final_result"] = (
                     workflow.get("final_annotator") == str(annotator)
                 )
+                submission = (workflow.get("submissions") or {}).get(str(annotator)) or {}
+                if submission.get("submitted_at"):
+                    state["pushed_at"] = submission.get("submitted_at")
                 self._state[key] = state
             self._save()

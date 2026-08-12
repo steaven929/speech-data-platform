@@ -131,6 +131,7 @@ class AudioCerWorkflowStore:
             "comparisons": [],
             "scores": {},
             "final_annotator": None,
+            "review_candidate": None,
             "final_method": None,
             "final_annotation": None,
             "finalized_at": None,
@@ -232,11 +233,13 @@ class AudioCerWorkflowStore:
         """Recalculate the current stage. Assignment of C is handled by the caller."""
         with self._lock:
             previous = self.get(recording_id)
+            if previous.get("stage") == "manual_finalized":
+                return previous
             state = copy.deepcopy(previous)
             submissions = sorted(state.get("submissions", {}).values(), key=_submission_sort_key)
             state.update({
                 "comparisons": [], "scores": {}, "final_annotator": None,
-                "final_method": None, "final_annotation": None,
+                "review_candidate": None, "final_method": None, "final_annotation": None,
                 "finalized_at": None, "selection_reason": None,
                 "tie_breaker": None, "reason": None,
             })
@@ -308,11 +311,6 @@ class AudioCerWorkflowStore:
                         "passed": score <= consensus_threshold,
                     })
             state["comparisons"] = comparisons
-            if min(distances.values()) > consensus_threshold:
-                state["stage"] = "needs_manual_review"
-                state["reason"] = "三组 CER 均高于 8%，需要管理员介入"
-                return self._put(state, previous, history_reason)
-
             scores = {}
             for row in submissions:
                 user = row["annotator"]
@@ -346,9 +344,20 @@ class AudioCerWorkflowStore:
                     f"标注员 {winner['annotator']} 的总差异最小，因此系统选择 "
                     f"{winner['annotator']} 作为最终结果"
                 )
+            if min(distances.values()) >= consensus_threshold:
+                state.update({
+                    "stage": "needs_manual_review",
+                    "review_candidate": winner["annotator"],
+                    "reason": "三组 CER 均高于 8%，需要管理员介入",
+                    "selection_reason": selection_reason,
+                    "tie_breaker": tie_breaker,
+                })
+                return self._put(state, previous, history_reason)
+
             state.update({
                 "stage": "auto_finalized",
                 "final_annotator": winner["annotator"],
+                "review_candidate": winner["annotator"],
                 "final_method": "three_way_medoid",
                 "final_annotation": copy.deepcopy(winner.get("annotation")),
                 "finalized_at": utc_now(),
@@ -412,6 +421,7 @@ class AudioCerWorkflowStore:
                 "workflow_scores": workflow.get("scores", {}),
                 "third_annotator": workflow.get("third_annotator"),
                 "final_annotator": workflow.get("final_annotator"),
+                "review_candidate": workflow.get("review_candidate"),
                 "final_method": workflow.get("final_method"),
                 "finalized_at": workflow.get("finalized_at"),
                 "selection_reason": selection_reason,
