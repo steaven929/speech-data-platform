@@ -159,6 +159,19 @@ def test_all_three_over_eight_percent_require_manual_review(tmp_path):
     assert reopened["stage"] == "needs_manual_review"
 
 
+def test_manual_finalize_can_happen_before_cer_result(tmp_path):
+    store = AudioCerWorkflowStore(tmp_path)
+    store.register_initial_assignments("rec", ["a", "b"])
+    _submit(store, "a", "管理员先审核", "2026-01-01T00:00:00Z")
+
+    finalized = store.finalize_manual("rec", "a", _payload("管理员先审核"), "admin")
+
+    assert finalized["stage"] == "manual_finalized"
+    assert finalized["final_annotator"] == "a"
+    assert finalized["final_method"] == "manual"
+    assert finalized["reviewed_by"] == "admin"
+
+
 def test_blank_transcription_never_auto_passes(tmp_path):
     store = AudioCerWorkflowStore(tmp_path)
     store.register_initial_assignments("rec", ["a", "b"])

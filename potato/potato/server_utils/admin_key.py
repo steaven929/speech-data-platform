@@ -100,5 +100,10 @@ def validate_admin_api_key(provided_key, config):
         logger.warning("Could not obtain admin API key")
         return False
 
-    # Use constant-time comparison to prevent timing attacks
-    return hmac.compare_digest(str(provided_key or ""), expected_key)
+    # Use constant-time comparison to prevent timing attacks. Compare bytes so
+    # accidental non-ASCII input in the login form is treated as an invalid key
+    # instead of raising TypeError and returning a 500 page.
+    return hmac.compare_digest(
+        str(provided_key or "").encode("utf-8"),
+        str(expected_key or "").encode("utf-8"),
+    )

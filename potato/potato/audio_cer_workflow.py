@@ -362,8 +362,6 @@ class AudioCerWorkflowStore:
     ) -> Dict[str, Any]:
         with self._lock:
             previous = self.get(recording_id)
-            if previous.get("stage") != "needs_manual_review":
-                raise ValueError("当前录音尚未进入人工审核阶段")
             if str(annotator) not in previous.get("submissions", {}):
                 raise ValueError("所选标注员没有提交该录音")
             state = copy.deepcopy(previous)

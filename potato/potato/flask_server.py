@@ -891,6 +891,24 @@ def load_user_data(config: dict):
     # batch_assignment.auto_assign_annotators is enabled.
     ism.rebuild_auto_batch_pins_from_users(user_id_to_instance_ids)
 
+    # Registered password users may not have logged in yet, so they may not have
+    # an annotation state directory. The admin task-assignment UI is driven by
+    # UserStateManager users; initialize registered annotators here so they are
+    # available for assignment immediately after account creation.
+    try:
+        authenticator = UserAuthenticator.get_instance()
+        registered_users = authenticator.get_all_users()
+    except Exception as e:
+        registered_users = []
+        logger.warning("Could not load registered users for assignment list: %s", e)
+
+    adjudicator_users = set((config.get("adjudication") or {}).get("adjudicator_users") or [])
+    for username in registered_users:
+        if username in adjudicator_users:
+            continue
+        if not usm.has_user(username):
+            usm.add_user(username)
+
     logger.info("Loaded user data for %d users" % len(usm.get_user_ids()))
 
 def load_training_data(config: dict) -> None:

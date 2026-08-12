@@ -198,8 +198,7 @@
           <td><input class="seg-dialect" type="checkbox" ${segment.is_dialect ? "checked" : ""}></td>
         </tr>`).join("")}</tbody></table>`;
     renderAlternatives();
-    const editable = selected.review_status === "in_progress" &&
-      (!selected.workflow_stage || selected.workflow_stage === "needs_manual_review");
+    const editable = selected.review_status === "in_progress";
     document.querySelectorAll("#direct-review-segments input, #direct-review-segments select, #direct-review-segments textarea")
       .forEach((field) => field.disabled = !editable);
     document.getElementById("direct-review-save").hidden = !editable;

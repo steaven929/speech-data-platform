@@ -734,6 +734,9 @@ class UserAuthenticator:
     def is_valid_password(self, username, password):
         return self.authenticate(username, password)
 
+    def get_all_users(self) -> List[str]:
+        return self.auth_backend.get_all_users()
+
     def get_clerk_frontend_api(self) -> str:
         if self.auth_method == "clerk" and isinstance(self.auth_backend, ClerkAuthBackend):
             return self.auth_backend.frontend_api

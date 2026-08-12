@@ -221,7 +221,7 @@
     <!-- Adjudication JS -->
     {% if adj_config.direct_edit_audio_annotations %}
     <script>window.DIRECT_REVIEW_ADMIN = {{ username | tojson }};</script>
-<script src="{{ url_for('static', filename='direct-audio-review.js') }}?v=4"></script>
+<script src="{{ url_for('static', filename='direct-audio-review.js') }}?v=5"></script>
     {% else %}
     <script src="{{ url_for('static', filename='adjudication-forms.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='adjudication.js') }}?v=4"></script>
