@@ -3710,9 +3710,11 @@ def admin_api_set_user_instances(username):
     if not user_state:
         return jsonify({"error": f"User '{username}' not found"}), 404
 
-    # Don't allow setting below current annotation count (can't un-annotate)
+    # Allow setting to 0 to stop future assignments, even if the user already
+    # has completed annotations. Other positive caps still cannot be below the
+    # current annotation count.
     current_count = user_state.get_annotation_count()
-    if max_instances >= 0 and max_instances < current_count:
+    if max_instances > 0 and max_instances < current_count:
         max_instances = current_count
 
     user_state.set_max_assignments(max_instances)

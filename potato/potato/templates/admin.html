@@ -837,7 +837,7 @@
                     <td>
                       <div style="display:flex;align-items:center;gap:4px;">
                         <button onclick="adjustUserInstances('${annotator.user_id}', -5)" style="padding:2px 6px;cursor:pointer;">-</button>
-                        <span id="max-inst-${annotator.user_id}">${annotator.max_assignments < 0 ? '∞' : annotator.max_assignments}</span>
+                        <span id="max-inst-${annotator.user_id}">${annotator.max_assignments < 0 ? 0 : annotator.max_assignments}</span>
                         <button onclick="adjustUserInstances('${annotator.user_id}', 5)" style="padding:2px 6px;cursor:pointer;">+</button>
                       </div>
                     </td>
@@ -857,8 +857,13 @@
           // First get current value
           const span = document.getElementById(`max-inst-${userId}`);
           let current = span.textContent === '∞' ? -1 : parseInt(span.textContent);
-          let newVal = current < 0 ? delta : current + delta;
-          if (newVal < 0) newVal = -1; // Switch to unlimited
+          let newVal;
+          if (delta < 0 && (current < 0 || current <= 5)) {
+            newVal = 0;
+          } else {
+            newVal = current < 0 ? delta : current + delta;
+            if (newVal < 0) newVal = 0;
+          }
 
           const response = await makeApiRequest(`/admin/api/user/${encodeURIComponent(userId)}/set_instances`, {
             method: 'POST',
@@ -867,7 +872,7 @@
           });
 
           if (response.success) {
-            span.textContent = response.max_instances < 0 ? '∞' : response.max_instances;
+            span.textContent = response.max_instances < 0 ? 0 : response.max_instances;
             const coverage = response.coverage || {};
             showSuccess(`配额已更新，本次新增分配 ${coverage.new_assignments || 0} 条，仍缺 ${coverage.total_shortfall || 0} 个标注名额。`);
             loadInstances();
