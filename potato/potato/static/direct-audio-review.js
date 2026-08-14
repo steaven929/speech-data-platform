@@ -225,7 +225,7 @@
     awaiting_initial_assignment: "等待首轮分配",
     awaiting_pair_submissions: "首轮标注中",
     waiting_third_assignment: "等待第三人",
-    awaiting_third_submission: "第三人标注中",
+    awaiting_third_submission: "第二轮标注中",
     auto_finalized: "系统已自动仲裁",
     needs_manual_review: "待人工审核",
     manual_finalized: "管理员已定稿",
