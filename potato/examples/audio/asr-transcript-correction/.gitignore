@@ -4,4 +4,6 @@ media/
 annotation_output/
 waveform_cache/
 project.sqlite
+project.sqlite-*
+*.log
 admin_api_key.txt
