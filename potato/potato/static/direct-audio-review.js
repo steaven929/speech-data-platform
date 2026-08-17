@@ -6,6 +6,7 @@
   let selectedGroup = null;
   let viewingOriginal = false;
   let items = [];
+  let activeSegmentStop = null;
 
   const escapeHtml = (value) => String(value ?? "")
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
@@ -22,7 +23,12 @@
   }
 
   async function loadQueue() {
-    const data = await request(`/adjudicate/api/audio-reviews?status=${statusFilter}`);
+    const params = new URLSearchParams({status: statusFilter});
+    const methodSelect = document.getElementById("direct-review-final-method");
+    if (statusFilter === "completed" && methodSelect && methodSelect.value) {
+      params.set("final_method", methodSelect.value);
+    }
+    const data = await request(`/adjudicate/api/audio-reviews?${params.toString()}`);
     const previousRecording = selected && selected.recording_id;
     const previousAnnotator = selected && selected.annotator;
     items = statusFilter === "completed" && data.grouped
@@ -52,12 +58,47 @@
   const methodText = (method) => ({
     pair_cer: "系统双人 CER 自动通过",
     three_way_medoid: "系统三人自动选择",
-    manual: "管理员人工选择",
+    manual: "管理员人工定稿",
   }[method] || "已定稿");
 
   function resetEditor() {
+    clearSegmentPlayback();
     document.getElementById("direct-review-editor").hidden = true;
     document.getElementById("direct-review-empty").hidden = false;
+  }
+
+  function clearSegmentPlayback() {
+    const audio = document.getElementById("direct-review-audio");
+    if (audio && activeSegmentStop) {
+      audio.removeEventListener("timeupdate", activeSegmentStop);
+    }
+    activeSegmentStop = null;
+    document.querySelectorAll(".direct-review-segment-play.active")
+      .forEach((button) => button.classList.remove("active"));
+  }
+
+  async function playSegment(start, end, button) {
+    const audio = document.getElementById("direct-review-audio");
+    if (!audio || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      alert("片段时间无效，无法播放。");
+      return;
+    }
+    clearSegmentPlayback();
+    if (button) button.classList.add("active");
+    activeSegmentStop = () => {
+      if (audio.currentTime >= end) {
+        audio.pause();
+        clearSegmentPlayback();
+      }
+    };
+    audio.addEventListener("timeupdate", activeSegmentStop);
+    audio.currentTime = start;
+    try {
+      await audio.play();
+    } catch (error) {
+      clearSegmentPlayback();
+      alert("音频无法播放，请先确认浏览器允许播放录音。");
+    }
   }
 
   function renderList() {
@@ -168,6 +209,7 @@
 
   function renderEditor() {
     if (!selected && !selectedGroup) return;
+    clearSegmentPlayback();
     document.getElementById("direct-review-empty").hidden = true;
     document.getElementById("direct-review-editor").hidden = false;
     renderDecision();
@@ -201,9 +243,10 @@
       `${resultBadge}状态：${escapeHtml(statusText(selected.review_status))}${escapeHtml(workflowText)}${escapeHtml(reviewerText)}${escapeHtml(pushedText)}`;
     document.getElementById("direct-review-segments").innerHTML = `
       <table class="direct-review-table"><thead><tr>
-        <th>开始时间</th><th>结束时间</th><th>说话人</th><th>转写文本</th><th>方言</th>
+        <th>播放</th><th>开始时间</th><th>结束时间</th><th>说话人</th><th>转写文本</th><th>方言</th>
       </tr></thead><tbody>${(selected.segments || []).map((segment) => `
         <tr data-id="${escapeHtml(segment.id)}">
+          <td><button type="button" class="direct-review-segment-play" title="播放本片段" aria-label="播放本片段"><i class="fas fa-play" aria-hidden="true"></i></button></td>
           <td><input class="seg-start" type="number" min="0" step="0.001" value="${segment.start_time}"></td>
           <td><input class="seg-end" type="number" min="0" step="0.001" value="${segment.end_time}"></td>
           <td><select class="seg-label"><option value="agent" ${segment.speaker === "agent" ? "selected" : ""}>座席</option><option value="caller" ${segment.speaker === "caller" ? "selected" : ""}>来电人</option></select></td>
@@ -219,6 +262,16 @@
     document.getElementById("direct-review-reopen").hidden = selected.review_status !== "completed" || Boolean(selectedGroup && !selectedGroup.final_result);
     document.getElementById("direct-review-retry-third").hidden =
       selected.workflow_stage !== "waiting_third_assignment";
+    document.querySelectorAll(".direct-review-segment-play").forEach((button) => {
+      button.addEventListener("click", () => {
+        const row = button.closest("tr");
+        playSegment(
+          Number(row.querySelector(".seg-start").value),
+          Number(row.querySelector(".seg-end").value),
+          button
+        );
+      });
+    });
   }
 
   const workflowStatusText = (stage) => ({
@@ -256,9 +309,20 @@
     button.addEventListener("click", () => {
       document.querySelectorAll(".direct-review-filters button").forEach((b) => b.classList.remove("active"));
       button.classList.add("active"); statusFilter = button.dataset.status; selected = null;
-      selectedGroup = null; viewingOriginal = false; resetEditor(); loadQueue();
+      selectedGroup = null; viewingOriginal = false;
+      const methodFilter = document.getElementById("direct-review-method-filter");
+      if (methodFilter) methodFilter.hidden = statusFilter !== "completed";
+      resetEditor(); loadQueue();
     });
   });
+  const methodSelect = document.getElementById("direct-review-final-method");
+  if (methodSelect) {
+    methodSelect.addEventListener("change", () => {
+      if (statusFilter !== "completed") return;
+      selected = null; selectedGroup = null; viewingOriginal = false;
+      resetEditor(); loadQueue();
+    });
+  }
   document.getElementById("direct-review-save").addEventListener("click", () => action(
     `/adjudicate/api/audio-reviews/${encodeURIComponent(selected.recording_id)}/${encodeURIComponent(selected.annotator)}`,
     {method: "PUT", body: JSON.stringify({segments: editedSegments()})}));

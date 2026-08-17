@@ -9030,6 +9030,23 @@ def _group_manual_audio_reviews(records):
     )
 
 
+def _filter_completed_audio_reviews_by_final_method(
+    records, recordings, grouped, final_method
+):
+    """Filter completed direct-audio reviews by finalization method."""
+    if final_method not in {"pair_cer", "three_way_medoid", "manual"}:
+        return records, recordings
+    if grouped:
+        return records, [
+            row for row in recordings
+            if row.get("final_method") == final_method
+        ]
+    return [
+        row for row in records
+        if row.get("review_method") == final_method
+    ], recordings
+
+
 @app.route('/adjudicate/api/audio-reviews', methods=['GET'])
 def direct_audio_review_queue():
     authorized, _, error = _check_adjudicator_auth()
@@ -9039,6 +9056,10 @@ def direct_audio_review_queue():
     records = collect_audio_annotation_records(get_user_state_manager())
     records = _decorate_audio_review_records(records)
     status = request.args.get("status")
+    final_method = request.args.get("final_method")
+    allowed_final_methods = {"pair_cer", "three_way_medoid", "manual"}
+    if final_method not in allowed_final_methods:
+        final_method = None
     if status == "in_progress" and _cer_review_config():
         records = [
             row for row in records
@@ -9050,6 +9071,10 @@ def direct_audio_review_queue():
         records = _group_manual_audio_reviews(records)
     grouped = bool(status == "completed" and _cer_review_config())
     recordings = _group_completed_audio_reviews(records) if grouped else []
+    if status == "completed" and final_method:
+        records, recordings = _filter_completed_audio_reviews_by_final_method(
+            records, recordings, grouped, final_method
+        )
     return jsonify({
         "items": records,
         "total": len(records),

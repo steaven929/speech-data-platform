@@ -46,6 +46,15 @@
                 <button data-status="in_progress" class="active">审核中</button>
                 <button data-status="completed">已完成</button>
             </div>
+            <label class="direct-review-method-filter" id="direct-review-method-filter" hidden>
+                <span>定稿方式</span>
+                <select id="direct-review-final-method">
+                    <option value="">全部</option>
+                    <option value="pair_cer">双人自动通过</option>
+                    <option value="three_way_medoid">三人自动选择</option>
+                    <option value="manual">人工定稿</option>
+                </select>
+            </label>
             <div id="direct-review-list">正在加载……</div>
         </aside>
         <main class="direct-review-main">
@@ -221,7 +230,7 @@
     <!-- Adjudication JS -->
     {% if adj_config.direct_edit_audio_annotations %}
     <script>window.DIRECT_REVIEW_ADMIN = {{ username | tojson }};</script>
-<script src="{{ url_for('static', filename='direct-audio-review.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='direct-audio-review.js') }}?v=6"></script>
     {% else %}
     <script src="{{ url_for('static', filename='adjudication-forms.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='adjudication.js') }}?v=4"></script>

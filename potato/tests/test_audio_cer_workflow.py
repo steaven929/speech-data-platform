@@ -1,5 +1,9 @@
 from potato.audio_cer_workflow import AudioCerWorkflowStore
-from potato.routes import _group_manual_audio_reviews
+from potato.routes import (
+    _filter_completed_audio_reviews_by_final_method,
+    _group_completed_audio_reviews,
+    _group_manual_audio_reviews,
+)
 
 
 def _submit(store, recording_id, annotator, text, submitted_at):
@@ -141,3 +145,54 @@ def test_adjudication_in_progress_only_contains_manual_review_stage():
     grouped = _group_manual_audio_reviews(filtered)
 
     assert [row["recording_id"] for row in grouped] == ["manual"]
+
+
+def test_completed_audio_review_filter_applies_to_grouped_final_method():
+    records = [
+        {
+            "recording_id": "pair", "annotator": "A",
+            "review_status": "completed", "final_annotator": "A",
+            "final_method": "pair_cer", "is_final_result": True,
+            "workflow_comparisons": [],
+        },
+        {
+            "recording_id": "pair", "annotator": "B",
+            "review_status": "completed", "final_annotator": "A",
+            "final_method": "pair_cer", "is_final_result": False,
+            "workflow_comparisons": [],
+        },
+        {
+            "recording_id": "three", "annotator": "A",
+            "review_status": "completed", "final_annotator": "B",
+            "final_method": "three_way_medoid", "is_final_result": False,
+            "workflow_comparisons": [],
+        },
+        {
+            "recording_id": "three", "annotator": "B",
+            "review_status": "completed", "final_annotator": "B",
+            "final_method": "three_way_medoid", "is_final_result": True,
+            "workflow_comparisons": [],
+        },
+        {
+            "recording_id": "manual", "annotator": "A",
+            "review_status": "completed", "final_annotator": "A",
+            "final_method": "manual", "is_final_result": True,
+            "workflow_comparisons": [],
+        },
+    ]
+
+    recordings = _group_completed_audio_reviews(records)
+    unchanged_records, filtered = _filter_completed_audio_reviews_by_final_method(
+        records, recordings, True, "three_way_medoid"
+    )
+    _, all_recordings = _filter_completed_audio_reviews_by_final_method(
+        records, recordings, True, ""
+    )
+
+    assert unchanged_records is records
+    assert [row["recording_id"] for row in filtered] == ["three"]
+    assert sorted(row["recording_id"] for row in all_recordings) == [
+        "manual",
+        "pair",
+        "three",
+    ]
