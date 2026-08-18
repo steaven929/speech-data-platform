@@ -37,9 +37,10 @@ except ImportError:
 try:
     import umap
     _UMAP_AVAILABLE = True
-except ImportError:
+except Exception:  # optional dependency: umap/numba may fail to initialize (e.g. numba cache)
     _UMAP_AVAILABLE = False
     umap = None
+    logger.warning("UMAP unavailable; embedding visualization disabled", exc_info=True)
 
 # Singleton
 _EMBEDDING_VIZ_MANAGER: Optional['EmbeddingVisualizationManager'] = None

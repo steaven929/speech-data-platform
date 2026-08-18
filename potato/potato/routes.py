@@ -41,6 +41,7 @@ import threading
 import random
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 from werkzeug.utils import secure_filename
 
 # Import from the main flask_server.py module
@@ -3078,8 +3079,8 @@ def admin_export_annotation_data_json():
     )
     response = make_response(json.dumps(payload, ensure_ascii=False, indent=2))
     response.headers["Content-Type"] = "application/json; charset=utf-8"
-    response.headers["Content-Disposition"] = (
-        'attachment; filename="audio-annotations.json"'
+    response.headers["Content-Disposition"] = _admin_content_disposition(
+        f"{_admin_export_timestamp_prefix()}audio-annotations.json"
     )
     return response
 
@@ -3120,7 +3121,7 @@ def admin_export_annotation_data_sqlite():
         path,
         mimetype="application/vnd.sqlite3",
         as_attachment=True,
-        download_name="audio-annotations.sqlite",
+        download_name=f"{_admin_export_timestamp_prefix()}audio-annotations.sqlite",
     )
 
 
@@ -3179,6 +3180,7 @@ def admin_api_instances():
     sort_order = request.args.get('sort_order', 'desc')
     filter_completion = request.args.get('filter_completion')
     filter_category = request.args.get('filter_category')
+    filter_batch = request.args.get('filter_batch')
 
     result = admin_dashboard.get_instances_data(
         page=page,
@@ -3186,7 +3188,8 @@ def admin_api_instances():
         sort_by=sort_by,
         sort_order=sort_order,
         filter_completion=filter_completion,
-        filter_category=filter_category
+        filter_category=filter_category,
+        filter_batch=filter_batch
     )
     if isinstance(result, tuple):
         return jsonify(result[0]), result[1]
@@ -3518,6 +3521,33 @@ _AUDIO_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _AUDIO_IMPORT_TOKEN_TTL_SECONDS = 30 * 60
 
 
+def _admin_export_timestamp_prefix():
+    now = datetime.datetime.now()
+    return f"{now.month}月{now.day}号{now.hour:02d}:{now.minute:02d}_"
+
+
+def _admin_content_disposition(filename):
+    ascii_filename = filename.replace(":", "-")
+    ascii_filename = "".join(
+        char if char.isascii() and (char.isalnum() or char in "._-") else "_"
+        for char in ascii_filename
+    )
+    return (
+        f'attachment; filename="{ascii_filename}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+
+
+def _admin_import_batch_meta(source_filename=""):
+    now = datetime.datetime.now()
+    return {
+        "id": now.strftime("%Y%m%d-%H%M%S"),
+        "label": now.strftime("%Y-%m-%d %H:%M 导入"),
+        "imported_at": now.isoformat(timespec="seconds"),
+        "source": source_filename,
+    }
+
+
 def _audio_import_task_path(path_value):
     path = Path(path_value)
     if path.is_absolute():
@@ -3551,16 +3581,23 @@ def _cleanup_expired_audio_imports():
 @app.route("/admin/api/audio-import/preview", methods=["POST"])
 @require_permission(Permission.VIEW_ADMIN_DASHBOARD)
 def admin_audio_import_preview():
-    """Stage and validate one legacy XLS plus matching WAV uploads."""
+    """Stage and validate one legacy XLS plus matching WAV uploads, or one JSON import."""
     from potato import admin_audio_import
 
     _cleanup_expired_audio_imports()
     excel = request.files.get("excel")
+    json_file = request.files.get("json")
     audio_files = request.files.getlist("audio")
-    if excel is None or not excel.filename:
-        return jsonify({"error": "请选择原始 .xls 文件"}), 400
-    if Path(excel.filename).suffix.lower() != ".xls":
+    has_excel = excel is not None and bool(excel.filename)
+    has_json = json_file is not None and bool(json_file.filename)
+    if has_excel and has_json:
+        return jsonify({"error": "Excel 和 JSON 请二选一导入"}), 400
+    if not has_excel and not has_json:
+        return jsonify({"error": "请选择原始 .xls 文件或 JSON 文件"}), 400
+    if has_excel and Path(excel.filename).suffix.lower() != ".xls":
         return jsonify({"error": "Excel 必须是原始 .xls 格式"}), 400
+    if has_json and Path(json_file.filename).suffix.lower() != ".json":
+        return jsonify({"error": "JSON 文件扩展名必须是 .json"}), 400
     if not audio_files:
         return jsonify({"error": "请至少选择一条 WAV 音频"}), 400
     if len(audio_files) > _AUDIO_IMPORT_MAX_FILES:
@@ -3570,40 +3607,69 @@ def admin_audio_import_preview():
 
     temp_dir = Path(tempfile.mkdtemp(prefix="potato-audio-import-"))
     try:
-        excel_path = temp_dir / "transcript.xls"
-        excel.save(excel_path)
         saved_audio = []
         seen_names = set()
-        for uploaded in audio_files:
-            filename = secure_filename(uploaded.filename or "")
-            if not filename or Path(filename).suffix.lower() != ".wav":
-                raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
-            if filename in seen_names:
-                continue  # 同一批重复选择的音频直接跳过
-            seen_names.add(filename)
-            destination = temp_dir / filename
-            uploaded.save(destination)
-            saved_audio.append(destination)
-
-        rows = admin_audio_import.parse_legacy_xls(excel_path)
-        rows = admin_audio_import.apply_category_override(
-            rows, request.form.get("category", "")
-        )
         item_manager = get_item_state_manager()
-        preview = admin_audio_import.preview_rows(
-            rows,
-            saved_audio,
-            set(item_manager.get_instance_ids()),
-            _audio_import_task_path(config.get("media_directory", "media")),
-        )
+        batch_source = ""
+        if has_json:
+            json_path = temp_dir / secure_filename(json_file.filename or "import.json")
+            json_file.save(json_path)
+            batch_source = json_file.filename or "import.json"
+            for uploaded in audio_files:
+                filename = secure_filename(uploaded.filename or "")
+                if not filename or Path(filename).suffix.lower() != ".wav":
+                    raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
+                if filename in seen_names:
+                    continue
+                seen_names.add(filename)
+                destination = temp_dir / filename
+                uploaded.save(destination)
+                saved_audio.append(destination)
+            items = admin_audio_import.parse_import_json(
+                json_path,
+                request.form.get("category", ""),
+            )
+            preview = admin_audio_import.preview_json_items(
+                items,
+                set(item_manager.get_instance_ids()),
+                saved_audio,
+                _audio_import_task_path(config.get("media_directory", "media")),
+            )
+        else:
+            excel_path = temp_dir / "transcript.xls"
+            excel.save(excel_path)
+            batch_source = excel.filename or "transcript.xls"
+            for uploaded in audio_files:
+                filename = secure_filename(uploaded.filename or "")
+                if not filename or Path(filename).suffix.lower() != ".wav":
+                    raise ValueError(f"仅支持 WAV 音频：{uploaded.filename or '未命名文件'}")
+                if filename in seen_names:
+                    continue  # 同一批重复选择的音频直接跳过
+                seen_names.add(filename)
+                destination = temp_dir / filename
+                uploaded.save(destination)
+                saved_audio.append(destination)
+
+            rows = admin_audio_import.parse_legacy_xls(excel_path)
+            rows = admin_audio_import.apply_category_override(
+                rows, request.form.get("category", "")
+            )
+            preview = admin_audio_import.preview_rows(
+                rows,
+                saved_audio,
+                set(item_manager.get_instance_ids()),
+                _audio_import_task_path(config.get("media_directory", "media")),
+            )
+        batch_meta = _admin_import_batch_meta(batch_source)
         token = uuid.uuid4().hex
         with _audio_import_batches_lock:
             _audio_import_batches[token] = {
                 "created_at": time.time(),
                 "temp_dir": temp_dir,
                 "preview": preview,
+                "batch_meta": batch_meta,
             }
-        return jsonify({"token": token, "preview": preview.to_dict()})
+        return jsonify({"token": token, "preview": preview.to_dict(), "batch": batch_meta})
     except (ValueError, RuntimeError) as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({"error": str(exc)}), 400
@@ -3631,11 +3697,13 @@ def admin_audio_import_confirm():
             _audio_import_data_file(),
             _audio_import_task_path(config.get("media_directory", "media")),
             get_item_state_manager(),
+            batch.get("batch_meta"),
         )
         return jsonify({
             "success": True,
             "imported_ids": [item["id"] for item in imported],
             "imported_count": len(imported),
+            "batch": batch.get("batch_meta"),
         })
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

@@ -166,6 +166,29 @@ def test_preview_all_duplicates_blocks_confirm(tmp_path):
     assert preview.can_confirm is False
 
 
+def test_json_preview_builds_visible_segments_from_transcript_and_audio(tmp_path):
+    from potato.admin_audio_import import _item_from_json_record, preview_json_items
+
+    audio = tmp_path / "10001.wav"
+    write_silent_wav(audio, seconds=6)
+    item = _item_from_json_record({
+        "id": "10001",
+        "audio_url": "/media/10001.wav",
+        "transcript": "客服您好。\n\n来电人你好。",
+    })
+
+    preview = preview_json_items([item], set(), [audio], tmp_path / "media")
+
+    assert preview.can_confirm is True
+    assert [entry["id"] for entry in preview.ready_items] == ["10001"]
+    assert [segment["text"] for segment in preview.ready_items[0]["segments"]] == [
+        "客服您好。",
+        "来电人你好。",
+    ]
+    assert preview.ready_items[0]["segments"][0]["end_time"] > preview.ready_items[0]["segments"][0]["start_time"]
+    assert preview.ready_items[0]["segments"][-1]["end_time"] == 6
+
+
 def test_commit_preview_appends_json_copies_audio_and_registers_runtime_item(tmp_path):
     from potato.admin_audio_import import TranscriptRow, commit_preview, preview_rows
 

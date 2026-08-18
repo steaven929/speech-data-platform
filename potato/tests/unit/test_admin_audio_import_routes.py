@@ -62,6 +62,33 @@ def test_audio_import_preview_returns_token_and_validation_summary(
     assert payload["token"]
 
 
+def test_audio_import_preview_accepts_unified_manifest_field(
+    admin_client, monkeypatch
+):
+    from potato.admin_audio_import import TranscriptRow
+    import potato.admin_audio_import as audio_import
+
+    monkeypatch.setattr(
+        audio_import,
+        "parse_legacy_xls",
+        lambda path: [TranscriptRow("10001", "10001.wav", "客服。\n\n来电人。")],
+    )
+    response = admin_client.post(
+        "/admin/api/audio-import/preview",
+        headers={"X-API-Key": "audio-import-key"},
+        data={
+            "manifest": (io.BytesIO(b"legacy-xls"), "transcript.xls"),
+            "audio": (wav_bytes(), "10001.wav"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["preview"]["ready"] == ["10001"]
+    assert payload["preview"]["can_confirm"] is True
+
+
 def test_audio_import_confirm_persists_and_consumes_token(admin_client, monkeypatch):
     from potato.admin_audio_import import TranscriptRow
     import potato.admin_audio_import as audio_import

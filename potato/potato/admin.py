@@ -108,6 +108,8 @@ class InstanceData:
     text: str
     displayed_text: str
     category: str
+    import_batch_id: str
+    import_batch_label: str
     annotation_count: int
     completion_percentage: float
     most_frequent_label: Optional[str]
@@ -402,7 +404,8 @@ class AdminDashboard:
     def get_instances_data(self, page: int = 1, page_size: int = 25,
                           sort_by: str = "annotation_count", sort_order: str = "desc",
                           filter_completion: Optional[str] = None,
-                          filter_category: Optional[str] = None) -> Dict[str, Any]:
+                          filter_category: Optional[str] = None,
+                          filter_batch: Optional[str] = None) -> Dict[str, Any]:
         """
         Get paginated instances data with sorting and filtering.
 
@@ -430,7 +433,10 @@ class AdminDashboard:
                 item_id = item.get_id()
                 annotators = ism.get_annotators_for_item(item_id)
                 annotation_count = len(annotators) if annotators else 0
-                category = (item.get_data() or {}).get("category", "未分类") or "未分类"
+                item_data = item.get_data() or {}
+                category = item_data.get("category", "未分类") or "未分类"
+                import_batch_id = str(item_data.get("import_batch_id") or "")
+                import_batch_label = str(item_data.get("import_batch_label") or import_batch_id or "")
 
                 # Calculate completion percentage
                 max_annotations = config.get("max_annotations_per_item", -1)
@@ -450,6 +456,8 @@ class AdminDashboard:
                     text=item.get_text(),
                     displayed_text=item.get_displayed_text(),
                     category=category,
+                    import_batch_id=import_batch_id,
+                    import_batch_label=import_batch_label,
                     annotation_count=annotation_count,
                     completion_percentage=completion_percentage,
                     most_frequent_label=most_frequent_label,
@@ -467,6 +475,8 @@ class AdminDashboard:
                 instances_data = [i for i in instances_data if i.completion_percentage < 100]
             if filter_category:
                 instances_data = [i for i in instances_data if i.category == filter_category]
+            if filter_batch:
+                instances_data = [i for i in instances_data if i.import_batch_id == filter_batch]
 
             # Apply sorting
             reverse = sort_order.lower() == "desc"
@@ -493,6 +503,8 @@ class AdminDashboard:
                 serialized_instances.append({
                     "id": instance.id,
                     "category": instance.category,
+                    "import_batch_id": instance.import_batch_id,
+                    "import_batch_label": instance.import_batch_label,
                     "text": instance.text[:100] + "..." if len(instance.text) > 100 else instance.text,
                     "displayed_text": instance.displayed_text[:100] + "..." if len(instance.displayed_text) > 100 else instance.displayed_text,
                     "annotation_count": instance.annotation_count,
@@ -508,10 +520,24 @@ class AdminDashboard:
                 (item.get_data() or {}).get("category", "未分类") or "未分类"
                 for item in items
             })
+            import_batches = []
+            seen_batches = set()
+            for item in items:
+                item_data = item.get_data() or {}
+                batch_id = str(item_data.get("import_batch_id") or "")
+                if not batch_id or batch_id in seen_batches:
+                    continue
+                seen_batches.add(batch_id)
+                import_batches.append({
+                    "id": batch_id,
+                    "label": str(item_data.get("import_batch_label") or batch_id),
+                })
+            import_batches.sort(key=lambda batch: batch["id"], reverse=True)
 
             return {
                 "instances": serialized_instances,
                 "categories": categories,
+                "import_batches": import_batches,
                 "pagination": {
                     "page": page,
                     "page_size": page_size,
