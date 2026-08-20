@@ -13,7 +13,7 @@ Potato 是一个基于 Python 和 Flask 的开源数据标注平台。项目通�
 
 ## 环境要求
 
-- Python 3.8 或更高版本
+- Python 3.9 或更高版本（推荐 3.11）
 - Git
 - pip 和 Python 虚拟环境模块 `venv`
 - 建议至少预留 512 MB 内存

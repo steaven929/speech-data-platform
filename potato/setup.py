@@ -103,7 +103,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Text Processing :: Linguistic",
     ],
-    python_requires=">=3.7",
+    python_requires=">=3.9",
     install_requires=_CORE_DEPS,
     extras_require={
         "ai": _AI_DEPS,
