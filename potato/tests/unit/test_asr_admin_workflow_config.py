@@ -51,8 +51,8 @@ def test_preconfigured_users_use_salted_hashes():
     assert {record["username"] for record in records} == {
         "admin",
         "user2",
-        "tester_a",
-        "tester_b",
+        "annotator_a",
+        "annotator_b",
     }
     assert all(
         record["password"] != "123" and "$" in record["password"]

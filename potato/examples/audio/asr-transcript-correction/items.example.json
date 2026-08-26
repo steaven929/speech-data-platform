@@ -1,0 +1,52 @@
+[
+  {
+    "id": "demo_audio_001",
+    "sample_id": "demo_audio_001",
+    "audio_url": "/media/demo_audio_001.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0.0,
+        "end_time": 2.4,
+        "text": "您好，请问有什么可以帮您？",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 2.4,
+        "end_time": 5.8,
+        "text": "我想咨询一下业务办理流程。",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "category": "示例分类",
+    "source_transcript_file": "items.example.json"
+  },
+  {
+    "id": "demo_audio_002",
+    "sample_id": "demo_audio_002",
+    "audio_url": "/media/demo_audio_002.wav",
+    "segments": [
+      {
+        "id": "seg_0001",
+        "start_time": 0.0,
+        "end_time": 3.1,
+        "text": "系统已经收到您的反馈。",
+        "label": "agent",
+        "speaker_role": "role_1"
+      },
+      {
+        "id": "seg_0002",
+        "start_time": 3.1,
+        "end_time": 7.0,
+        "text": "好的，请问后续在哪里查看处理进度？",
+        "label": "caller",
+        "speaker_role": "role_0"
+      }
+    ],
+    "category": "示例分类",
+    "source_transcript_file": "items.example.json"
+  }
+]

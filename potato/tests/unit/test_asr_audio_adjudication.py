@@ -70,7 +70,7 @@ def test_audio_adoption_is_saved_as_complete_segments(tmp_path):
                     {"segments": user2_segments}, ensure_ascii=False
                 )
             },
-            "tester_a": {
+            "annotator_a": {
                 "transcript_segments": json.dumps(
                     {"segments": tester_segments}, ensure_ascii=False
                 )

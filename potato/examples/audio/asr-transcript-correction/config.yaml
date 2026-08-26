@@ -1,4 +1,4 @@
-annotation_task_name: "靖江热线 ASR 转写校对"
+annotation_task_name: "面向语音AI模型训练的数据预处理平台"
 admin_ui_language: "zh"
 
 annotation_submission:
@@ -80,9 +80,9 @@ user_config:
   allow_all_users: false
   users:
     - admin
-    - user2
-    - tester_a
-    - tester_b
+    - annotator_a
+    - annotator_b
+    - annotator_c
 
 assignment_strategy: least_annotated
 num_annotators_per_item: 2
@@ -94,9 +94,9 @@ rbac:
   enabled: true
   user_role_assignments:
     admin: admin
-    user2: annotator
-    tester_a: annotator
-    tester_b: annotator
+    annotator_a: annotator
+    annotator_b: annotator
+    annotator_c: annotator
 
 adjudication:
   enabled: true

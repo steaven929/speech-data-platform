@@ -103,7 +103,7 @@ def test_admin_claims_edits_completes_and_reopens_original_annotation(review_ser
 def test_admin_edits_and_completes_pending_annotation_without_claim(review_server):
     server, _ = review_server
     recording_id = "20260720151906185"
-    seed_annotation(server.base_url, "tester_a", recording_id)
+    seed_annotation(server.base_url, "annotator_a", recording_id)
     admin = login(server.base_url, "admin")
 
     edited = {"segments": [{
@@ -111,7 +111,7 @@ def test_admin_edits_and_completes_pending_annotation_without_claim(review_serve
         "label": "caller", "text": "待审核直接修改", "annotations": {"dialect": False},
     }]}
     update = admin.put(
-        f"{server.base_url}/adjudicate/api/audio-reviews/{recording_id}/tester_a",
+        f"{server.base_url}/adjudicate/api/audio-reviews/{recording_id}/annotator_a",
         json=edited,
     )
     assert update.status_code == 200, update.text
@@ -119,10 +119,10 @@ def test_admin_edits_and_completes_pending_annotation_without_claim(review_serve
 
     queue = admin.get(f"{server.base_url}/adjudicate/api/audio-reviews").json()["items"]
     saved = next(item for item in queue
-                 if item["recording_id"] == recording_id and item["annotator"] == "tester_a")
+                 if item["recording_id"] == recording_id and item["annotator"] == "annotator_a")
     assert saved["segments"][0]["text"] == "待审核直接修改"
     complete = admin.post(
-        f"{server.base_url}/adjudicate/api/audio-reviews/{recording_id}/tester_a/complete"
+        f"{server.base_url}/adjudicate/api/audio-reviews/{recording_id}/annotator_a/complete"
     )
     assert complete.status_code == 200
     assert complete.json()["review_status"] == "completed"
@@ -132,7 +132,7 @@ def test_admin_edits_and_completes_pending_annotation_without_claim(review_serve
 
 def test_annotator_cannot_access_direct_review_api(review_server):
     server, _ = review_server
-    worker = login(server.base_url, "tester_a")
+    worker = login(server.base_url, "annotator_a")
     assert worker.get(f"{server.base_url}/adjudicate/api/audio-reviews").status_code == 403
 
 

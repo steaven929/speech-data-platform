@@ -43,7 +43,7 @@ def login(base_url, username, password="123"):
 
 
 def test_all_preconfigured_accounts_can_log_in(server):
-    for username in ("admin", "user2", "tester_a", "tester_b"):
+    for username in ("admin", "user2", "annotator_a", "annotator_b"):
         session = login(server.base_url, username)
         assert session.get(f"{server.base_url}/annotate").status_code == 200
 
@@ -66,7 +66,7 @@ def test_annotator_cannot_open_admin(server):
 
 
 def test_admin_can_open_admin_and_set_annotator_quota(server):
-    worker = login(server.base_url, "tester_a")
+    worker = login(server.base_url, "annotator_a")
     worker.get(f"{server.base_url}/annotate")
 
     admin = login(server.base_url, "admin")
@@ -75,7 +75,7 @@ def test_admin_can_open_admin_and_set_annotator_quota(server):
     assert "admin-login" not in dashboard.text
 
     response = admin.post(
-        f"{server.base_url}/admin/api/user/tester_a/set_instances",
+        f"{server.base_url}/admin/api/user/annotator_a/set_instances",
         json={"max_instances": 2},
     )
     assert response.status_code == 200
@@ -125,7 +125,7 @@ def test_annotator_cannot_set_quota(server):
         worker.get(f"{server.base_url}/admin/api/annotators").status_code == 403
     )
     response = worker.post(
-        f"{server.base_url}/admin/api/user/tester_a/set_instances",
+        f"{server.base_url}/admin/api/user/annotator_a/set_instances",
         json={"max_instances": 5},
     )
     assert response.status_code == 403
@@ -201,7 +201,7 @@ def test_admin_can_view_and_download_saved_audio_annotations(server, tmp_path):
 
 
 def test_annotator_cannot_view_or_export_annotation_data(server):
-    worker = login(server.base_url, "tester_a")
+    worker = login(server.base_url, "annotator_a")
     assert (
         worker.get(f"{server.base_url}/admin/api/annotation-data").status_code
         == 403

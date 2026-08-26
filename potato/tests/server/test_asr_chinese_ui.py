@@ -74,7 +74,7 @@ def test_admin_page_uses_chinese_dashboard_labels(asr_server):
 
     assert response.status_code == 200
     assert page_soup(response.text).select_one(".admin-container") is not None
-    assert_element_text(response.text, ".admin-header h1", "📊 靖江热线 ASR 转写校对 - 管理后台")
+    assert_element_text(response.text, ".admin-header h1", "📊 面向语音AI模型训练的数据预处理平台 - 管理后台")
     assert_element_text(response.text, ".admin-tab[data-tab='overview']", "概览")
     assert_element_text(response.text, ".admin-tab[data-tab='annotators']", "标注员")
     assert_element_text(response.text, ".admin-tab[data-tab='config']", "配置")

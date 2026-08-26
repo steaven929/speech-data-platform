@@ -1,230 +1,115 @@
-# Potato 标注平台
+# 面向语音AI模型训练的数据预处理平台
 
-Potato 是一个基于 Python 和 Flask 的开源数据标注平台。项目通过 YAML 文件配置标注任务，无需修改业务代码即可创建文本分类、跨度标注、多媒体标注、问卷和模型输出评测等任务。
+这是一个面向语音 AI 模型训练场景的数据预处理平台。项目支持管理员批量导入音频和初始转写，按批次给标注员分发任务，收集多人标注结果，并在管理后台完成审核、修订和导出。
 
-## 主要功能
+这个仓库是脱敏后的公开展示版本，适合作为语音数据标注、任务分发、人工审核和结果导出流程的工程实践案例。
 
-- 使用 YAML 配置数据源、标注界面、用户和任务分配策略
-- 支持文本、图片、音频、视频和文档等数据
-- 支持单选、多选、量表、文本输入、跨度标注等多种标注方式
-- 支持多用户协作、任务分配、质量控制和结果导出
-- 提供可直接运行的示例项目
-- 可通过浏览器访问，适合本地使用或部署到服务器
+## 核心功能
 
-## 环境要求
+- 批量导入音频：支持 Excel 或 JSON 转写清单与 WAV 音频一并导入。
+- 导入批次管理：每批数据自动生成批次标识，便于后续筛选和分配。
+- 标注员账号体系：管理员和标注员分角色登录。
+- 任务分发：管理员按批次、分类和配额将录音分配给不同标注员。
+- 音频标注：标注员可在波形和片段列表中校正时间段、角色和转写文本。
+- 多人交叉标注：支持每条录音分配给至少 N 个标注员。
+- 审核工作台：管理员可查看标注结果、直接修改标注员原始结果并保留快照。
+- 结果导出：支持导出 JSON 和 SQLite，导出文件名自动带时间戳。
+- 本地化界面：当前主要使用流程已中文化。
 
-- Python 3.9 或更高版本（推荐 3.11）
-- Git
-- pip 和 Python 虚拟环境模块 `venv`
-- 建议至少预留 512 MB 内存
+## 技术栈
 
-## 快速开始
+- Python 3.9+
+- Flask
+- YAML 配置驱动
+- JSON/SQLite 数据存储
+- 原生 HTML/CSS/JavaScript
 
-如果只需要使用 Potato，可通过 PyPI 安装：
+## 快速启动
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install potato-annotation
-potato start /path/to/config.yaml -p 8000
-```
-
-以上命令适用于 Linux 和 macOS。Windows 用户请使用下一节中的 PowerShell 命令。通过 PyPI 安装时不包含仓库中的 `examples/` 目录，需要使用自己的配置文件。
-
-## 在 Windows 上安装
-
-以下命令适用于 Windows PowerShell。请先安装 [Python](https://www.python.org/downloads/windows/) 和 [Git](https://git-scm.com/download/win)，并在安装时将它们加入 `PATH`。
-
-```powershell
-git clone https://github.com/steaven929/potato.git
-Set-Location potato
-
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e .
-
-potato start examples/classification/single-choice/config.yaml -p 8000
-```
-
-如果 PowerShell 阻止虚拟环境激活脚本，可仅对当前窗口临时放行后重试：
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-启动成功后，在浏览器中访问 [http://localhost:8000](http://localhost:8000)。按 `Ctrl+C` 可停止服务。
-
-## 在 Linux 上安装
-
-以下步骤适用于 Ubuntu 和 Debian。其他 Linux 发行版请使用对应的软件包管理器安装 Python、pip、venv 和 Git。
+进入项目目录：
 
 ```bash
-sudo apt update
-sudo apt install -y git python3 python3-pip python3-venv
-
-git clone https://github.com/steaven929/potato.git
 cd potato
-
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-
-potato start examples/classification/single-choice/config.yaml -p 8000
 ```
 
-服务默认可在 [http://localhost:8000](http://localhost:8000) 访问。如果配置文件中指定了其他端口，或通过 `-p` 传入了其他端口，请使用相应端口。
-
-也可以不使用命令行入口，直接从源码启动：
+安装依赖：
 
 ```bash
-python potato/flask_server.py start examples/classification/single-choice/config.yaml -p 8000
+python -m pip install -e .
+python -m pip install xlrd pytest
 ```
 
-## 在 Windows 中通过 WSL 安装
+准备示例数据：
 
-WSL 可以在 Windows 中提供完整的 Linux 环境。以下步骤使用默认的 Ubuntu 发行版。
+```bash
+mkdir -p examples/audio/asr-transcript-correction/data
+cp examples/audio/asr-transcript-correction/items.example.json \
+   examples/audio/asr-transcript-correction/data/items.json
+cp examples/audio/asr-transcript-correction/users.example.jsonl \
+   examples/audio/asr-transcript-correction/users.jsonl
+```
 
-1. 以管理员身份打开 PowerShell。首次安装 WSL 时运行：
+启动服务：
 
-   ```powershell
-   wsl --install
-   ```
+```bash
+PYTHONPATH=. python -m potato.flask_server start \
+  examples/audio/asr-transcript-correction/config.yaml \
+  -p 8013
+```
 
-   如果 WSL 已经存在但还没有 Ubuntu，请改用：
-
-   ```powershell
-   wsl --list --online
-   wsl --install -d Ubuntu
-   ```
-
-   如果下载长时间停在 `0.0%`，可以绕过 Microsoft Store 下载：
-
-   ```powershell
-   wsl --install -d Ubuntu --web-download
-   ```
-
-2. 按系统提示重启电脑。从开始菜单打开 Ubuntu，等待初始化完成，然后创建 Linux 用户名和密码。输入密码时终端不会显示字符，这是正常现象。
-
-3. 在 PowerShell 中确认 Ubuntu 正在使用 WSL 2：
-
-   ```powershell
-   wsl --list --verbose
-   ```
-
-4. 打开 Ubuntu 终端，安装并启动 Potato：
-
-   ```bash
-   sudo apt update
-   sudo apt install -y git python3 python3-pip python3-venv
-
-   git clone https://github.com/steaven929/potato.git
-   cd potato
-
-   python3 -m venv .venv
-   source .venv/bin/activate
-   python -m pip install --upgrade pip
-   python -m pip install -e .
-
-   potato start examples/classification/single-choice/config.yaml -p 8000
-   ```
-
-5. 在 Windows 浏览器中访问 [http://localhost:8000](http://localhost:8000)。
-
-建议将项目克隆到 WSL 的 Linux 文件系统（例如 `~/potato`），不要长期从 `/mnt/c/` 中运行，以获得更好的文件读写性能。
-
-WSL 的安装和排障命令可参考 [Microsoft WSL 安装文档](https://learn.microsoft.com/zh-cn/windows/wsl/install)。
-
-> **仓库访问说明：** 如果 `steaven929/potato` 是私有仓库，使用 HTTPS 克隆前需要拥有相应的 GitHub 访问权限，并使用个人访问令牌或其他受支持的身份验证方式。不要把访问令牌写入 README 或提交到仓库。
-
-## 配置自己的标注任务
-
-一个最小任务通常包含配置文件、数据文件和输出目录：
+访问：
 
 ```text
-my-task/
-├── config.yaml
-├── data/
-│   └── items.json
-└── annotation_output/
+http://127.0.0.1:8013/
 ```
 
-配置文件负责指定任务目录、数据字段、标注方式、用户策略和输出位置。建议先复制 [`examples/`](examples/) 中与需求最接近的示例，再根据数据修改配置。完整入门说明见 [`docs/quick-start.md`](docs/quick-start.md)。
+示例账号：
 
-运行自己的任务：
+| 角色 | 用户名 | 密码 |
+| --- | --- | --- |
+| 管理员 | admin | 123 |
+| 标注员 | annotator_a | 123 |
+| 标注员 | annotator_b | 123 |
+| 标注员 | annotator_c | 123 |
 
-```bash
-potato start my-task/config.yaml -p 8000
+## 典型流程
+
+1. 管理员登录后台。
+2. 在“批量导入”中选择 Excel 或 JSON 转写清单，并上传对应 WAV 音频。
+3. 在“实例”页面按导入批次筛选录音。
+4. 设置每条录音需要的标注人数和标注员配额。
+5. 批量分配任务。
+6. 标注员登录并完成音频转写校对。
+7. 管理员在审核页面查看、修改、通过结果。
+8. 在管理后台导出 JSON 或 SQLite。
+
+## 示例 JSON 导入格式
+
+```json
+[
+  {
+    "id": "demo_audio_001",
+    "audio_url": "/media/demo_audio_001.wav",
+    "transcript": "您好，请问有什么可以帮您？\n\n我想咨询一下业务办理流程。",
+    "category": "示例分类"
+  }
+]
 ```
 
-标注结果会写入配置项 `output_annotation_dir` 指定的目录。请定期备份任务配置、原始数据和标注结果。
+导入时需要同时上传与 `audio_url` 或 `id` 对应的 WAV 文件。
 
-## 可选功能
+## 隐私与数据说明
 
-源码安装时可按需启用额外依赖：
+公开版本不包含真实录音、真实转写文本、真实标注结果、数据库、密钥或本地账号配置。以下内容默认不应提交：
 
-```bash
-# AI 服务
-python -m pip install -e ".[ai]"
+- `media/`
+- `annotation_output/`
+- `waveform_cache/`
+- `project.sqlite*`
+- `admin_api_key.txt`
+- `data/items.json`
+- 真实 Excel / JSON / 音频文件
 
-# PDF、Word、Markdown 和电子表格支持
-python -m pip install -e ".[formats]"
+## 开源合规
 
-# 安装全部可选功能
-python -m pip install -e ".[all]"
-```
-
-只有在任务需要时才安装可选功能。使用外部模型或 OAuth 服务时，请通过环境变量或本地配置提供密钥，不要把密钥提交到 Git 仓库。
-
-## 开发与测试
-
-```bash
-python -m pip install -r requirements-test.txt
-python -m pytest tests/unit -v
-```
-
-完整测试可能需要浏览器、模型或其他可选依赖。提交代码前，请至少运行与改动范围相关的测试。
-
-## 常见问题
-
-### 找不到 `potato` 命令
-
-确认虚拟环境已经激活，并重新执行安装命令。
-
-Linux 或 macOS：
-
-```bash
-source .venv/bin/activate
-python -m pip install -e .
-```
-
-Windows PowerShell：
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-```
-
-### 端口已被占用
-
-通过 `-p` 使用其他端口：
-
-```bash
-potato start examples/classification/single-choice/config.yaml -p 8080
-```
-
-### 外部设备无法访问服务
-
-本地示例主要用于开发和验证。对局域网或公网提供服务时，还需要正确配置监听地址、防火墙、反向代理、HTTPS 和身份验证。不要在没有访问控制的情况下公开标注数据。
-
-## 许可证
-
-本项目采用 [GNU General Public License v3.0 or later](LICENSE) 许可证。使用、修改或分发本项目时，请遵守许可证条款。
-
-## 参考项目
-
-Potato 最初由 [davidjurgens/potato](https://github.com/davidjurgens/potato) 开源维护。有关功能设计、论文和社区资源，可访问 [Potato 官方文档](https://www.potatoannotator.com/docs)。
-
+本项目基于 GPLv3 开源标注框架二次开发，保留原许可证并按 GPLv3 协议发布。更多说明见 [NOTICE.md](NOTICE.md)。

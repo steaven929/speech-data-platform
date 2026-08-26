@@ -54,7 +54,7 @@ def test_final_export_preserves_reviewed_audio_segments(tmp_path, monkeypatch):
             "recording_2": FakeItem({"id": "recording_2", "audio": "two.wav"}),
         },
         instance_annotators={
-            "recording_1": {"user2", "tester_a"},
+            "recording_1": {"user2", "annotator_a"},
             "recording_2": {"user2"},
         },
     )

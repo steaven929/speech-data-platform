@@ -80,7 +80,7 @@ def _json_audio_basename(item: dict) -> str:
     return _audio_basename(str(audio_value))
 
 
-_TRANSCRIPT_COLUMN_NAMES = ("阿里转译", "预转写", "转写")
+_TRANSCRIPT_COLUMN_NAMES = ("ASR转写", "预转写", "转写")
 _DEFAULT_CATEGORY = "未分类"
 
 
@@ -100,7 +100,7 @@ def parse_legacy_sheet(sheet) -> list[TranscriptRow]:
         None,
     )
     if transcript_column is None:
-        raise ValueError("Excel 缺少转写列（阿里转译 / 预转写 / 转写）")
+        raise ValueError("Excel 缺少转写列（ASR转写 / 预转写 / 转写）")
     category_column = headers.get("类别")
 
     rows = []

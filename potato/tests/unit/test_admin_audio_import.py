@@ -38,7 +38,7 @@ def test_parse_legacy_sheet_reads_original_columns_and_audio_basename():
     from potato.admin_audio_import import parse_legacy_sheet
 
     sheet = FakeSheet([
-        ["", "录音地址", "阿里转译"],
+        ["", "录音地址", "ASR转写"],
         [1, "http://internal/voice/10001.wav", "客服您好。\n\n来电人你好。"],
     ])
 
@@ -48,6 +48,7 @@ def test_parse_legacy_sheet_reads_original_columns_and_audio_basename():
     assert rows[0].item_id == "10001"
     assert rows[0].audio_filename == "10001.wav"
     assert rows[0].transcript == "客服您好。\n\n来电人你好。"
+
 
 
 def test_build_audio_item_splits_paragraphs_and_allocates_continuous_time(tmp_path):

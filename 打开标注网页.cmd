@@ -39,7 +39,7 @@ if not exist "%PYTHON_EXE%" (
 
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 '%WEB_URL%'; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1"
 if errorlevel 1 (
-    start "Potato annotation server" /min /D "%PROJECT_DIR%" "%PYTHON_EXE%" -m potato.flask_server start "%CONFIG_FILE%" -p 8012
+    start "SpeechLabelFlow server" /min /D "%PROJECT_DIR%" "%PYTHON_EXE%" -m potato.flask_server start "%CONFIG_FILE%" -p 8012
 )
 
 for /L %%I in (1,1,60) do (
