@@ -110,6 +110,8 @@ http://127.0.0.1:8013/
 - `data/items.json`
 - 真实 Excel / JSON / 音频文件
 
-## 开源合规
+## 许可与致谢
 
-本项目基于 GPLv3 开源标注框架二次开发，保留原许可证并按 GPLv3 协议发布。更多说明见 [NOTICE.md](NOTICE.md)。
+本项目遵循 GPL-3.0-or-later 许可证发布，完整条款见 `potato/LICENSE`。
+
+项目开发过程中参考并复用了开源社区中的部分通用数据标注能力，相关第三方版权、许可和致谢信息见 [NOTICE.md](NOTICE.md)。
