@@ -1,4 +1,4 @@
-# Potato: The Portable Annotation Tool
+# The Portable Annotation Tool
 
 [![Docs & Guides](https://img.shields.io/badge/docs%20%26%20guides-potatoannotator.com-brightgreen)](https://www.potatoannotator.com/docs)
 [![Technical Reference](https://img.shields.io/badge/reference-readthedocs-blue)](https://potatoannotator.readthedocs.io/)
